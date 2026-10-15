@@ -84,11 +84,18 @@ def test(fn):
 
 # ---------------------------------------------------------------- 跑那一侧
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -96,12 +103,14 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
 def _run_elf(exe: Path) -> tuple[int, str]:
     r = subprocess.run(
-        ["wsl", "-e", "bash", "-lc",
+        [*_WSLCMD, "bash", "-lc",
          f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n \";$?\""],
         capture_output=True, text=True, timeout=300, shell=False)
     out, _, rc = r.stdout.rpartition(";")

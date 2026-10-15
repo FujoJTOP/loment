@@ -47,11 +47,18 @@ def test(fn):
 
 # ---------------------------------------------------------------- 跑起来的脚手架
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True, text=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True, text=True,
                               timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -59,6 +66,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -79,7 +88,7 @@ def _run_raw(exe: Path, td: Path) -> bytes:
     out = td / "stdout.bin"
     s = _wsl_path(exe)
     r = subprocess.run(
-        ["wsl", "-e", "bash", "-lc", f"chmod +x {s} && {s} > {_wsl_path(out)}; echo -n $?"],
+        [*_WSLCMD, "bash", "-lc", f"chmod +x {s} && {s} > {_wsl_path(out)}; echo -n $?"],
         capture_output=True, text=True, timeout=300, shell=False)
     assert r.stdout.strip() == "0", f"退出码 {r.stdout!r} / stderr {r.stderr[:300]}"
     return out.read_bytes()

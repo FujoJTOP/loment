@@ -43,11 +43,18 @@ def _clang() -> str | None:
     return fallback if Path(fallback).exists() else None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -55,6 +62,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -102,7 +111,7 @@ def _run(elf: Path, td: Path, entry: Path, name: str) -> tuple[str, str]:
               f"chmod +x {_T}{name}.bin && "
               f"cd {_wsl_path(ROOT)} && {_T}{name}.bin {entry.relative_to(ROOT).as_posix()} "
               f"> {_wsl_path(got)} 2> {_wsl_path(err)}; echo -n $?")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
     out = got.read_text(encoding="utf-8") if got.exists() else ""
     etext = err.read_text(encoding="utf-8", errors="replace") if err.exists() else ""
