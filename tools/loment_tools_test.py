@@ -1045,6 +1045,57 @@ def test_m65_m66_incremental_and_cache():
         assert loment_build.main([str(out.parent), "--out", str(out)]) == 0
 
 
+@test
+def test_gate_reports_how_many_criteria_did_not_run():
+    """门禁必须把"这条检查里有多少判据没跑"数出来报进那一行（`#371`）。
+
+    **Why**：每个判据套件的运行器都是 `try: fn(); print("  PASS  {name}")` —— 一条判据
+    打印 `SKIP: 无 clang/WSL` 之后 `return`，在它眼里**正常返回就是通过**。于是那一行报的
+    是"没抛异常的总数"。实测（把 `wsl` 从 `shutil.which` 里藏掉，也就是 runner 的条件）：
+    `loment_elf_test` 打印 26 行 SKIP、汇总照报 `31/31 通过`、退出码 0。
+
+    而 CI 是 ubuntu 容器，里面**没有 `wsl`**（它不是 apt 包，镜像也没装垫片）—— 所以那道
+    必需检查在 runner 上对**整条运行时护栏**失明，而且它报满。被判据门着的那些条
+    （sweep 精度、L0 提升、L1 定活、L2 纪元、`free` 所有权那一对、自适应与分代）正是
+    "跑一个产物"才有意义的那一类。
+    **门静默失效比门误报更坏** —— 这是 `loment_door_test` 立论的原话，这里是它的同一件事。
+
+    **How to apply**：`ci.py` 把每条检查输出里"行首是 SKIP"的行数出来，放进
+    `:: [static] …` 那一行；0 的时候不喧哗（大多数检查一条都不跳）。
+
+    **证伪**：把 `ci.py` 里 `count_skips` 那几处去掉，下面第 (2)(3) 两段立刻红
+    （`format_line` 与 5 元组都不存在）—— 这条判据证伪的是**报数**，不是"跳过该不该跳过"。
+    """
+    import ci
+
+    # (1) 计数规则: 只认**行首**是 SKIP 的那种行（各套件都写成 `print("      SKIP: …")`）。
+    #     放在中间的不算 —— 否则某条判据的说明文字里带一个 SKIP 就会被误数。
+    assert ci.count_skips("  PASS  a\n      SKIP: 无 clang/WSL\n  PASS  b\n") == 1
+    assert ci.count_skips("  PASS  a\n") == 0
+    assert ci.count_skips("") == 0
+    assert ci.count_skips("  PASS  a  # 这一条没跳过, 只是提到了 SKIP\n") == 0
+
+    # (2) 那一行必须带上这个数; 0 的时候不出现
+    line = ci.format_line("loment_elf_test", True, "31/31 通过", 1.2, 26)
+    assert "26" in line and "SKIP" in line, line
+    quiet = ci.format_line("loment_tools_test", True, "12/12 通过", 1.2, 0)
+    assert "SKIP" not in quiet, quiet
+
+    # (3) 真跑一条: 把 `wsl` 藏掉 = runner 的条件。跳过的条数必须被真的数出来。
+    #     用 `loment_elf_test` 而不是某个更小的套件, 因为**它**就是这条判据要保护的那个
+    #     套件（运行时护栏全在里面）。代价是几秒 —— 相对它挡住的东西不值一提。
+    import shutil
+
+    real = shutil.which
+    shutil.which = lambda n: None if n == "wsl" else real(n)
+    try:
+        _name, ok, _tail, _dt, skips = ci._run_one_check("loment_elf_test")
+    finally:
+        shutil.which = real
+    assert ok, "跳过的判据不算失败 —— 藏掉 wsl 之后这一条仍然应当是 PASS（这正是问题）"
+    assert skips >= 20, f"数出来的跳过条数太少（{skips}）—— 计数规则或那个套件变了"
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:
