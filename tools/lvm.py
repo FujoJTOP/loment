@@ -162,14 +162,68 @@ class Frame:
         return a
 
 
+class Profile:
+    """T1 的剖面（`docs/246`）—— 三样**静态读不出来**的东西：块的次数、边的次数、调用点。
+
+    ⚠ **不记类型**。这份 IR 是静态类型的：`add i32 %a, %b` 里的 `i32` 写在指令上，
+    同一条加法每一次执行只能是 i32 —— "观察到 i32"不是新信息。V8 反馈向量最重要那一项
+    是给它吃的 **JavaScript**（没有类型）准备的，照抄过来是空的（`docs/246` §1）。
+
+    站点标识 = (函数名, 块标签, 块内指令下标)。**输出按标识排序** —— 同一份程序 + 同样输入
+    必须给**逐字节相同**的文件，否则 T2/T3 拿它当输入就无法复现（`docs/226` 同一条规矩）。
+    """
+
+    def __init__(self) -> None:
+        self.blocks: dict[tuple[str, str], int] = {}
+        self.edges: dict[tuple[str, str, int, int], int] = {}
+        self.calls: dict[tuple[str, str, int, str], int] = {}
+
+    @staticmethod
+    def _bump(d: dict, k) -> None:
+        d[k] = d.get(k, 0) + 1
+
+    def block(self, fn: str, blk: str) -> None:
+        self._bump(self.blocks, (fn, blk))
+
+    def edge(self, fn: str, blk: str, idx: int, e: int) -> None:
+        self._bump(self.edges, (fn, blk, idx, e))
+
+    def call_site(self, site: tuple[str, str, int], callee: str) -> None:
+        fn, blk, idx = site
+        self._bump(self.calls, (fn, blk, idx, callee))
+
+    def text(self) -> str:
+        """剖面文本。**第三方可读是构造出来的**：一张按 TAB 分列、按标识排序的表。"""
+        out = [
+            "# lvm profile v1",
+            "# site = (function, block, instruction-index-in-block); a block is (function, block)",
+            "[blocks]",
+        ]
+        for k in sorted(self.blocks):
+            out.append(f"{k[0]}\t{k[1]}\t{self.blocks[k]}")
+        out.append("[edges]")
+        for k in sorted(self.edges):
+            out.append(f"{k[0]}\t{k[1]}\t{k[2]}\t{k[3]}\t{self.edges[k]}")
+        out.append("[calls]")
+        for k in sorted(self.calls):
+            out.append(f"{k[0]}\t{k[1]}\t{k[2]}\t{k[3]}\t{self.calls[k]}")
+        return "\n".join(out) + "\n"
+
+
 class Vm:
-    def __init__(self, globals_: list, funcs: list, externs: list, out) -> None:
+    def __init__(self, globals_: list, funcs: list, externs: list, out,
+                 profile: Profile | None = None) -> None:
         self.mem = Mem()
         self.globals = {g.name: g for g in globals_}
         self.funcs = {f.name: f for f in funcs}
         self.externs = set(externs)
         self.out = out
         self.depth = 0
+        #: T1（`docs/246`）。`None` = 这一趟不记账 —— **关掉时一个字节都不写**，
+        #: 而且下面每一处记账都写成 `if self.profile is not None:`，所以关掉时**没有代价**
+        #: （判据 D 要的正是"记录不许改变被记录的行为"）。
+        self.profile = profile
+        self.site: tuple[str, str, int] | None = None
         self._place_globals()
 
     def _place_globals(self) -> None:
@@ -278,6 +332,8 @@ class Executor(Vm):
         fn = self.funcs.get(name)
         if fn is None:
             raise LvmError(f"没有这个函数: {name}")
+        if self.profile is not None and self.site is not None:
+            self.profile.call_site(self.site, name)
         return self.run(fn, args, fr)
 
     # ------------------------------------------------------------ 执行
@@ -313,17 +369,25 @@ class Executor(Vm):
             blk = next((b for b in fn.blocks if b.label == label), None)
             if blk is None:
                 raise LvmError(f"{fn.name}: 没有块 {label}")
-            for ins in blk.instrs:
+            if self.profile is not None:
+                self.profile.block(fn.name, blk.label)
+            for idx, ins in enumerate(blk.instrs):
+                if self.profile is not None:
+                    self.site = (fn.name, blk.label, idx)
                 if ins.text.startswith("phi "):
                     if ins.dest:
                         fr.vals[ins.dest] = self._phi(fr, ins.text, prev)
                     continue
                 if ins.text.startswith("br "):
-                    label, _pred = self._br(fr, ins.text, blk.label)
+                    label, _pred, edge = self._br(fr, ins.text, blk.label)
+                    if self.profile is not None:
+                        self.profile.edge(fn.name, blk.label, idx, edge)
                     prev = blk.label
                     break
                 if ins.text.startswith("switch "):
-                    label = self._switch(fr, ins.text)
+                    label, edge = self._switch(fr, ins.text)
+                    if self.profile is not None:
+                        self.profile.edge(fn.name, blk.label, idx, edge)
                     prev = blk.label
                     break
                 if ins.text.startswith("ret"):
@@ -509,26 +573,29 @@ class Executor(Vm):
                 return v
         raise LvmError(f"phi 没有来自 {prev} 的入边: {text!r}")
 
-    def _br(self, fr: Frame, text: str, cur: str) -> tuple[str, str]:
+    def _br(self, fr: Frame, text: str, cur: str) -> tuple[str, str, int]:
+        """返回 `(目标块, 前驱, 边的编号)`。**边号**是 T1 记账要的（`docs/246` §4）：
+        无条件分支只有一条边（0）；条件分支 0 = 真、1 = 假。"""
         m = re.match(r"br label %([\w.]+)$", text)
         if m:
-            return m.group(1), cur
+            return m.group(1), cur, 0
         m = lomelf.BR_COND_RE.search(text)
         if not m:
             raise LvmError(f"br 解析不了: {text!r}")
         _t, cond = self.operand(fr, "i1 " + m.group(1))
-        return (m.group(2) if cond else m.group(3)), cur
+        return (m.group(2) if cond else m.group(3)), cur, (0 if cond else 1)
 
-    def _switch(self, fr: Frame, text: str) -> str:
+    def _switch(self, fr: Frame, text: str) -> tuple[str, int]:
+        """返回 `(目标块, 边的编号)`：case 按出现次序 0..n-1，default 是 n。"""
         m = lomelf.SWITCH_RE.match(text)
         if not m:
             raise LvmError(f"switch 解析不了: {text!r}")
         ty, val_s, default, body = m.groups()
         _t, v = self.operand(fr, ty + " " + val_s)
-        for cty, cval, label in lomelf.CASE_RE.findall(body):
+        for k, (cty, cval, label) in enumerate(lomelf.CASE_RE.findall(body)):
             if mask(v, cty) == int(cval):
-                return label
-        return default
+                return label, k
+        return default, len(lomelf.CASE_RE.findall(body))
 
     def _ret(self, fr: Frame, text: str):
         rest = text[len("ret"):].strip()
@@ -541,10 +608,14 @@ class Executor(Vm):
 
 # ---------------------------------------------------------------- 前门
 
-def run_ir(text: str, out) -> int:
-    """IR 文本 -> 跑完 -> 进程该退的码。**入口就是 `_start`**（`docs/243` §3.5）。"""
+def run_ir(text: str, out, profile: Profile | None = None) -> int:
+    """IR 文本 -> 跑完 -> 进程该退的码。**入口就是 `_start`**（`docs/243` §3.5）。
+
+    `profile` 传一个 `Profile` 就记账（T1，`docs/246`）；传 `None`（默认）不记 ——
+    **关掉时不写任何字节**，而且被记录程序的行为逐字节不变（判据 D）。
+    """
     globals_, funcs, externs = lomelf.parse_ll(text)
-    vm = Executor(globals_, funcs, externs, out)
+    vm = Executor(globals_, funcs, externs, out, profile)
     start = next((f for f in funcs if f.name == "_start"), None)
     if start is None:
         raise LvmError("这份 IR 里没有 `_start`")
@@ -555,7 +626,7 @@ def run_ir(text: str, out) -> int:
     return 0
 
 
-def run_source(src: Path, root: Path, out=None) -> int:
+def run_source(src: Path, root: Path, out=None, profile: Profile | None = None) -> int:
     """与 `lomelf` 同一条前门：`.lomt` -> IR -> 跑。"""
     import lomentc  # noqa: PLC0415
 
@@ -564,7 +635,8 @@ def run_source(src: Path, root: Path, out=None) -> int:
     errs = lomentc.check(mod, deps=deps)
     if errs:
         raise LvmError(f"检查不过: {errs[:2]}")
-    return run_ir(lomentc.emit_llvm(mod, root, deps), out if out is not None else sys.stdout)
+    return run_ir(lomentc.emit_llvm(mod, root, deps),
+                  out if out is not None else sys.stdout, profile)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -575,19 +647,26 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("entry", help=".lomt 入口，或 --ir 时是 .ll")
     ap.add_argument("--ir", action="store_true", help="直接吃 IR 文本（跳过前端）")
     ap.add_argument("--root", default=".", help="解析 use 的根（默认当前目录）")
+    ap.add_argument("--profile-out", metavar="PATH", default=None,
+                    help="T1：把反馈剖面写到 PATH（`docs/246`）。不写就不记，一个字节都不写")
     a = ap.parse_args(argv)
     root = Path(a.root).resolve()
     buf = io.BytesIO()
+    prof = Profile() if a.profile_out else None
     try:
         if a.ir:
-            rc = run_ir(Path(a.entry).read_text(encoding="utf-8"), buf)
+            rc = run_ir(Path(a.entry).read_text(encoding="utf-8"), buf, prof)
         else:
-            rc = run_source(Path(a.entry).resolve(), root, buf)
+            rc = run_source(Path(a.entry).resolve(), root, buf, prof)
     except (LvmError, lomelf.ElfError, lomelf.Unsupported) as e:
         sys.stdout.buffer.write(buf.getvalue())
         print(f"lvm: {e}", file=sys.stderr)
         return 2
     sys.stdout.buffer.write(buf.getvalue())
+    if prof is not None:
+        # `newline="\n"`：本机 `write_text` 会写成 CRLF，而剖面要跨平台逐字节可比。
+        with Path(a.profile_out).open("w", encoding="utf-8", newline="\n") as f:
+            f.write(prof.text())
     return rc
 
 
