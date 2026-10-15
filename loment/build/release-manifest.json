@@ -955,15 +955,15 @@
   },
   {
    "path": "tools/lvm.py",
-   "sha256": "44b344432e72bd47d8d88c7b03d5575d8d80c235134cc10171b4554933d698a2"
+   "sha256": "aeef8a703b8fb29fe1ab8458d9e193238fd2337ff1f64761cc5e5fa7a105ca46"
   },
   {
    "path": "tools/lvm_test.py",
-   "sha256": "15f992777db4811f07bc39bc4e79aedfcecdb3b2ec5d9e912c88c5f51db0452c"
+   "sha256": "519470bce42cbfe4a9f4ce68f2551369f703cf8f22b4c4abf21a6f9f0147b02f"
   },
   {
    "path": "tools/lvm_twin_test.py",
-   "sha256": "1a8e30485b98c8a572479941ab8b76079a4d9e5a0a4df9ff005b2d4c89a2415f"
+   "sha256": "8d0673669a1166cb2a9c135b543fda78d207743be6908b34174b0f439f97ea9c"
   },
   {
    "path": "tools/lvm_profile_test.py",
@@ -1343,7 +1343,7 @@
   },
   {
    "path": "loment/tools/lvm.lomt",
-   "sha256": "cad4c74d63d988387f102de073ce63a6f1748266749eb12805ae39c55434397f"
+   "sha256": "490301cec8ddb9e5543ab95cbe849d5bfa0b94b74d9a0d3d8b5f79114628f10f"
   },
   {
    "path": "loment/tools/surface_data.lomt",
@@ -2335,7 +2335,7 @@
   },
   {
    "path": "docs/243-lvm-t0-interpreter.md",
-   "sha256": "2cfbacae75dc2fafc90a73bbbe66d9b2e772a1727260b2d1e450fcc139df9103"
+   "sha256": "4b364dbf62f91a317e0e42a7e96af001ec15561f40a692acf7cfc77ffb9c3c46"
   },
   {
    "path": "docs/244-lomenterr-coverage-plan.md",
