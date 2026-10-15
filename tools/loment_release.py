@@ -68,6 +68,26 @@ OUT = ROOT / "loment" / "build" / "release-manifest.json"
 # 与那种"只发通知"的宣告版不是一回事）。
 RELEASE = "0.1.4.5-quickfix"
 RELEASE_NAME = "0.1.4.5 QuickFix"  # 人读显示名 (发行包/文档用同一个真源)
+
+# 报错器 (`lomenterr`) **自己的版本号** —— 与语言版本是**两条线** (2026-10-13 用户定)。
+#
+# **为什么它该有自己的版本**: `lomenterr` 是一件**独立交付的程序**, 不是编译器的一部分 ——
+# 它有自己的命令行面 (`--short`/`--json`/`--max`/`errconfig`), 自己的判据, 自己的孪生
+# (`loment/tools/lomerrcheck.lomt`), 而且它的改动**与语言面无关**: 2026-09-18 到 10-13 之间
+# 它改了七八轮 (四段说明卡 -> 六语言方言 -> 双语默认英文 -> 三个出口 -> 逐条建议),
+# 而语言版本在这段时间里只动过一次。把两件事捆在一个号上, 就只能记成"语言又升了一版",
+# 那既不真, 也让人没法说"我用的是哪个报错器"。
+#
+# **两条线各自独立, 但只有一处真源**: 这个常量是报错器版本的**唯一**来源 ——
+# `loment_diag.py --dump-surface` 把它导进 `surface_data` (报错器用它打 `lomenterr version`),
+# 文档里那份 (README / wiki) 由判据核。**不许在别处再写一遍字面量** (本仓那条老账:
+# 同一份清单抄第二遍, 两处迟早不同)。
+#
+# 这条线对应的是报错器的三次交付 (逐条记在 `docs/182`):
+#   0.1.0  编译期落地 —— 渲染器本身, 接进工具链与两个启动器
+#   0.1.1  说明卡 + 六语言方言卡 + 上色 + 语法声明优先
+#   0.1.2  双语 (默认英文) + 三个出口 (`--short`/`--json`) + 逐条建议
+LOMENTERR = "0.1.2"
 GLOBS = [
     "tools/lomc.py", "tools/lom_audit.py", "tools/lomc_test.py", "tools/lomentc.py",
     "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",
@@ -84,6 +104,9 @@ GLOBS = [
     "tools/loment_internet_test.py",
     # 第四个包 os (docs/242): 与 CPython 的 os/time/signal **在同一个 Linux 环境里**对跑
     "tools/loment_os_test.py",
+    # 真线程 thread_spawn (docs/245): 探针编成 ELF **真的起 N 个线程**在共享内存上累加,
+    # 另外拿 gettid 证伪"顺序跑下来也能凑出同样的和"那条。负例在编译期 (入口名/形参个数)。
+    "tools/loment_thread_test.py",
     # LumtUI (loment/lib/lumtui*.lomt, docs/191): GUI 库的判据。
     # 对照物三把不同的尺子 —— L0 字节 / 独立推出的布局 / FreeType。
     "tools/loment_lumtui_test.py",

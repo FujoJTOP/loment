@@ -189,6 +189,7 @@ tools/loment_std_test.py
 tools/loment_libl_test.py
 tools/loment_internet_test.py
 tools/loment_os_test.py
+tools/loment_thread_test.py
 tools/loment_lumtui_test.py
 tools/loment_cli_test.py
 tools/loment_err_test.py

@@ -1110,6 +1110,162 @@ def test_gc_alpha_minor_keeps_a_young_block_reachable_from_an_old_one():
         "脏卡扫描 / 晋升（`oldtop` 推进）/ 年轻代传播，四处任一处坏了都会走到这儿")
 
 
+#: 判据（一）与（二）共用的语料骨架 —— **只差 `choose` 一行**。
+#:
+#: 形状：一块**垃圾**（200）在前，一块**活的**（7）紧跟在它 256 字节之内，之后是长 churn。
+#: 活块由**局部 `ptr`** 持有（就是根表里的那一格），所以"它该不该活"没有歧义。
+#:
+#: **两处刻意的写法**（都是为了不让判据落到别的东西上）：
+#:   * 尺寸走 `const` **名字**（`alloc(NODE)`）而不是字面量 —— `alloc(<数字字面量>)` 是
+#:     **L0（静态提升）的候选形状**，一旦被提走，这块就不在堆上，本判据测的就不是清扫了；
+#:   * 再补一句 `t as u64` —— L0 的资格要求名字"只被 `load8`/`store8` 当首参透过"，
+#:     一次 `as` 就把它取消掉。两道锁是故意的：这一条的靶子是**清扫**。
+_SWEEP_PRECISION_SRC = (
+    "module sweepprec\n%s\nchoose runtime\n\n"
+    "const NODE: u32 = 16;\n\n"
+    "fn bigjunk() -> u64 {\n"
+    "    let p: u64 = alloc(64) as u64;\n"
+    "    store8(p as ptr, 0, 200);\n"
+    "    return p;\n"
+    "}\n\n"
+    "fn junk() -> u64 {\n"
+    "    let p: u64 = alloc(NODE) as u64;\n"
+    "    store8(p as ptr, 0, 200);\n"
+    "    return p;\n"
+    "}\n\n"
+    "fn _start() {\n"
+    "    let _g: u64 = bigjunk();\n"
+    "    let t: ptr = alloc(NODE);\n"
+    "    store8(t, 0, 7);\n"
+    "    let _esc: u64 = t as u64;\n"
+    "    let i: u32 = 0;\n"
+    "    while i < 40000 {\n"
+    "        let _j: u64 = junk();\n"
+    "        i = i + 1;\n"
+    "    }\n"
+    "    if load8(t, 0) == 7 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+    "    syscall4(60, 3, 0, 0);\n}\n")
+
+
+@test
+def test_sweep_keeps_a_live_block_next_to_garbage():
+    """清扫**只清自己那一格**（`docs/210` §2.4）—— 判据是**一对**程序，两档各一只。
+
+    **Why**：`@__loment_mark` 是**每 8 字节堆一位**的位图，而释放那一格曾经写
+    `store i32 0, ptr %smp` —— 那是**越界清**：`%smp` 指向的是一格**字节**，`store i32`
+    一次抹掉 **4 格 = 256 字节堆里的全部块**。被顺带抹掉的块可能**是活的**，而清扫
+    **在同一条路径上继续往前走**，于是它走到那些块时看到的位已经是 0 ⇒ **当垃圾收掉**。
+    这不是分代那一档特有的：`gc_auto` 与 `gc_auto_alpha` 共用这一个 `__loment_sweep`，
+    两档都中（实测：两档各退 3）。
+
+    **How to apply**：垃圾块 64 B（`bigjunk`）先落在偏移 8，活块 16 B 紧跟其后 ——
+    两者都在同一个 256 字节窗口里。之后 40000 次 churn 逼出收集，再用**同尺寸**的垃圾
+    把活块那块**复用**掉（`junk` 请求 16 B ⇒ 接得住活块那 24 B 的空闲块）—— 于是
+    "它还活着吗"可以从**有效载荷**读出来（7 = 活着，200 = 被复用）。判据不猜"释放有没有
+    改数据"：它只看复用（`test_gc_alpha_minor_...` 那条注释里点过这个坑）。
+
+    **证伪**：把 `kill:` 里那行加回 `store i32 0, ptr %smp`，两档各退 3（实测）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = {}
+        for tier in ("gc_auto", "gc_auto_alpha"):
+            src = td / f"{tier}.lomt"
+            src.write_text(_SWEEP_PRECISION_SRC % f"choose {tier}",
+                           encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tier}.native"
+            nat.write_bytes(blob)
+            got[tier] = _run_bin(nat, f"sweepprec_{tier}", td, timeout=60)[0]
+    bad = [f"{k}={v}" for k, v in got.items() if v != 7]
+    assert not bad, (
+        f"活块被清扫带走了（{', '.join(bad)}；期望都是 7）。成因：清扫清标记时清**宽了** —— "
+        "位图上一格字节管 8 个块，`store i32` 一次管 32 个（256 字节堆）；要紧的是清扫"
+        "**同一趟**就会走到那些被误清的块，把它们交回分配器")
+    print(f"      gc_auto={got['gc_auto']} gc_auto_alpha={got['gc_auto_alpha']}"
+          " —— 两档都没把垃圾后面的活块一起收掉")
+
+
+#: 判据（二）的语料 = **issue #312 那段原样**（`docs/210` §2.9 收的洞）。
+#:
+#: 目标块的**唯一**引用是"另一个块里按字节写着的那 8 个字节"，而持有者是个真的**堆块**
+#: （尺寸走 `const NODE` ⇒ 不走 L0），写那 8 个字节时**两者都还年轻** ⇒ 没有卡被标脏。
+#: 于是目标块靠的是**标记的延续**（上一轮标上、下一轮没人清它）活着 —— 这正是清扫
+#: 越界清标记时会死掉的东西。
+_STORED_POINTER_SRC = (
+    "module holdedge\nchoose gc_auto_alpha\nchoose runtime\n\n"
+    "const NODE: u32 = 16;\n\n"
+    "fn mk() -> u64 {\n"
+    "    let p: ptr = alloc(NODE);\n"
+    "    store8(p, 0, 7);\n"
+    "    return p as u64;\n"
+    "}\n\n"
+    "fn junk() -> u64 {\n"
+    "    let p: ptr = alloc(NODE);\n"
+    "    store8(p, 0, 200);\n"
+    "    return p as u64;\n"
+    "}\n\n"
+    "fn _start() {\n"
+    "    let tgt: u64 = mk();\n"
+    "    let hold: ptr = alloc(NODE);\n"
+    "    store8(hold, 0, 1);\n"
+    "    store8(hold, 8, (tgt & 255) as u8);\n"
+    "    store8(hold, 9, ((tgt >> 8) & 255) as u8);\n"
+    "    store8(hold, 10, ((tgt >> 16) & 255) as u8);\n"
+    "    store8(hold, 11, ((tgt >> 24) & 255) as u8);\n"
+    "    store8(hold, 12, ((tgt >> 32) & 255) as u8);\n"
+    "    store8(hold, 13, ((tgt >> 40) & 255) as u8);\n"
+    "    store8(hold, 14, ((tgt >> 48) & 255) as u8);\n"
+    "    store8(hold, 15, ((tgt >> 56) & 255) as u8);\n"
+    "    let i: u32 = 0;\n"
+    "    while i < 40000 {\n"
+    "        let _j: u64 = junk();\n"
+    "        i = i + 1;\n"
+    "    }\n"
+    "    let t: ptr = tgt as ptr;\n"
+    "    if load8(t, 0) == 7 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+    "    syscall4(60, 3, 0, 0);\n}\n")
+
+
+@test
+def test_gc_alpha_keeps_an_object_behind_a_young_written_edge():
+    """**写时双方都还年轻的那条边**，靠标记延续活着（`docs/210` §2.7）—— issue #312。
+
+    **Why**：老→年轻的边靠**写屏障**记卡，可这条边**写的时候两边都还年轻** —— 那一刻没有
+    卡被标脏。它还能活，靠的是**标记的延续**：小回收只清**年轻代**的标记，旧块的位一旦
+    标上就一直留着，直到下一次全量。所以"清标记"这件事只要清**宽了**，这条边就断。
+
+    这一条与 `test_gc_alpha_minor_keeps_...old_one` 是**两回事**：那条测**脏卡**（写的时候
+    持有者已经老了 ⇒ 卡被标脏 ⇒ 小回收扫卡把它找回来）；这条测**没有任何卡**的那一半。
+    两半都在，§2.7 那句话才成立。
+
+    **How to apply**：issue #312 的那段原样 —— 目标块只经由"另一个堆块里按字节写的 8 个
+    字节"可达（不是根：它在 `u64` 里）。40000 次 churn 逼出收集，末尾读回那个字节。
+
+    **证伪**：`kill:` 里那行 `store i32 0, ptr %smp` 一加回来，这一条退 3（实测）。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        src = td / "holdedge.lomt"
+        src.write_text(_STORED_POINTER_SRC, encoding="utf-8", newline="\n")
+        ll = _ref_ir(src, td)
+        blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+        nat = td / "holdedge.native"
+        nat.write_bytes(blob)
+        rc = _run_bin(nat, "holdedge", td, timeout=60)[0]
+    assert rc == 7, (
+        f"只有「另一个块里按字节写着」的那条引用指着它，而它没了：退出码 {rc}（期望 7）。"
+        "多半是清扫（或清年轻代标记那一趟）**清宽了**：位图一格字节管 8 个块，"
+        "清一格 = 顺手把邻居的位也清了")
+
+
 @test
 def test_l1_definite_lifetime_bounds_the_heap():
     """**L1（定活）真的发生**（`docs/210` §2.5）—— 判据是**一对**程序。
@@ -1490,6 +1646,50 @@ def test_lomelf_selfhost_matches_reference():
                           + " / ".join(gone))
     print(f"      {total} 个程序: 自举镜像与参考逐字节相同; "
           f"另有 {len(MIRROR_GAP)} 份记在 MIRROR_GAP 里, 已反向核实仍然链不过")
+
+
+@test
+def test_selfhost_mirror_matches_reference_on_thread_spawn():
+    """自举镜像的 `thread_spawn` 定制序列与参考 `lomelf.py` **逐字节相同**。
+
+    **Why**：那条序列是**字面机器码**（不是一串 `mov_*` 助手拼出来的），两侧各写一遍 ——
+    参考侧是 `Emitter._SPAWN_HEAD` / `_SPAWN_TAIL`，镜像侧是 `do_call_spawn` 里那一串
+    `e1`。**它们漂一个字节就是另一份产物**：`jne 0x13` 那个位移是按后面 19 字节算的
+    （3+2+5+2+5+2），少一个字节就跳过 `.parent` 落到子线程那条路上；`call` 的相对地址
+    错开就是跑飞。而**别的判据一条都看不见** —— `loment_thread_test` 跑的是参考侧发的
+    产物，镜像那条路它碰不到（那边要用 clang 建镜像，代价太大，这里已经建过了）。
+
+    **探针源码从 `loment_thread_test` 借**（同一个常量，不抄第二份）：那份是这条构造的
+    主人，这里只做"同一份 IR 过两个链接器"的字节比对。
+    """
+    import loment_thread_test as th
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    src = ROOT / "loment" / "build" / "_thread_probe.lomt"
+    llrepo = ROOT / "loment" / "build" / "_thread_twin.ll"
+    elfrepo = ROOT / "loment" / "build" / "_thread_twin.elf"
+    src.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        src.write_text(th._WORKER, encoding="utf-8", newline="\n")
+        mod = lomentc.load(src)
+        deps = lomentc.resolve_deps(mod, ROOT, src.parent, entry=src)
+        errs = lomentc.check(mod, deps=deps, _dep_pass=True)
+        assert not errs, f"线程探针自己检查不过: {errs[:2]}"
+        ll = lomentc.emit_llvm(mod, ROOT, deps)
+        llrepo.write_text(ll, encoding="utf-8", newline="\n")
+        want = lomelf.compile_ll(ll)[0]
+        rc, err = _mirror_run(mir, "loment/build/_thread_twin.ll",
+                              "loment/build/_thread_twin.elf")
+        assert rc == 0, f"镜像编线程探针退出 {rc}: {err[-200:]}"
+        got = elfrepo.read_bytes()
+    finally:
+        for p in (src, llrepo, elfrepo):
+            p.unlink(missing_ok=True)
+    assert got == want, (f"镜像的 thread_spawn 序列与参考不同 "
+                         f"({len(got)}B vs {len(want)}B)")
+    print(f"      thread_spawn: 镜像与参考逐字节相同 ({len(got)}B)")
 
 
 @test

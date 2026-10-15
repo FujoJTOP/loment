@@ -57,8 +57,26 @@ BUILTINS = {
     # 在 syscall6 上**没有地方放**（递过去的是寄存器里的残留值）—— 于是"带地址的 UDP"
     # 从 Loment 源码里写不出来（`docs/217` §5 点名的那个缺口，`docs/220` 关掉它）。
     "syscall7": (("u64", "u64", "u64", "u64", "u64", "u64", "u64"), "i64"),
+    # M84: 真线程 (docs/245)。**入口是编译期的名字**（字符串字面量）—— 子线程落地后
+    # **直接** `call @名字`，不是间接调用，所以静态调用图一个字不动（`docs/208` 那两条
+    # 承重门禁的前提不破）。这也是它与"函数指针"（线 B）分家的那条线：这里没有地址，
+    # 只有一个由产物写死的调用边。
+    # 第四个实参是**完成通知地址**（0 = 不要通知）：子线程在入口返回**之后**原子加一
+    # 并 `futex_wake` 那一个地址，然后才 exit。为什么非要有它：子线程的尾声是**编译器
+    # 发的**（入口一 return 就 exit），所以**工作线程没有机会在返回之后跑任何代码** ——
+    # 没有一个自动的通知点，`join` 就只能靠"工作线程自己记得喊一声"，忘了就是挂死。
+    # 只在 ELF/lomelf 目标可用（Windows 没有 `clone`）；PE 目标报错并点名，不静默错编。
+    "thread_spawn": (("str", "u64", "u64", "u64"), "i64"),
 }
 BUILTIN_DIVERGES = ("panic",)  # 求值后不可继续 (M19)
+
+#: `thread_spawn` 的入口名（M84）。**链接器把名字原样当符号用**，所以这里就是能安全落进
+#: `.ll` 的 asm 串、又能被符号表接住的那一类 —— 比"合法标识符"再收一点（不许点，免得与
+#: `函数$块` 那种内部标签撞面）。不用正则：`lomentc` 顶层不 import `re`。
+def _is_fn_name(s: str) -> bool:
+    if not s or not (s[0].isascii() and (s[0].isalpha() or s[0] == "_")):
+        return False
+    return all(c.isascii() and (c.isalnum() or c == "_") for c in s[1:])
 
 _IR_RUNTIME = '''
 ; ---- Loment freestanding 运行时 (M31: 无 libc) ----
@@ -2971,6 +2989,29 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                             errs.append(f"{e.line}: 内建 {e.name} 实参期望 {wt}，得到整型字面量")
                     elif at != wt:
                         errs.append(f"{e.line}: 内建 {e.name} 实参类型 {at}，期望 {wt}")
+                # M84 （docs/245）: 入口那三条 —— **是字面量**、**名字合法**、**是本单元里
+                # 恰好一个形参的函数**。三条都在编译期判得出来，那正是"直接调用"买到的东西：
+                # 产物里写的是一条写死的调用边（`call @名字`），不是运行期取得到的值。
+                # 形参个数那一条不是洁癖 —— 子线程只压**一个**实参，入口要是声明了两个，
+                # 第二个读到的是栈上的垃圾，那是**静默错编**，比报错坏得多。
+                # （消息措辞是按 `loment_diag.RULES` 的正则挑的：分类只看消息，不看调用点。）
+                if e.name == "thread_spawn" and not isinstance(e.args[0], StrLit):
+                    errs.append(
+                        f"{e.line}: 内建 thread_spawn 实参 1 必须是**字符串字面量** —— 它是"
+                        f"编译期的名字（产物里是一条直接调用边），不是运行期取得到的值")
+                elif e.name == "thread_spawn":
+                    ent = e.args[0].value
+                    if not _is_fn_name(ent):
+                        errs.append(
+                            f"{e.line}: 内建 thread_spawn 实参 1 不是合法的函数名: {ent!r}")
+                    elif ent not in funcs:
+                        errs.append(
+                            f"{e.line}: thread_spawn 的入口 {ent} 是未定义的函数"
+                            f"（入口必须是本单元里写着的、能被直接调用的 Loment 函数）")
+                    elif len(funcs[ent].params) != 1:
+                        errs.append(
+                            f"{e.line}: thread_spawn 的入口 {ent} 需要 1 个实参，"
+                            f"得到 {len(funcs[ent].params)}（子线程只压一个槽）")
         elif e.name not in funcs:
             errs.append(f"{e.line}: 调用未定义的函数 {e.name}（跨模块调用需要 pub）")
         else:
@@ -5558,9 +5599,14 @@ sb:
 keep:
   br label %slc
 kill:
-  ; **释放前先把这一格的标记清零** —— 于是「空闲块一律未标记」这条不变式成立，清扫**可以重复跑**
-  ; （见 `__loment_minor` 里那段：它每次都重置空闲链表，重复跑正是它要的）。
-  store i32 0, ptr %smp
+  ; **这里的「清标记」什么都不做**（曾经写的是 `store i32 0, ptr %smp`）—— 那不是清一格，
+  ; 是**越界清**：`%smp` 指向位图里的**一格字节**（`@__loment_mark` 每 8 字节堆一位），
+  ; `store i32` 一次抹掉 **4 格 = 256 字节堆里的全部块**；就算写成 `store i8 0`，也照样
+  ; 抹掉同一 64 字节里另外 7 个块的位。被顺带抹掉的块**可能是活的**，而**分代那一档的
+  ; 旧块标记一旦被抹就再也标不回来**（`propagate` 只从 `oldtop` 起走，整个老年代不扫）
+  ; —— 于是它们在同一趟清扫里被当垃圾交回分配器，程序随后读到的是复用后的字节。
+  ; 而清零**本来就不需要**：走到这一格的**前提**就是「这一位是 0」（`%smsm` 为假）。
+  ; 判据：`loment_elf_test::test_sweep_*` 两条同形语料（同源只差 `choose` 档位）。
   %k8 = add i32 %si, 8
   %kp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %k8
   call void @__loment_free(ptr %kp)
@@ -5697,10 +5743,24 @@ cl:
   %cd = icmp uge i32 %ci, %co
   br i1 %cd, label %roots, label %clb
 clb:
+  ; **只清这一格自己的那一位** —— 这里曾经写 `store i8 0`（清**一整格字节**），而
+  ; `@__loment_mark` 是**每 8 字节堆一位**的位图：一格字节覆盖**连续的 64 字节堆**，
+  ; 里面很可能挤着 2~3 个块。本趟从 `%ot`（`oldtop`）起走，而 `oldtop` **不保证 64 字节
+  ; 对齐** —— 于是第一趟就把 `oldtop` **下面**那几个**旧块**的位一起抹掉；而 `propagate`
+  ; 只从 `oldtop` 起走、旧块整段不扫，抹掉就**再也标不回来** ⇒ 它们在同一趟清扫里被当
+  ; 垃圾交回分配器，程序随后读到的是复用后的字节。
+  ; **这一半没有最小复现**：它是读代码读出来的，改动方向是**单向**的（新写法清的是旧写法
+  ; 所清位的一个子集），只会**少收**、不会多收。
   %cidx = lshr i32 %ci, 3
   %cby = lshr i32 %cidx, 3
   %cmp = getelementptr [1024 x i8], ptr @__loment_mark, i32 0, i32 %cby
-  store i8 0, ptr %cmp
+  %cmk = load i8, ptr %cmp
+  %cbit = and i32 %cidx, 7
+  %csh = shl i32 1, %cbit
+  %cmsk = trunc i32 %csh to i8
+  %cclr = xor i8 %cmsk, -1
+  %cnew = and i8 %cmk, %cclr
+  store i8 %cnew, ptr %cmp
   %csp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ci
   %csz = load i32, ptr %csp
   %cex = add i32 %ci, %csz
@@ -7408,6 +7468,25 @@ class _Ir:
                    f'~{{memory}}"'
                    f"(i64 {vals[0]}, i64 {vals[1]}, i64 {vals[2]}, i64 {vals[3]}, "
                    f"i64 {vals[4]}, i64 {vals[5]}, i64 {vals[6]})")
+            return "i64", r
+        if e.name == "thread_spawn":  # M84: 真线程 —— 入口是**编译期的名字**
+            # **入口名不求值**（它不是表达式，是编译期的名字）：只走它后面那三个实参。
+            # 顺序是**从左到右**（栈顶、实参、完成通知地址）—— 自举侧 `arg1` 只能按 token
+            # 顺序求值，两边要产生同一套临时值编号就得同序。
+            a_stk = self.expr(e.args[1], "u64")[1]
+            a_arg = self.expr(e.args[2], "u64")[1]
+            a_done = self.expr(e.args[3], "u64")[1]
+            ent = e.args[0].value
+            r = self.t()
+            # 这条 asm 的名字是**两个词**（`thread_spawn @入口`）：链接器按第一个词分派、
+            # 从第二个词里取符号。约束里的 `{r9}` / `{si}` / `{r12}` 不是 Linux 的系统调用
+            # 约定 —— 它只是"哪个操作数先算进哪个寄存器"的声明，`lomelf` 照它取参、自己发
+            # 机器码。`r12` 存完成通知地址：它是**唯一**能把一个值安全带过 `clone` 又不与
+            # `clone` 自己那五个实参寄存器（rdi/rsi/rdx/r10/r8）冲突的位置。
+            self.w(f'{r} = call i64 asm sideeffect "thread_spawn @{ent}", '
+                   f'"={{ax}},{{si}},{{r9}},{{r12}},'
+                   f'~{{di}},~{{dx}},~{{r10}},~{{r8}},~{{cx}},~{{r11}},~{{memory}}"'
+                   f"(i64 {a_stk}, i64 {a_arg}, i64 {a_done})")
             return "i64", r
         if e.name == "panic":  # M19
             self.expr(e.args[0], "u32")
