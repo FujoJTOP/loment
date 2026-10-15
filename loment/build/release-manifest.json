@@ -15,11 +15,11 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "93cb20379ad9d112f5cf3ac533a57c17211b6bfabad201df065ae1b1caa5c6ee"
+   "sha256": "eefae05d08aee34685871d0cfb1aae42cc28e922b8024559e66c004cb89698eb"
   },
   {
    "path": "tools/lomentc_test.py",
-   "sha256": "3a1bc35775653d524a4fdfe2588b7ad7e2cea1c72db11273796682762db9a75b"
+   "sha256": "777e2eceb7f4843129dfe1e63580604e593f9c880bb4857594af06999f515760"
   },
   {
    "path": "tools/potato.py",
@@ -843,7 +843,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "2cba497a3808ca5f3077566659856e384d9cefc645572c1c232f5ec258de3565"
+   "sha256": "f3a1b237f28ce9037aa1c9a9c542ddd51c8ac32c0bc3fe5d1f74a9f5fc608291"
   },
   {
    "path": "tools/loment_p9_test.py",
@@ -947,7 +947,7 @@
   },
   {
    "path": "tools/loment_elf_test.py",
-   "sha256": "0e36293b7578185d4a4f464b21fc5e09954b3342945c794ff5c7e49a0b0f986d"
+   "sha256": "6cad7b0fa732bb9973287e9bfd3545e9bb7018b4176d06a62fa954ae03865981"
   },
   {
    "path": "tools/loment_pe_test.py",
@@ -1211,7 +1211,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "c71750f8d7f256db1cbb40fe0ebef7b2540ba9d658194e7d6d7be1224e2bb13e"
+   "sha256": "88a1b1024043febe5784d21fe93f0c9aedba216154ba3e0c45fd7f1ea2987a87"
   },
   {
    "path": "loment/build/genesis/SHA256SUMS",
@@ -1783,7 +1783,7 @@
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "fe5b253d8c6883abd6c57d5de35b57591d6b994ea02d29ca1be482d880ac014e"
+   "sha256": "da9b3b07573d4afc9d03bd1ad4bfddde3f2181b77653dc15fe9afe370789cbd2"
   },
   {
    "path": "loment/selfhost/comefor.lomt",
@@ -2183,7 +2183,7 @@
   },
   {
    "path": "docs/210-loment-gc-design.md",
-   "sha256": "dd9f93aabf7ad5843716cc86143db67cab6686cd579d64146d5d261ded0f3c03"
+   "sha256": "b1fe5bf41dca962157f4bef91050d72f01a7dc0d6f15033f9b6fde98b60f4c13"
   },
   {
    "path": "docs/211-c-surface-grammar-sweep.md",
@@ -2351,7 +2351,7 @@
   },
   {
    "path": "docs/manual/index.md",
-   "sha256": "6729c70e735da1b51fb628fc9ccd33de3fc9b7eafd2c65ff8540ce3a837da0e0"
+   "sha256": "381a8179c9905a5e19aee53249a445786ab9960a91d5ac95cbc3591d85c5a59f"
   },
   {
    "path": "docs/manual/api/ahci.md",
