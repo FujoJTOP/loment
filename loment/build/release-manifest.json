@@ -1063,7 +1063,7 @@
   },
   {
    "path": "tools/loment_grammar_test.py",
-   "sha256": "8fb6f43ad6973eb861cdbeda2049949e3b5c2a5f15c9399cb01ed4d453c8c5e8"
+   "sha256": "56658c0eaee0755e69de78ff0553b69e76bc2aa358d7e36d74ae77fb9f96b183"
   },
   {
    "path": "loment/build/win_shim.bin",
