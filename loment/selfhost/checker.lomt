@@ -3064,6 +3064,52 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
 /// 各缓冲的尺寸按**语料实测**定 (字段≤2, 变体≤3, 形参≤11, 每函数 let≤152, 能力≤1,
 /// 各缓冲的尺寸按**语料实测**定 (字段≤2, 变体≤3, 形参≤11, 每函数 let≤152, 能力≤1,
 /// excluded≤2); 整块 `chk_arena_bytes()` 字节 —— 驱动按这几个 `chk_arena_*()` 切片。
+/// **语法前置趟** —— 把"**解析错就中止**"这条分界补回来。
+///
+/// 参考实现是**先解析、再检查**：源不成立（E019）它当场停，一行业务检查都不跑。自举侧没有
+/// 解析器，检查器直接对着 token 流跑，于是一个语法错之后它还会接着报**下游的伤** ——
+/// `let x = 1;` 会去解类型槽里的下一个 token、`let a: f64 = 1.0;` 还会额外说 `f64` 不是类型，
+/// 码集永远比参考**多一个**（issue #7 / #323 的 EXTRA）。
+///
+/// 这一趟只认**语法层**的形状，报出 E019；调用方看到非零就**不再跑任何检查趟** ——
+/// 于是"语法错了就不谈语义"这条分界恢复了，不是靠一条条补检查去凑。
+///
+/// 只收三类在这里能判定的（它们都不需要语句边界）：
+///   * `let NAME :` 的冒号不在（`if let` 是模式不是绑定，排除）
+///   * `=`（不是 `==` / `=>`）后面接不上一个表达式
+///   * 不支持的数值字面量形式（`0b1010` / `1_000` / `1.5`）
+/// 语句**起点**那一条要在走查里判（要边界），留在 `chk_body`，不在这儿重复。
+fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32) -> u32 {
+    let i: u32 = 0;
+    while chk_tok_kind(t, i) != 4 {
+        if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "let")
+                && !(i > 0 && (chk_tok_is(src, t, i - 1, "if")
+                               || chk_tok_is(src, t, i - 1, "comefor"))) {
+            // 只在真是 `let NAME …` 时判。`comefor let "def" to {` 里那个 `let` 是**宏声明
+            // 的关键字**、`let c {` 是**外部代码块声明**（`c` 是 `command c` 声明的语言名）
+            // —— 两者都不是变量绑定，误判会让整个文件**一趟检查都不跑**。
+            if chk_tok_kind(t, i + 1) == 0 && !chk_tok_is(src, t, i + 2, ":")
+                    && !chk_tok_is(src, t, i + 2, "{") && chk_tok_kind(t, i + 2) != 5 {
+                o = sym_pub(src, t, out, o, E_PARSE, i + 2);
+            }
+        }
+        if chk_tok_kind(t, i) == 3 && chk_tok_is(src, t, i, "=") {
+            if !chk_tok_is(src, t, i + 1, "=") && !chk_tok_is(src, t, i + 1, ">") {
+                // `{` 也算能开头: 外来表层里 `String[] NAMES = { … }` 是合法的
+                // （`loment/examples/multilang/03-java/`）。
+                if !chk_tok_is(src, t, i + 1, "{") && !chk_expr_start(src, t, i + 1) {
+                    o = sym_pub(src, t, out, o, E_PARSE, i + 1);
+                }
+            }
+        }
+        if chk_bad_num_suffix(src, t, i) {
+            o = sym_pub(src, t, out, o, E_PARSE, i);
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
 pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                    nc: ptr, exs: ptr, env: ptr, tyt: ptr) -> u32 {
     let oc: ptr = ptr_add(tyt, 4096);   // 诊断偏移格 (见 chk_arena_tyt)
@@ -3072,6 +3118,13 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     store32(oc, 0, 0);
     let n: u32 = 0;
     let o: u32 = 0;
+    // **语法前置趟**：报出任何 E019 就直接收工 —— 参考实现是"解析错就中止"，一条业务检查
+    // 都不跑；自举侧没有解析器，得把这条分界显式补上，否则下游会多报（issue #7 / #323）。
+    o = chk_syntax_prepass(src, t, out, 0);
+    if o != 0 {
+        store32(oc, 0, o);
+        return o / 8;
+    }
     let nexs: u32 = 0;
     let i: u32 = 0;
     // 核心模式**按维**各见过几次（`docs/175` §3.0 / §3.4）。声明的是**整个程序**的取值，
