@@ -172,7 +172,9 @@ _IR_HEAP = '''; ---- 分配器（docs/175 §3.4 的 `gc_manual`）--------------
 ;
 ; 三条规则，各有它要挡的东西：
 ;   * **第一次适配 + 拆分**：空闲块大到有余（余量 ≥ 16）就切一块出来，余下的还回链上。
-;     不拆的话一次大分配会把整个链表吃光。
+;     不拆的话一次大分配会把整个链表吃光。**记录尺寸永远等于这块的实际跨度** ——
+;     不拆的时候**不把 size 改小**（余量不足 16 字节，改小它换不来可用空间，
+;     只让按 size 走的遍历掉进块内部，`FujoJTOP/loment#368`）。
 ;   * **地址序**：链表按地址升序，`free` 线性找插入点。顺序让「前沿回退」可判。
 ;   * **前沿回退**：释放的那一块**正好顶到 bump 前沿**时，直接把前沿退回去。
 ;     这是 LIFO（分配—释放—再分配）不涨内存的原因；没有它，`free` 只是把块挂起来，
@@ -214,14 +216,25 @@ take:
   %rest = load i32, ptr %tpp
   br i1 %cansplit, label %split, label %nosplit
 split:
+  ; **块的记录尺寸只在「真拆了」的时候才改小**（`FujoJTOP/loment#368`）——
+  ; 原来这句在 `taken:` 里无条件执行，于是**不拆分**那条路（余量 < 16 字节，
+  ; 块还是那么大，只是没切）也会把 size 改成 `need`。后果有两层：
+  ;   * 按 `size` 往前走的每一趟（`__loment_alloc` 的首次适配、`__loment_sweep`、
+  ;     `__loment_propagate`、以及收集器的两步）都会从 `cur + need` 继续，
+  ;     而那已经不是下一块了 —— 它掉进**块的内部**，把载荷当尺寸读；
+  ;   * 载荷里的字节多半是 0 ⇒ `i += 0` ⇒ **死循环**（实测：2 分钟不返回）。
+  ; 判据：`loment_elf_test::test_a_reused_block_keeps_its_recorded_extent`。
   %so = add i32 %cur, %need
   %spp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %so
   store i32 %slack, ptr %spp
   %so4 = add i32 %so, 4
   %spp4 = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %so4
   store i32 %rest, ptr %spp4
+  store i32 %need, ptr %hp
   br label %relink
 nosplit:
+  ; 不拆：**尺寸原样留着**（就是 `%bsz`）—— 那几十字节的余量仍然在块里，
+  ; 只是不足以另立一块。改小它不会让那点余量变得可用，只会让遍历失步。
   br label %relink
 relink:
   %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
@@ -236,7 +249,6 @@ setprev:
   store i32 %newhead, ptr %ppp
   br label %taken
 taken:
-  store i32 %need, ptr %hp
   %t4b = add i32 %cur, 4
   %tppb = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %t4b
   store i32 -1, ptr %tppb
@@ -422,14 +434,18 @@ take:
   %rest = load i32, ptr %tpp
   br i1 %cansplit, label %split, label %nosplit
 split:
+  ; **块的记录尺寸只在「真拆了」的时候才改小**（`FujoJTOP/loment#368`）—— 理由见
+  ; `_IR_HEAP` 同一条（这段与那一份逐字同源，只换 arena 的来处与寻址）。
   %so = add i32 %cur, %need
   %spp = getelementptr i8, ptr %hb, i32 %so
   store i32 %slack, ptr %spp
   %so4 = add i32 %so, 4
   %spp4 = getelementptr i8, ptr %hb, i32 %so4
   store i32 %rest, ptr %spp4
+  store i32 %need, ptr %hp
   br label %relink
 nosplit:
+  ; 不拆：**尺寸原样留着**（就是 `%bsz`）。
   br label %relink
 relink:
   %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
@@ -444,7 +460,6 @@ setprev:
   store i32 %newhead, ptr %ppp
   br label %taken
 taken:
-  store i32 %need, ptr %hp
   %t4b = add i32 %cur, 4
   %tppb = getelementptr i8, ptr %hb, i32 %t4b
   store i32 -1, ptr %tppb

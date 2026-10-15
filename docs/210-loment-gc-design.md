@@ -333,6 +333,18 @@ rc=132 / alpha 跑通 rc=7）+ 逐字节（`loment_p8_test` 的 m88/m89/m91 —�
 （判据 `loment_elf_test::test_every_alloc_site_arms_the_collector`：修之前 `gc_auto` 那只也是
 rc = 132）。修法是把触发搬进那个共用发射点，**每个分配点都得问**。
 
+**第三个坑：分配器自己写坏了一条不变量，而**所有**遍历都按它走（2026-10-15，`FujoJTOP/loment#368`）**。
+`__loment_alloc` 的 `take` 有一句 `store i32 %need, ptr %hp`，位置在 `taken:` —— 也就是**无论拆没拆**
+都把块头的 `size` 改写成请求量。真拆了的时候那是对的（余下那截在 `cur + need` 处另立了一块）；
+**不拆**（余量 < 16 字节，所以没切）的时候就是错的：块的**跨度**仍是 `%bsz`，**记录尺寸**却小了
+`%bsz - %need`。于是每一趟**按 `size` 往前走的遍历**（首次适配、`__loment_sweep`、`__loment_propagate`、
+以及收集器那两趟清标记）都会从 `cur + need` 继续 —— 那不是下一块，是**块的内部**；载荷里那些字
+多半是 0 ⇒ `i += 0` ⇒ **死循环**。症状是"第二次回收之后程序不再返回"（`perf` 的样本全落在清标记
+那一趟的小循环里），而那几十个字节也从此谁都找不到。修法很小：那句只在 `split:` 里写，
+`nosplit:` 原样留着 —— **块的记录尺寸永远等于它的实际跨度**。
+判据 `loment_elf_test::test_a_recycled_block_does_not_derail_the_walks`（`#368` 的复现；
+修之前 `gc_auto` 那只被 timeout 杀掉，rc = 124）。
+
 **第二个坑（2026-10-14 挖出来的，比上面那个更疼）**：修上面那条时，顺手在释放那一格加了句
 「**释放前把标记清零**」—— 写成 `store i32 0, ptr %smp`。那不是清一格，是**越界清**：
 `@__loment_mark` 是**每 8 字节堆一位**的位图，`%smp` 指向的是一格**字节**，而 `store i32` 一次抹掉
@@ -556,6 +568,7 @@ L2 之所以能不扫描，是因为**严格后进先出**：前沿退回去，�
 | **`--debug` 不改产物** | L0 与 L2 各一份：`--debug` 的 IR 与不带的那一份**必须不同**且带 `#dbg_declare`（否则判据在空转），过**两个**链接器后与原生产物**逐字节相同**，跑起来退出码一致（`loment_elf_test::test_debug_flag_adds_metadata_and_nothing_else` + `::test_debug_ir_links_the_same_through_the_mirror`）| ✅ **已写** |
 | **回收不吞空闲链表** | 三只同源程序（只差 `choose` 档位与有没有 `free`）：循环里只握一块活块，每圈分配 8008 B、把**上一块** `free` 掉 —— 被 `free` 的那一块在回收发生时**没有任何根指着它**，正是"已经空闲、应当被重挂"的那一类。2.4 MB 请求过 64 KiB arena：`gc_auto` + `free` **跑完**（rc=7）、`gc_manual` + `free` **跑完**（钉住"程序本身跑得动"）、`gc_manual` 不 `free` **耗尽**（rc=132，证伪）。修之前第一只是 rc=132（`loment_elf_test::test_collection_keeps_blocks_that_were_already_free`，`FujoJTOP/loment#366`）| ✅ **已写**（2026-10-15）|
 | **每个分配点都触发** | 一份**一次 `alloc` 都不调**的程序（循环里 `str_concat(a, a)`，活集恒 32 B）：320 KB 请求过 64 KiB arena —— `gc_auto` **跑完**（rc=7）/ `gc_manual` **耗尽**（rc=132，证伪）。修之前 `gc_auto` 那只也是 rc=132：触发只挂在 `alloc` 内建上，`str_concat` 的分配点没问（`loment_elf_test::test_every_alloc_site_arms_the_collector`，`FujoJTOP/loment#367`）| ✅ **已写**（2026-10-15）|
+| **复用不让遍历失步** | `#368` 的复现：每圈拼一条 8 字节的串再 `free`、随后分配 16 字节 —— 被 `free` 的那块会被**复用**，而 `24 - 16 = 8 < 16` 正好走**不拆**那条路（块的记录尺寸被写小了，遍历掉进块内部读到 0 就原地打转）。4097 圈、两次回收：`gc_auto` **跑完**（rc=7；修之前被 timeout 杀掉 rc=124）/ `gc_manual` **耗尽**（rc=132，证伪）（`loment_elf_test::test_a_recycled_block_does_not_derail_the_walks`，`FujoJTOP/loment#368`）| ✅ **已写**（2026-10-15）|
 
 **注意第七、八条是互补的**：只做甲，一个"从不回收"的收集器也能过；只做乙，一个"乱回收"的能过。**这两条必须成对**，形状与 `gc_manual` 那条 `free` 的证伪对（带 `free` 跑通 rc=176 / 不带耗尽 rc=132）一样。
 

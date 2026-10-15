@@ -772,6 +772,67 @@ def test_every_alloc_site_arms_the_collector():
 
 
 @test
+def test_a_recycled_block_does_not_derail_the_walks():
+    """**复用一块空闲块之后，块头的"记录尺寸"必须仍是它的实际跨度**（`FujoJTOP/loment#368`）。
+
+    **Why**：`__loment_alloc` 的 `take` 原先在 `taken:` 里**无条件**把块头的 size 写成
+    `%need`。真拆了的时候那是对的（余下那截在 `cur + need` 处另立了一块），**不拆**的时候
+    就是错的：块的跨度仍是 `%bsz`，记录尺寸却小了 `%bsz - %need`（< 16 字节，所以没拆）。
+    于是**每一趟按 size 往前走的遍历**（首次适配、清扫、传播、收集器清标记那两趟）都从
+    `cur + need` 继续 —— 那不是下一块，是**块的内部**。载荷里那些字多半是 0 ⇒ `i += 0`
+    ⇒ **死循环**（实测：2 分钟不返回；`perf` 的样本全落在收集器清标记那一趟的小循环里）。
+    那几十个字节也从此谁都找不到（既不在链上、也不在前沿里）。
+
+    **How to apply**：语料取自 `#368` —— 每圈拼一条 8 字节的串（分配后立刻 `free`），再分配
+    一块 16 字节的；被 `free` 的那一块随后会被**复用**，而 `24 - 16 = 8 < 16` 正好走**不拆**
+    那条路。跑 4097 圈，两次回收之后遍历就会失步。
+      * `gc_auto` → **跑完**（rc = 7）；修之前它**在第二次回收上不返回**（rc = 124，被 timeout
+        杀掉 —— 所以这里的超时是判据的一部分，不是保险丝）；
+      * `gc_manual` → **必须崩**（rc = 132）：这一半是**证伪** —— 它证明这份程序确实有约
+        98 KB 的请求要过 64 KiB 的 arena，跑通不是"反正都跑得通"。
+
+    端到端：IR 过的是**包内镜像链接器**（`lomelf.compile_ll`）。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    body = ("module reuseextent\n%s\nchoose runtime\n\nconst SZ: u32 = 16;\n\n"
+            "fn _start() {\n"
+            "    let s: str = \"abcd\";\n"
+            "    let esc: ptr = alloc(SZ);\n"
+            "    store8(esc, 0, 1);\n"
+            "    let i: u64 = 0;\n"
+            "    while i < 4097 {\n"
+            "        let t: str = str_concat(s, \"efgh\");\n"
+            "        free(str_ptr(t));\n"
+            "        let q: ptr = alloc(SZ);\n"
+            "        store8(q, 0, 2);\n"
+            "        esc = q;\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    syscall4(60, 7, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, tier in (("auto", "choose gc_auto"), ("manual", "choose gc_manual")):
+            src = td / f"{tag}.lomt"
+            src.write_text(body % tier, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"reuseextent_{tag}", td, timeout=30)[0])
+    assert got[0] == 7, (
+        f"`gc_auto` 那一只没跑完：退出码 {got[0]}（期望 7）。124 = 被 timeout 杀掉，也就是"
+        "**在第二次回收上不返回** —— 有一块被复用之后记录尺寸与实际跨度对不上，"
+        "收集器清标记那一趟掉进块内部、读到 size=0 就原地打转")
+    assert got[1] != 7, (
+        f"**`gc_manual` 那一只也跑通了**（退出码 {got[1]}）—— 那这条判据测不出什么："
+        "arena 装得下这约 98 KB 请求，上面那只的 7 不是回收换来的")
+    print(f"      auto 跑通 (rc={got[0]})；manual 耗尽 (rc={got[1]}) —— 复用没有让遍历失步")
+
+
+@test
 def test_l0_static_promotion_bounds_the_heap():
     """**L0（静态提升）真的发生**（`docs/210` §2.2）—— 判据是**一对**程序。
 
