@@ -947,7 +947,7 @@
   },
   {
    "path": "tools/loment_elf_test.py",
-   "sha256": "6cad7b0fa732bb9973287e9bfd3545e9bb7018b4176d06a62fa954ae03865981"
+   "sha256": "b1f566bd4ebfe5094d1b1a4774e1a18dfb2f18271f0c7438de218069d58cc706"
   },
   {
    "path": "tools/loment_pe_test.py",
