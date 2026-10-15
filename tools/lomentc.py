@@ -357,9 +357,11 @@ HOSTED_ARENA_BYTES = 1 << 20
 #: **惰性**：第一次 `alloc` 才要（不在启动路径上挂钩子）；要不到就落 `__loment_abort`。
 #:
 #: **`sealed` 走不到这一段** —— 它走 `_IR_HEAP`，逐字节不变（`docs/228` §2）。
-_IR_HEAP_HOSTED = '''; ---- 分配器（`docs/228` 的 `hosted` 那一份；`docs/175` §3.4）--------------------
+_IR_HEAP_HOSTED_HEAD = '''; ---- 分配器（`docs/228`：arena 从**外面**来的那一份；`docs/175` §3.4）--------------------
 ;
-; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**宿主**来、寻址走 `%hb`。
+; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**外面**来
+; （**谁给**写在下面那段 `@__loment_arena()` 里：宿主给的、或产物里那块静态的）、
+; 寻址走 `%hb`（基址）。
 ;
 ; **`free` 的所有权校验与 `_IR_HEAP` 是同一套**（借出标记 `next == -1` + 四条廉价检查，
 ; 2026-10-13），残余边界同样写在 `docs/210` §2.8。
@@ -368,6 +370,10 @@ _IR_HEAP_HOSTED = '''; ---- 分配器（`docs/228` 的 `hosted` 那一份；`doc
 ;
 ; 一次要 `@ARENA@` 字节，惰性（第一次 `alloc` 才要）；要不到就 `__loment_abort`。
 
+'''
+
+#: `@__loment_arena()` 的**宿主版**：向宿主要一块（`malloc`）。
+_IR_ARENA_HOST = '''; **宿主版**：向宿主要一块（`malloc`），惰性（第一次 `alloc` 才要）。
 define internal ptr @__loment_arena() {
 entry:
   %h = load ptr, ptr @__loment_heap
@@ -387,8 +393,30 @@ have:
   %r = phi ptr [ %h, %entry ], [ %m, %set ]
   ret ptr %r
 }
+'''
 
-define internal ptr @__loment_alloc(i32 %size) {
+#: `@__loment_arena()` 的**封着版**：arena 是一块**就在产物里**的静态数组
+#: （`docs/219` §8b 的 **S2**，2026-10-15）。
+#:
+#: **为什么要单独一版**：`sealed` 的定义是"底下没有东西"（`docs/228` §2），所以没有宿主
+#: `malloc` 可问；而一个真 C 库（zlib 的 `deflateInit` 就是）要 **256–512 KiB**，比
+#: `_IR_HEAP` 那 64 KiB 大一档。两者合起来只有一条路：**arena 封在产物里，但给够**。
+#: "向外面要"（`mmap`/`brk`，即 `docs/219` §8b 的 **S1e B**）**不在这条路上** —— 它要一张
+#: 平台表，是另一格的事；这里**明说**代价：`[N x i8]` 是 `.bss`，而本仓的链接器把 `.bss`
+#: 按零字节摆进数据段（S1f 的取舍）⇒ **产物文件会大 N 字节**。
+#:
+#: **谁走这一版**：根开了运行期、声明了 `extern fn`、且**不是** `hosted` 的单元
+#: （见 `emit_llvm` 里那个门）。判据落在**产物自己说出来**的 `; loment-heap: ffi <N>` 上。
+_IR_ARENA_STATIC = '''@__loment_arena_block = internal global [@ARENA@ x i8] zeroinitializer
+
+define internal ptr @__loment_arena() {
+entry:
+  ret ptr @__loment_arena_block
+}
+'''
+
+#: `_IR_HEAP_HOSTED` 的**身子**：分配器本体 + 三个全局。与上面两段拼出两种 arena。
+_IR_HEAP_HOSTED_BODY = '''define internal ptr @__loment_alloc(i32 %size) {
 entry:
   %hb = call ptr @__loment_arena()
   %need0 = add i32 %size, 15
@@ -539,10 +567,37 @@ setprev:
   ret void
 }
 
-@__loment_heap = internal global ptr null
+@__loment_heap = internal global ptr zeroinitializer
 @__loment_off = internal global i32 8
 @__loment_freehead = internal global i32 0
-'''.replace("@ARENA@", str(HOSTED_ARENA_BYTES))
+'''
+
+
+def _heap_indirect(arena: str, nbytes: int) -> str:
+    """把"头 + 一段 `@__loment_arena()` + 身子"拼成一份**间接寻址**的分配器。
+
+    两处用它：`hosted`（arena 从宿主的 `malloc` 来）与 **FFI**（arena 是产物里那块静态
+    数组，见 `_IR_ARENA_STATIC`）。拼出来的两份**只差 arena 那一段** —— 分配器本体、分配器
+    状态、块的形状都是同一份文本，因为那才是"换 arena 不该动的东西"。
+    """
+    return (_IR_HEAP_HOSTED_HEAD + arena + "\n" + _IR_HEAP_HOSTED_BODY).replace(
+        "@ARENA@", str(nbytes))
+
+
+_IR_HEAP_HOSTED = _heap_indirect(_IR_ARENA_HOST, HOSTED_ARENA_BYTES)
+
+#: `FFI` 那一份的 arena 字节数（`docs/219` §8b 的 S2）。
+#:
+#: **量出来的，不是挑的**：真 `libz.a` 的 `deflateInit`（memLevel 默认 8）在这里要
+#: **256–512 KiB** —— 512 KiB 起 `compress → uncompress → 原文` 才跑完（实测矩阵见
+#: `docs/219` §8b）。取 1 MiB 是给它留一档余量。
+#:
+#: ⚠ **与 `HOSTED_ARENA_BYTES` 绑在一起**：`gc_auto` 那一档的收集器（标记表 = `arena/8`
+#: 行）**两份共用同一段文本**（`_IR_GC_HOSTED`）—— 前提就是这两个数**相等**。改一个必须
+#: 同时改另一个，否则 FFI + `gc_auto` 那份的表按错的 arena 算。这条不是注释，是约束。
+FFI_ARENA_BYTES = 1 << 20
+assert FFI_ARENA_BYTES == HOSTED_ARENA_BYTES, "FFI 与 hosted 的收集器共用文本，两个数必须相等"
+_IR_HEAP_FFI = _heap_indirect(_IR_ARENA_STATIC, FFI_ARENA_BYTES)
 
 _RUST_RUNTIME = '''
 // ---- Loment 运行时 (M15 堆分配) ----
@@ -7975,13 +8030,36 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 那一块，那条"不静默"的记号因此**没有再出现的场合**（判据从"它说了"改成"它涨了"）。
     # `gc_auto_alpha` 不用管 —— `hosted` 与它**定义上冲突**（`CORE_CONFLICTS`），走不到这儿。
     _hosted_grown = _hosted_port
+    # **`extern fn` 那一档的 arena**（`docs/219` §8b 的 **S2**，2026-10-15）：根开了运行期、
+    # 这份单元声明了 `extern fn`（于是堆按需带上，见 `_heap_needed`）、而且**不是** `hosted`
+    # （那一档本来就吃平台那一块，比这块还大）—— 这一档的 arena 换成**封在产物里、但给够**
+    # 的那一种（`_IR_HEAP_FFI`）。真 C 库要 256–512 KiB（zlib 的 `deflateInit`），
+    # `_IR_HEAP` 那 64 KiB 装不下 —— 这是 V1（`docs/183` §4）实测剩下的最后一件。
+    #
+    # **`gc_auto_alpha` 除外，而且是明写的边界**：那一档的收集器
+    # （`_IR_GC_TRIGGER_ADAPT`）是**直接寻址** arena 的（`getelementptr [65536 x i8], ptr
+    # @__loment_heap, …`），换 arena 就得连它一起换、也就是**再抄一份那段文本**；而 `hosted`
+    # 与 alpha **定义上冲突**（`CORE_CONFLICTS`），仓库里根本没有"间接寻址的 alpha"这份先例。
+    # 所以这一档**留在直接寻址的 64 KiB** —— 与改之前**逐字节相同**，并且**说出来**
+    # （`; loment-heap: static 65536`，"不静默"）。留这一格不是因为难：见 `_IR_ARENA_STATIC`
+    # 的说明，这是"再抄一份"要不要付的问题，`docs/158` §5 那条孪生纪律要挡的正是它。
+    _ffi_heap = rt_on and _declares_extern([mod, *deps]) and not _hosted_port
+    _ffi_grown = _ffi_heap and not gc_alpha
+    #: arena 是不是**从外面来**的（于是分配器与收集器都得走基址指针 `%hb`）
+    _indirect = _hosted_grown or _ffi_grown
     if _needs_heap:
         if _hosted_grown:
             out.append(f"; loment-heap: platform {HOSTED_ARENA_BYTES}")
             if "malloc" not in seen_ext:  # 用户自己 `declare` 过就让他那份说了算
                 out.append("declare ptr @malloc(i64)")
             out.append(_IR_HEAP_HOSTED)
+        elif _ffi_grown:
+            out.append(f"; loment-heap: ffi {FFI_ARENA_BYTES}")
+            out.append(_IR_HEAP_FFI)
         else:
+            if _ffi_heap:
+                # 上面那个例外：说了才不是静默。
+                out.append("; loment-heap: static 65536")
             out.append(_IR_HEAP)
     # **根表跟着 `gc_any` 发**（见 `_IR_ROOTS`）：`gc_auto` / `gc_auto_alpha` 只要函数里有
     # 指针槽就会往根表写 —— 而收集器**跟着堆发**。两件事解绑，才能让"有根没堆"的单元
@@ -7994,7 +8072,10 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                 # 它引用 `@__loment_heap`/`@__loment_off`/`@__loment_free`，所以必须排在堆之后。
                 # `hosted` 那一份与它**同源**（`_arena_indirect` 机器换的，见 `_IR_GC_HOSTED`）：
                 # 收集器要认的是**同一块 arena**，所以 arena 换了它也得换。
-                out.append(_IR_GC_HOSTED if _hosted_grown else _IR_GC)
+                # **FFI 那一档共用同一份**：`_IR_GC_HOSTED` 里的表是 `arena/8` 行，而
+                # `FFI_ARENA_BYTES` 与 `HOSTED_ARENA_BYTES` **同数**（1 MiB ⇒ 16384 行）——
+                # 这两个数是绑在一起的，不是各挑各的（改一个就得改另一个，见那条常量）。
+                out.append(_IR_GC_HOSTED if _indirect else _IR_GC)
             else:
                 # `gc_auto_alpha` 的**自适应**收集器（`docs/210` §2.4 的"策略池"那一半）：
                 # 与 `gc_auto` 同一段 mark-sweep 本体，**触发**换成自适应的那一支。此前

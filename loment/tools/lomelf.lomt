@@ -2867,6 +2867,27 @@ fn do_call_extern(tab: ptr, out: ptr, c: u32, t: ptr, lp: u32, rp: u32, nargs: u
 
 /// 读 `path` 那个 `.o`, 把它的代码节接到代码缓冲之后, 并为它导出的符号立标签。
 /// 返回新的代码缓冲游标。四条边界都是**硬失败** (与参考实现同口径, docs/173 §3)。
+/// 这个节是不是"**要处理的**重定位节"：SHT_RELA、非空、而且**被重定位的那个节不是
+/// 元数据节**。
+///
+/// 元数据节（`.eh_frame` / `.debug*` / `.comment` / `.note`）我们**不摆**，代码也引用不到
+/// 它们 —— 它们上面的重定位**丢掉无损**。这与参考实现 `_META_SEC` 那条一一对应。
+///
+/// ⚠ **不排除的话，自举侧会硬拒任何一个 clang 编出来的 `.o`**：它们都带
+/// `.rela.eh_frame`。参考侧照收、自举侧当场报"重定位指向非代码节" —— 两侧在
+/// "能链什么"上直接分叉（`FujoJTOP/loment#359` 实测到的第二条不一致）。
+///
+/// ⚠ 类型与长度先判、再去读 `sh_info` —— **不靠 `&&` 短路**（自举侧两个操作数都会被求值，
+/// 于是 `sec_name` 会拿着一个非 RELA 节的 `sh_info` 去读名字）。
+fn is_rela_to_lay(raw: ptr, k: u32, ns: u32) -> u32 {
+    if sh_type(raw, k) != 4 { return 0; }
+    if sh_size(raw, k) == 0 { return 0; }
+    let tgt: u32 = sh_info(raw, k);
+    if tgt >= ns { return 1; }              // 越界的目标：留给原来那条错误分支去报
+    if is_meta_sec(raw, sec_name(raw, tgt)) == 1 { return 0; }
+    return 1;
+}
+
 fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr,
                ap: u32) -> u32 {
     let fd: i64 = open_ro(path);
@@ -3072,7 +3093,7 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr,
     // 也拒 —— 本档不摆那些节, 静默算出来的地址是错的。
     let i5: u32 = 0;
     while i5 < ns {
-        if sh_type(mem, i5) == 4 && sh_size(mem, i5) > 0 {
+        if is_rela_to_lay(mem, i5, ns) == 1 {
             let tgt: u32 = sh_info(mem, i5);                  // sh_info = 被重定位的节
             let in_data: u32 = 0;
             if tgt < ns && is_data_sec(mem, tgt) == 1 {

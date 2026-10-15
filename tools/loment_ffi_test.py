@@ -1345,6 +1345,145 @@ def test_program_without_extern_is_unchanged():
         print("      无 extern 的程序: 路径照旧")
 
 
+# ---------------------------------------------------------------- 真静态库 (V1)
+
+#: `docs/183` §4 **V1**（静态 libc）的验收格：真 **`libz.a`** 经**我们自己的链接器**进来，
+#: `compress → uncompress → 原文` 逐字节对。
+#:
+#: 逻辑与 `loment_hosted_test.HOSTED_SRC` 是**同一份**（那一份走 `choose hosted` + 系统
+#: `libz.so`、由 C 工具链链；这一份走 `sealed` + `libz.a`、由 `lomelf` 链），失败码也对齐：
+#: 10 compress / 20 uncompress / 30 解压后的长度 / 40 内容 / 50 "压缩居然没变小"。
+#: 唯一的结构差别是入口（那份是 hosted 的 `main`，这份是我们自己链接器的 `_start`）——
+#: **两条判据合起来才是那句话**："能调真库"在**两个方向**上都成立。
+ZLIB_STATIC_SRC = """\
+module zlibstatic
+choose runtime
+
+extern fn compress(dst: ptr, dstlen: ptr, src: ptr, srclen: u64) -> i32;
+extern fn uncompress(dst: ptr, dstlen: ptr, src: ptr, srclen: u64) -> i32;
+
+const NSRC: u32 = 64;
+
+fn store32(p: ptr, off: u32, v: u32) {
+    store8(p, off, v as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+}
+
+fn load32(p: ptr, off: u32) -> u32 {
+    return load8(p, off)
+        + load8(p, off + 1) * 256
+        + load8(p, off + 2) * 65536
+        + load8(p, off + 3) * 16777216;
+}
+
+fn _start() {
+    let src: ptr = alloc(256);
+    let clen: ptr = alloc(16);
+    let comp: ptr = alloc(1024);
+    let olen: ptr = alloc(16);
+    let out: ptr = alloc(256);
+    let i: u32 = 0;
+    while i < NSRC {
+        store8(src, i, ((i % 8) + 65) as u8);
+        i = i + 1;
+    }
+    store32(clen, 0, 1024);
+    if compress(comp, clen, src, NSRC as u64) != 0 { syscall4(60, 10, 0, 0); }
+    let ncomp: u32 = load32(clen, 0);
+    store32(olen, 0, 256);
+    if uncompress(out, olen, comp, ncomp as u64) != 0 { syscall4(60, 20, 0, 0); }
+    if load32(olen, 0) != NSRC { syscall4(60, 30, 0, 0); }
+    let j: u32 = 0;
+    while j < NSRC {
+        if load8(out, j) != load8(src, j) { syscall4(60, 40, 0, 0); }
+        j = j + 1;
+    }
+    if ncomp >= NSRC { syscall4(60, 50, 0, 0); }
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+#: **证伪用的那一份**：只把逐字节比对的方向写错（拿 `out[j]` 与 `src[j] + 1` 比）。
+#: 若上面那条判据真的在测"算对了"，这一份就**必须**报 40；它要是也 rc=0，说明那条判据测的
+#: 是"能跑"而不是"算对"（`loment_hosted_test` 那一份的证伪是同一条道理）。
+ZLIB_STATIC_FALSIFIER_SRC = ZLIB_STATIC_SRC.replace(
+    "if load8(out, j) != load8(src, j) { syscall4(60, 40, 0, 0); }",
+    "if load8(out, j) != ((load8(src, j) + 1) % 256) { syscall4(60, 40, 0, 0); }")
+assert ZLIB_STATIC_FALSIFIER_SRC != ZLIB_STATIC_SRC, "证伪件没改到东西"
+
+#: 系统静态 zlib 的几个常见落点（发行版布局不同）。**没有就 SKIP** —— 这不是"判据放宽"：
+#: 缺 `libz.a` 的机器上这一格**测不了**，而"测不了"与"过了"必须分开说。
+LIBZ_CANDIDATES = ("/usr/lib/x86_64-linux-gnu/libz.a", "/usr/lib64/libz.a",
+                   "/usr/lib/libz.a", "/usr/lib/x86_64-linux-gnu/libz.a.orig")
+
+
+def _system_libz(dst: Path) -> Path | None:
+    """把系统那份 `libz.a` 取到**仓库里**（两侧都要读它：参考实现在 Windows 侧读文件，
+    镜像在 WSL 侧按仓库相对路径读）。
+
+    走 `cat` 而不是 `cp`：WSL 往 `/mnt/*` 写、Windows 侧立刻读会读到**空的**（9p 的可见性
+    延迟，`docs/` 里记过）。字节从 WSL 的 stdout 过来就没有这个问题。
+    """
+    for cand in LIBZ_CANDIDATES:
+        r = subprocess.run(["wsl", "-e", "bash", "-lc", f"cat {cand}"],
+                           capture_output=True, timeout=300, shell=False)
+        if r.returncode == 0 and len(r.stdout) > 4096:
+            dst.write_bytes(r.stdout)
+            return dst
+    return None
+
+
+@test
+def test_a_real_static_library_round_trips():
+    """真 `libz.a` 经**我们自己的链接器**：`compress → uncompress → 原文`。
+
+    **Why**：这是 `docs/183` §4 的 **V1** 验收格，也是 `docs/219` §8b 那条线一直盯着的
+    "第一个真库"。它与 `loment_hosted_test` 那条**看着像**，其实是**另一个方向**：那条走
+    `choose hosted`（产物由 C 工具链链、库是 `.so`、堆问宿主要），这条走 `sealed`（产物由
+    `lomelf` 自己链、库是 `.a`、堆**封在产物里**）。两条都绿才叫"能调真库在两个方向上都成立"。
+
+    **它测的是插件面之外的东西**：真库是个 **`ar` 归档**（16 个成员，成员之间互相引用），
+    所以这条判据同时钉住**固定点成员选择**（不整包收 —— 整包收会把 `gz*` 那些成员的
+    `fopen`/`printf` 一起拖进来，整个库就被端口门拒了）与 arena 够不够大（`deflateInit`
+    要 256–512 KiB，见 `lomentc.FFI_ARENA_BYTES`）。
+
+    **证伪**：见 `ZLIB_STATIC_FALSIFIER_SRC` —— 比对方向写反的那一份必须报 40。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        ark = _system_libz(ROOT / "loment" / "build" / "_libz_probe.a")
+        if ark is None:
+            print("      SKIP: 这台机器上没有 libz.a（要 zlib1g-dev）—— 这一格测不了")
+            return
+        try:
+            # 先量"这条判据真的踩在归档上" —— 不然它测的是别的什么
+            fo = lomelf.load_foreign(ark)
+            n_mem = len(fo.members)
+            assert n_mem >= 8, f"libz.a 只有 {n_mem} 个成员？这不是真库"
+            for tag, src, want in (("roundtrip", ZLIB_STATIC_SRC, 0),
+                                   ("falsifier", ZLIB_STATIC_FALSIFIER_SRC, 40)):
+                (td / f"{tag}.lomt").write_text(src, encoding="utf-8", newline="\n")
+                rc, err = build_and_run(td, td / f"{tag}.lomt", [ark], want)
+                assert rc == want, (
+                    f"[{tag}] rc={rc}（期望 {want}）err={err[-300:]!r}")
+            # 选出来的是**该要的那几个成员**，不是整包（整包会被端口门拒 —— 那正是
+            # "不整包收"存在的理由）
+            picked = lomelf.Archive(ark).select({"compress", "uncompress"})
+            names = [o.name for o in picked]
+            assert len(picked) < n_mem, f"把整个归档都收进来了: {n_mem} 个成员"
+            assert any("compress" in n or "deflate" in n for n in names), names
+            print(f"      真 libz.a（{n_mem} 个成员）→ 挑出 {len(picked)} 个 → "
+                  f"compress/uncompress 逐字节回原文 (rc=0)；证伪件报 40")
+        finally:
+            ark.unlink(missing_ok=True)
+
+
 def main() -> int:
     failed = []
     for fn in TESTS:

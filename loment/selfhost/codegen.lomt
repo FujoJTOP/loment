@@ -5166,20 +5166,40 @@ setprev:
 }
 
 /// **`hosted` 那一份分配器**（`docs/228` 的 A = `docs/219` §8b 的 **S1e**）——
-/// 下面这段字面量与 `lomentc._IR_HEAP_HOSTED` **逐字节同源**（脚本从它生成，不手抄）。
+/// 下面这几段字面量与 `lomentc._IR_HEAP_HOSTED` **逐字节同源**（脚本从它切的，不手抄）。
 ///
-/// 与 `emit_heap` **同序、同一条空闲链表**，只换两件事：arena 从**宿主**来
+/// 与 `emit_heap` **同序、同一条空闲链表**，只换两件事：arena 从**外面**来
 /// （`@__loment_arena()` 惰性地 `malloc` 一块，拿不到就 `__loment_abort`），
 /// 于是寻址全走 `%hb`（基址）。块的形状、地址序、首次适配 + 拆分、前沿回退一个字节没动。
+///
+/// **切成三段**：`HEAD`（注释）/ `@__loment_arena()` / `BODY`（分配器本体 + 全局）。
+/// 切在那儿是因为 arena 那一段有**两个版本**（宿主给的、封在产物里给的）——
+/// 换的就是那一段，另外两段一个字都不动 —— 所以是**一个**函数带标志，不是两个。
 ///
 /// **`sealed` 走不到这一段**（`docs/228` §2）—— 闸门是 `choose hosted`，所以现存每一份
 /// sealed 产物的字节不变。**`gc_any` 档也走不到**：收集器的标记表按 arena 偏移索引、
 /// 行数 = arena/8，换 arena 要同时换表的口径，那是收集器的活（`docs/228` §4 的 B1）。
-/// 它**不静默**：那一档发 `; loment-heap: static 65536`（见 `emit_llvm` 里那个门）。
-fn emit_heap_hosted(s: ptr, out: ptr) -> u32 {
-    return emit_str(s, out, "; ---- 分配器（`docs/228` 的 `hosted` 那一份；`docs/175` §3.4）--------------------
+/// **`extern fn` 那一份分配器**（`docs/219` §8b 的 **S2**，2026-10-15）——
+/// 与 `emit_heap_hosted` **只差 arena 那一段**：宿主那一版问 `malloc`，这一版是
+/// **产物里那块静态数组**（`@__loment_arena_block`）。真 C 库（zlib 的 `deflateInit`）
+/// 要 256–512 KiB，`emit_heap` 那 64 KiB 装不下 —— 而 `sealed` 的定义是"底下没有东西"，
+/// 没有宿主的 `malloc` 可问（`docs/228` §2）。
+///
+/// **代价明写**：`[1048576 x i8]` 是 `.bss`，而本仓的链接器把 `.bss` 按零字节摆进
+/// 数据段（S1f 的取舍）⇒ 产物文件大 1 MiB。"向外面要"（`mmap`/`brk` = S1e B）不在
+/// 这条路上。
+///
+/// **谁走这一版**：根开了运行期、声明了 `extern fn`、且**不是** `hosted` 的单元。
+/// 产物自己说出来：`; loment-heap: ffi 1048576`。
+/// **`gc_auto_alpha` 除外**（那一档的收集器是直接寻址 arena 的，见 `emit_llvm`）——
+/// 它留在 64 KiB 并说出 `; loment-heap: static 65536`。
+fn emit_heap_indirect(s: ptr, out: ptr, statik: u32) -> u32 {
+    let d: u32 = 0;
+    d = d + emit_str(s, out, "; ---- 分配器（`docs/228`：arena 从**外面**来的那一份；`docs/175` §3.4）--------------------
 ;
-; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**宿主**来、寻址走 `%hb`。
+; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**外面**来
+; （**谁给**写在下面那段 `@__loment_arena()` 里：宿主给的、或产物里那块静态的）、
+; 寻址走 `%hb`（基址）。
 ;
 ; **`free` 的所有权校验与 `_IR_HEAP` 是同一套**（借出标记 `next == -1` + 四条廉价检查，
 ; 2026-10-13），残余边界同样写在 `docs/210` §2.8。
@@ -5188,6 +5208,18 @@ fn emit_heap_hosted(s: ptr, out: ptr) -> u32 {
 ;
 ; 一次要 `1048576` 字节，惰性（第一次 `alloc` 才要）；要不到就 `__loment_abort`。
 
+");
+    if statik == 1 {
+        d = d + emit_str(s, out, "@__loment_arena_block = internal global [1048576 x i8] zeroinitializer
+
+define internal ptr @__loment_arena() {
+entry:
+  ret ptr @__loment_arena_block
+}
+
+");
+    } else {
+        d = d + emit_str(s, out, "; **宿主版**：向宿主要一块（`malloc`），惰性（第一次 `alloc` 才要）。
 define internal ptr @__loment_arena() {
 entry:
   %h = load ptr, ptr @__loment_heap
@@ -5208,7 +5240,9 @@ have:
   ret ptr %r
 }
 
-define internal ptr @__loment_alloc(i32 %size) {
+");
+    }
+    d = d + emit_str(s, out, "define internal ptr @__loment_alloc(i32 %size) {
 entry:
   %hb = call ptr @__loment_arena()
   %need0 = add i32 %size, 15
@@ -5359,12 +5393,17 @@ setprev:
   ret void
 }
 
-@__loment_heap = internal global ptr null
+@__loment_heap = internal global ptr zeroinitializer
 @__loment_off = internal global i32 8
 @__loment_freehead = internal global i32 0
-
 ");
+    return d;
 }
+
+
+
+
+
 
 /// **自动回收**（`choose gc_auto`）—— 文本与 `lomentc._IR_GC` **逐字节同源**
 /// （下面的字面量是脚本从 `_IR_GC` 切的，不手抄）。
@@ -6376,11 +6415,15 @@ fn heap_needed(s: ptr, src: ptr, toks: ptr, rt_on: u32) -> u32 {
     // "引用了未定义的符号 malloc"。与参考实现 `_declares_extern` 同一条规则。
     // **`no_runtime` 不跟**：那一维是保证（`docs/217`），产物里不带运行期。
     // **不另写一个函数**：这一层加函数真的会慢下去（`docs/231` §2.2 量过 +4.7s）。
+    // 顺带把"声明了 `extern fn`"这件事记进槽 544 —— `emit_llvm` 那一步要拿它挑 arena
+    // （`docs/219` §8b 的 S2：外源库那一档要 256–512 KiB，64 KiB 装不下）。同一趟扫描的
+    // 副产品，不另写第二遍（`docs/231` §2.2 那笔账）。
     if rt_on == 1 {
         let j: u32 = 0;
         while tok_kind(toks, j) != 4 {
             if tok_kind(toks, j) == 0 && tok_is(src, toks, j, "extern") == 1 {
                 if tok_kind(toks, j + 1) == 0 && tok_is(src, toks, j + 1, "fn") == 1 {
+                    store32(s, 544, 1);
                     return 1;
                 }
             }
@@ -6624,6 +6667,7 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     if rt_on == 1 {
         store32(s, 512, 1);
     }
+    store32(s, 544, 0);   // "声明了 `extern fn`"——由 heap_needed 那一趟扫描顺带写下
     store32(s, 516, heap_needed(s, src, toks, rt_on));
     store32(s, 532, strings_needed(src, toks));
     // 符号表: 登记函数。同时识别 trait 声明 (方法只声明不发射) 与 impl 块 (方法名 = <类型>_<方法>)
@@ -6848,14 +6892,32 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     // 所以两侧说的一定是同一件事。**收集器那一档也在这支里**（`docs/230`，= B1）：
     // 标记表的行数就是 arena/8，所以换 arena 必须同时换表（见下面 `emit_gc_hosted`）。
     // `gc_auto_alpha` 不用管 —— `hosted` 与它定义上冲突，走不到这儿。
+    //
+    // **`extern fn` 那一支**（`docs/219` §8b 的 **S2**，2026-10-15）：声明了外部函数
+    // （槽 544）而**不是** `hosted` 的单元，arena 换成**产物里那块静态的、给够 1 MiB 的**
+    // 那一版（`emit_heap_ffi`）。真 C 库要 256–512 KiB，64 KiB 装不下。
+    // **`gc_auto_alpha` 除外，而且是明写的边界**：那一档的收集器（`emit_gc`）是**直接寻址**
+    // arena 的，换 arena 就得连它一起换、再抄一份那段文本；`hosted` 与 alpha 定义上冲突，
+    // 仓库里没有"间接寻址的 alpha"这份先例。所以这一档留在 64 KiB —— 与改之前逐字节相同，
+    // 并且**说出来**（`; loment-heap: static 65536`，"不静默"）。
+    // 与参考实现 `_ffi_heap` / `_ffi_grown` 同一条规则。
+    let indirect: u32 = 0;
     if load32(s, 516) == 1 {
         if contains_ident(src, toks, "hosted") == 1 {
             emit_str(s, out, "; loment-heap: platform 1048576\n");
             if extern_named(s, src, toks, "malloc") == 0 {
                 emit_str(s, out, "declare ptr @malloc(i64)\n");
             }
-            emit_heap_hosted(s, out);
+            emit_heap_indirect(s, out, 0);
+            indirect = 1;
+        } else if load32(s, 544) == 1 && load32(s, 572) != 1 {
+            emit_str(s, out, "; loment-heap: ffi 1048576\n");
+            emit_heap_indirect(s, out, 1);
+            indirect = 1;
         } else {
+            if load32(s, 544) == 1 {
+                emit_str(s, out, "; loment-heap: static 65536\n");
+            }
             emit_heap(s, out);
         }
     }
@@ -6867,7 +6929,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
             // 一份不用 `alloc` 的单元（alpha 把 alloc 全 L0 提走那种）**不该带收集器** ——
             // 它引用的是堆那几个全局，带上了就是引用未定义符号。
             // `hosted` 那一份收集器要认的是**同一块 arena**（`docs/230`），所以 arena 换了它也换。
-            if contains_ident(src, toks, "hosted") == 1 {
+            // FFI 那一档**共用同一份**（`indirect` 两条都算）：表是 arena/8 行，而两个 arena
+            // 数相等（都是 1 MiB ⇒ 16384 行）—— 那两个数是绑在一起的，见参考实现那条 assert。
+            if indirect == 1 {
                 emit_gc_hosted(s, out);
             } else {
                 emit_gc(s, out);

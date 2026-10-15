@@ -226,7 +226,7 @@ D 假设"碰了什么"是一个**语义**问题。**严格说它不是我们要�
 | **S1d** | `calloc` / `realloc` | 组合出来（`realloc` 要读块头拿旧长度）。**今天它们仍是 `unknown` ⇒ 拒** | 同 C2 的形状，加一条"旧内容被保住" | 未开工 |
 | **S1e** | **堆问 OS 要页** | 前沿从 64 KiB 静态数组换成**向外面要**；`calloc`/`realloc` 之上，**zlib 才真的进得来** | §8 C1（zlib） | **A 已落地（`docs/228`）**；B 未开工 |
 | **S1f** | **数据节**（`.rodata` / `.data` / `.bss`） | 外部对象的 `SHF_ALLOC` 数据节**摆进输出数据段**，其中的符号（含**局部**与**节符号**）立标签，**落在数据节上的重定位**也应用。**这是"读得进来"那一格**：在此之前字符串常量会让代码里那条 `lea rdi, [rip + .L.str]` 以"引用了未定义的符号"报出来 | `loment_ffi_test` 一条（`.rodata` 字符串 + `.data.rel.ro` 表 → **100**）+ 镜像多一格逐字节。自举侧顺带修了一处**静默错**：bss 的地址原先在对象数据**之前**算，`@__loment_heap` 会与对象数据重叠 | ✅ **2026-10-11** |
-| **S2** | **第一个真库** | 一个只用"可闭合 + 世界"两面的真库链进来并跑通 | §8 C1（zlib）—— `.rodata`/`.data` 那关已由 **S1f** 关掉 | **部分**（2026-10-11）：**真 zlib 链得进来**（15 个成员全读得进来；定点选出 deflate/inflate/trees/zutil/adler32/crc32/inffast）且 **`crc32` 算得对**（`crc32(0,"AAAA",4)` = `0x9b0d08f1`，与 CPython 逐位一致）。`compress` 还差三件，见下。**在发行版里这条路锁着**（2026-10-12，见下） |
+| **S2** | **第一个真库** | 一个只用"可闭合 + 世界"两面的真库链进来并跑通 | §8 C1（zlib）—— `.rodata`/`.data` 那关已由 **S1f** 关掉 | **部分**（2026-10-11）：**真 zlib 链得进来**（15 个成员全读得进来；定点选出 deflate/inflate/trees/zutil/adler32/crc32/inffast）且 **`crc32` 算得对**（`crc32(0,"AAAA",4)` = `0x9b0d08f1`，与 CPython 逐位一致）。`compress` 还差三件，见下。**在发行版里这条路锁着**（2026-10-12，见下）。**2026-10-15**：三件里的两件（局部符号、栈对齐）与 arena 那条都落了（两侧实现 + 判据）；`compress → uncompress → 原文` 这一格仍在收尾 —— **卡在自举链接器的 `ar`**（见本节末） |
 | **S3** | **开关 + 阶跃约束** | `choose` 官方开关（`docs/182` §C4）；`hosted` × GC 档互斥 | §8 C4 / C6 | 未开工 |
 
 **S1a 的粒度是"有没有外部对象"，不是"有没有人要它"。** 精确到后者要链接器先算出需求集，
@@ -291,6 +291,41 @@ D 假设"碰了什么"是一个**语义**问题。**严格说它不是我们要�
 而原文第 3 条那个症状（`zlibVersion()[0]` 读到 0、`deflateInit_` 返 `Z_VERSION_ERROR`）
 **在 S1f 之后已经不复现**：重测时它读回 `1.3.1`；`deflateInit_` 仍报 -6，但原因是第 2 条
 —— 那条版本检查比的正是被串掉的常量。
+
+#### 2026-10-15 落地：三条各修在两个实现里，各自带判据
+
+| # | 改了什么 | 两侧各一处 | 判据 |
+|---|---|---|---|
+| 1 | **局部符号按对象改名**（`bind == 0`） | `lomelf.py` 的 `name_of` / `lomelf.lomt` 的 `copy_local_name`（**登记与查找同一条规则**） | `loment_ffi_test::test_local_symbols_do_not_collide_across_members`（`-O0` 编出真局部符号；两个成员的 `.LC0` 不许解析到同一个名字）+ `loment_elf_test` 的镜像格 `ffi7`（与参考**逐字节**同） |
+| 2 | **extern 调用点按 SysV 对齐** | `Emitter._call` 的 extern 支 / `do_call_extern`（`mov rbx,rsp` · `and rsp,-16` · `call` · `mov rsp,rbx`） | `test_extern_call_sites_are_sixteen_byte_aligned`（C 侧 inline asm 报进入时 `rsp % 16`，要 **8**）+ 镜像格 `ffi8` |
+| 3 | **arena 给够**（1 MiB，**封在产物里**） | `_IR_HEAP_FFI`（与宿主那一份**共用 BODY**，只换 arena 那一段）/ `emit_heap_ffi` | `lomentc_test::test_ffi_artifacts_get_an_arena_big_enough_for_a_real_library` |
+
+第 3 条**落在哪一档是量出来的**，不是定的：`extern fn` 且根开运行期 ⇒ 1 MiB 的**静态**块
+（`sealed` 没有宿主的 `malloc` 可问）；**不是** `hosted`（它本来就吃平台那一块，更大）；
+`gc_auto` **跟着换同一份收集器**（标记表 = arena/8 行 ⇒ 16384）；**`gc_auto_alpha` 明写地
+留在 64 KiB**，而且**说出来**（`; loment-heap: static 65536`）—— 那一档的收集器是**直接
+寻址 arena** 的，换 arena 就要连它一起换、再抄一份那段文本；而 `hosted` 与 alpha **定义上
+冲突**，仓库里没有"间接寻址的 alpha"这份先例。**代价也明写**：`[1048576 x i8]` 是 `.bss`，
+而本仓的链接器把 `.bss` 按零字节摆进数据段（S1f 的取舍）⇒ **产物文件大 1 MiB**；
+"向外面要"（`mmap`/`brk`，即 S1e B）不在这一格里。
+
+**判据要两个方向一起判**：同一份源**去掉 `extern fn`** ⇒ 必须还是老样子（64 KiB、直接
+寻址、产物里一个字不提 arena）。只判"FFI 那一份很大"会被"给**所有**程序都加大"骗过 ——
+而那正是 `sealed` 那条保证被改掉的样子（同一个坑 `docs/228` §5 的 A1 已经踩过）。
+
+#### 顺带修掉的一处、顺带探到的一件
+
+1. **`.eh_frame`：两侧行为不一致**（**本笔修掉**）。参考实现把"指向**元数据节**
+   （`.eh_frame` / `.debug` / `.comment` / `.note`）的重定位**无害丢弃**，而自举那份
+   **硬拒**（"重定位指向非代码节"）—— 同一份真 clang 产物（`-O0` 带的 `.eh_frame`）
+   参考链得过、镜像链不过。现在两边同一条规则（`is_rela_to_lay`）。这是"孪生判据只证明
+   **一致**、不证明**对**"那条教训的另一面：**行为不一致本身就是缺陷**，只是它一直没被测到
+   —— 镜像那 8 例里原来**没有一格**是带 `.eh_frame` 的对象。
+2. **自举链接器不吃 `ar` 归档**（**仍未做**）。参考实现的 `Archive.select` 是**固定点成员
+   选择**（某成员**定义**了当前需要的符号就收它，收完把它引用的未定义符号也加进需求，重复
+   到不变；**不整包收**），自举那份一次只驻留**一个** `.o`。⇒ "整个 zlib 归档过不过自举
+   链接器"这一问，今天答**否**；而它正是 V1 验收要的一格（`FujoJTOP/loment#359` 正文点名）。
+   这是 S2 之后紧接着的一格。
 
 两半表不许分叉这件事有一条判据钉着（`loment_ports_test` 的
 `test_the_linkers_conscript_surface_is_inside_the_rulers_provide_set`）。
