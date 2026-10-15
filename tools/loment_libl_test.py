@@ -291,6 +291,32 @@ int main(void) {
         printf("sn_cap1=%d\n", n); printf("sn_cap1_b0=%d\n", (int)(unsigned char)b[0]);
     }
 
+    /* ---- stdlib: 分配（libc 名字，底下是内建堆） ---- */
+    {
+        unsigned char *a = (unsigned char *)malloc(16);
+        unsigned char *b = (unsigned char *)malloc(16);
+        unsigned char *z, *z2;
+        long k;
+        int allz;
+        printf("malloc_nonnull=%d\n", a != NULL && b != NULL);
+        printf("malloc_distinct=%d\n", a != b);
+        for (k = 0; k < 16; k++) a[k] = (unsigned char)(k + 1);
+        printf("malloc_rw=%d\n", a[0] == 1 && a[15] == 16);
+        free(a); free(b);
+        z = (unsigned char *)calloc(4, 4);
+        allz = 1; for (k = 0; k < 16; k++) if (z[k] != 0) allz = 0;
+        printf("calloc_zero=%d\n", allz);
+        /* 复用路：写脏 -> free -> 再 calloc ⇒ 又必须是 0。只走 bump 的测试会假绿。 */
+        for (k = 0; k < 16; k++) z[k] = 9;
+        free(z);
+        z2 = (unsigned char *)calloc(4, 4);
+        allz = 1; for (k = 0; k < 16; k++) if (z2[k] != 0) allz = 0;
+        printf("calloc_zero_reuse=%d\n", allz);
+        printf("malloc_zero_nonnull=%d\n", malloc(0) != NULL);
+        /* 溢出：n * sz 绕回去。libc 也在这里返回 NULL。 */
+        printf("calloc_overflow_null=%d\n", calloc((size_t)-1, 2) == NULL);
+    }
+
     return 0;
 }
 '''.replace("@@ROWS@@", rows) \
@@ -332,6 +358,18 @@ fn lit(s: str) -> ptr {
 
 fn nul() -> ptr {
     return 0 as ptr;
+}
+
+/// 前 n 个字节是不是全 0 —— `calloc` 那条复用路要问的问题。
+fn zero_n(p: ptr, n: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != 0 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
 }
 
 fn b2i(b: bool) -> i64 {
@@ -688,6 +726,31 @@ fn _start() {
     sn = sp(ob, 1, "abc", 0 as u64, 0 as u64, 0 as u64, 0);
     say(sc, "sn_cap1", sn as i64);
     say(sc, "sn_cap1_b0", load8(ob, 0) as i64);
+
+    // ---- stdlib: 分配（libc 名字，底下是内建堆）
+    let ma: ptr = malloc(16 as u64);
+    let mb: ptr = malloc(16 as u64);
+    say(sc, "malloc_nonnull", b2i(((ma as u64) != (0 as u64)) && ((mb as u64) != (0 as u64))));
+    say(sc, "malloc_distinct", b2i((ma as u64) != (mb as u64)));
+    store8(ma, 0, 1 as u8);
+    store8(ma, 15, 16 as u8);
+    say(sc, "malloc_rw", b2i(load8(ma, 0) == 1 && load8(ma, 15) == 16));
+    let _f1: u32 = free(ma);
+    let _f2: u32 = free(mb);
+    let mz: ptr = calloc(4 as u64, 4 as u64);
+    say(sc, "calloc_zero", b2i(zero_n(mz, 16)));
+    // 复用路：写脏 -> free -> 再 calloc ⇒ 又必须是 0（只走 bump 那一支会假绿）
+    let kk: u32 = 0;
+    while kk < 16 {
+        store8(mz, kk, 9 as u8);
+        kk = kk + 1;
+    }
+    let _f3: u32 = free(mz);
+    let mz2: ptr = calloc(4 as u64, 4 as u64);
+    say(sc, "calloc_zero_reuse", b2i(zero_n(mz2, 16)));
+    say(sc, "malloc_zero_nonnull", b2i((malloc(0 as u64) as u64) != (0 as u64)));
+    say(sc, "calloc_overflow_null",
+        b2i((calloc(18446744073709551615 as u64, 2 as u64) as u64) == (0 as u64)));
 
     syscall4(60, 0, 0, 0);
 }
