@@ -169,14 +169,18 @@ class Profile:
     同一条加法每一次执行只能是 i32 —— "观察到 i32"不是新信息。V8 反馈向量最重要那一项
     是给它吃的 **JavaScript**（没有类型）准备的，照抄过来是空的（`docs/246` §1）。
 
-    站点标识 = (函数名, 块标签, 块内指令下标)。**输出按标识排序** —— 同一份程序 + 同样输入
-    必须给**逐字节相同**的文件，否则 T2/T3 拿它当输入就无法复现（`docs/226` 同一条规矩）。
+    站点标识 = (函数名, 块标签, 块内指令下标)。**输出按 IR 的解析顺序**，不是按名字排序 ——
+    自举那一侧没有排序（固定表、按解析顺序摆），而两边要逐字节比同一份剖面。
+    解析顺序对同一份 IR 是确定的，所以"确定性"这条判据照样成立（`docs/246` §4）。
     """
 
     def __init__(self) -> None:
         self.blocks: dict[tuple[str, str], int] = {}
         self.edges: dict[tuple[str, str, int, int], int] = {}
         self.calls: dict[tuple[str, str, int, str], int] = {}
+        #: 解析出来的函数表（`lomelf.parse_ll` 的那一份，**顺序就是 IR 里的顺序**）。
+        #: `text()` 靠它遍历 —— 见上面那段"为什么按解析顺序"。
+        self.funcs: list = []
 
     @staticmethod
     def _bump(d: dict, k) -> None:
@@ -192,21 +196,35 @@ class Profile:
         fn, blk, idx = site
         self._bump(self.calls, (fn, blk, idx, callee))
 
+    def bind(self, funcs: list) -> None:
+        """接上解析出来的函数表 —— `run_ir` 解析完就调它。"""
+        self.funcs = funcs
+
     def text(self) -> str:
-        """剖面文本。**第三方可读是构造出来的**：一张按 TAB 分列、按标识排序的表。"""
-        out = [
-            "# lvm profile v1",
-            "# site = (function, block, instruction-index-in-block); a block is (function, block)",
-            "[blocks]",
-        ]
-        for k in sorted(self.blocks):
-            out.append(f"{k[0]}\t{k[1]}\t{self.blocks[k]}")
-        out.append("[edges]")
-        for k in sorted(self.edges):
-            out.append(f"{k[0]}\t{k[1]}\t{k[2]}\t{k[3]}\t{self.edges[k]}")
-        out.append("[calls]")
-        for k in sorted(self.calls):
-            out.append(f"{k[0]}\t{k[1]}\t{k[2]}\t{k[3]}\t{self.calls[k]}")
+        """剖面文本。**第三方可读是构造出来的**：一张按 TAB 分列的表。
+
+        ⚠ **遍历顺序 = IR 的解析顺序**（函数 → 块 → 指令），不是按名字排序：自举那一侧的
+        固定表就是按解析顺序摆的，两边要比逐字节（`docs/246` §4 记了这条取舍）。
+        """
+        blocks: list[str] = []
+        edges: list[str] = []
+        calls: list[str] = []
+        for fn in self.funcs:
+            for blk in fn.blocks:
+                n = self.blocks.get((fn.name, blk.label))
+                if n:
+                    blocks.append(f"{fn.name}\t{blk.label}\t{n}")
+                for idx in range(len(blk.instrs)):
+                    for (f2, b2, i2, e), k in self.edges.items():
+                        if (f2, b2, i2) == (fn.name, blk.label, idx):
+                            edges.append(f"{f2}\t{b2}\t{i2}\t{e}\t{k}")
+                    for (f2, b2, i2, callee), k in self.calls.items():
+                        if (f2, b2, i2) == (fn.name, blk.label, idx):
+                            calls.append(f"{f2}\t{b2}\t{i2}\t{callee}\t{k}")
+        out = ["# lvm profile v1",
+               "# site = (function, block, instruction-index-in-block); a block is (function, block)",
+               "# order = IR parse order (function -> block -> instruction), not sorted by name",
+               "[blocks]"] + blocks + ["[edges]"] + edges + ["[calls]"] + calls
         return "\n".join(out) + "\n"
 
 
@@ -615,6 +633,8 @@ def run_ir(text: str, out, profile: Profile | None = None) -> int:
     **关掉时不写任何字节**，而且被记录程序的行为逐字节不变（判据 D）。
     """
     globals_, funcs, externs = lomelf.parse_ll(text)
+    if profile is not None:
+        profile.bind(funcs)
     vm = Executor(globals_, funcs, externs, out, profile)
     start = next((f for f in funcs if f.name == "_start"), None)
     if start is None:
