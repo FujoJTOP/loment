@@ -8,12 +8,17 @@
 **判 B：支持面相同。** 语料里每一份若 VM 说"不支持"，则 `lomelf` 也必须发不出来 ——
 用一张**棘轮**表钉，只许变短。
 
+**判 F：命令单元看到的是自己。** 读 `/proc/self/cmdline` 的那两份，走**真前门**跑，
+断言它们看到的名字是**自己被指到的那条路径**（`docs/243` §3.4）—— 不是解释器的。
+
 用法: python tools/lvm_test.py
 """
 
 from __future__ import annotations
 
 import io
+import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -34,13 +39,8 @@ ROOT = Path(__file__).resolve().parent.parent
 #: **棘轮**：VM 跑不了、而原生产物跑得了的那些。**只许变短** ——
 #: 每条都要写清"为什么现在跑不了"，哪天跑通了这条判据会红，逼着把条目删掉。
 VM_KNOWN_GAPS: dict[str, str] = {
-    "cmd_hello": (
-        "要系统调用 **257（openat）**：命令单元读 `/proc/self/cmdline` 拿自己的名字。"
-        "⚠ 这一条**可能永远对不上** —— VM 自己就是那个进程，它的 cmdline 是解释器的，"
-        "不是被解释程序的。要么 VM 伪造一份，要么这条永远留在\"目标之外\"。"),
-    "register_hello": "同 `cmd_hello`：要 257（openat）读 `/proc/self/cmdline`。",
-    # `bootprobe`（63 uname）**已经收进来了**（2026-10-15，issue #329）：VM 合成目标平台的
-    # utsname。`selfcheck` 收不成，理由与原来那条不同 —— 见下面那一条。
+    # `cmd_hello` / `register_hello`（257 openat）**已经收进来了**（2026-10-15，issue #330）：
+    # VM **合成**一份"被解释程序自己的"命令行 —— 见下面判 F 与 `docs/243` §3.4.1。
     "selfcheck": (
         "要系统调用 **317** —— 而 317 在 Linux 上是 **`seccomp`，不是 `getrandom`**（318 才是）。"
         "原生产物拿到 -1，于是 `selfcheck` 自己报 `FAIL getrandom` 并退 1；VM 表里没有 317，"
@@ -51,20 +51,41 @@ VM_KNOWN_GAPS: dict[str, str] = {
 }
 
 
-def _run_native(elf: Path, td: Path, timeout: int = 20) -> tuple[int, bytes]:
+def _run_native(elf: Path, td: Path, argv0: str, timeout: int = 20) -> tuple[int, bytes]:
     """跑原生产物。**Linux 上直接跑；Windows 上借 WSL**（交叉编出来的 ELF 本机跑不了）。
 
     ⚠ **不能只走 WSL**：门禁跑在 ubuntu 上、那儿没有 `wsl` —— 只用 WSL 的话这条判据
     在 CI 里会**整个 SKIP**，等于永远不跑（`loment_elf_test` 就是那样）。这条的意义
     全在"两条路真的都跑过、产物真的逐字节比过"。
+
+    ⚠ `argv0` **不是可有可无的**（`docs/243` §3.4）。`cmd_hello` 那种命令单元读
+    `/proc/self/cmdline` 是为了**看自己叫什么**，而两条路的进程是**两个不同的文件**
+    （`prog` 与 VM），各自的名字当然不同。**把 argv[0] 钉成同一个**，比的才是
+    "同一份命令行下的行为" —— 这正是判据该量的那个量。不钉的话，比的是两个文件名
+    像不像，那是**另一个问题**，而且答案永远是"不像"。
     """
     if sys.platform != "win32":
         p = td / "prog"
         p.write_bytes(elf.read_bytes())
         p.chmod(0o755)
-        r = subprocess.run([str(p)], capture_output=True, timeout=timeout, shell=False)
+        # POSIX：`executable=` 加上 argv[0] 想写什么就写什么（这是 execve 的语义）。
+        r = subprocess.run([argv0], executable=str(p), capture_output=True,
+                           timeout=timeout, shell=False)
         return r.returncode, r.stdout
-    return ELF._run_bin(elf, elf.stem, td, timeout)
+    binn = f"/tmp/lvm_native_{os.getpid()}.bin"
+    outp = td / "prog.out"
+    script = (f"rm -f {binn} && cp {ELF._wsl_path(elf)} {binn} && chmod +x {binn} && "
+              f"cd /tmp && timeout {timeout} "
+              f"env A0={shlex.quote(argv0)} bash -c 'exec -a \"$A0\" {binn}' "
+              f"> {ELF._wsl_path(outp)} 2>/dev/null; echo -n $?")
+    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+                       capture_output=True, timeout=timeout + 120, shell=False)
+    out = outp.read_bytes() if outp.exists() else b""
+    try:
+        rc = int(r.stdout.decode().strip())
+    except ValueError:
+        rc = -1
+    return rc, out
 
 
 def test_vm_matches_native() -> None:
@@ -92,10 +113,11 @@ def test_vm_matches_native() -> None:
                 continue
             elf = Path(td) / f"{stem}.elf"
             elf.write_bytes(blob)
-            rc_native, out_native = _run_native(elf, Path(td))
+            # 程序"叫什么" = 它在语料里的路径。**两边同一个字符串**（见 `_run_native`）。
+            rc_native, out_native = _run_native(elf, Path(td), rel)
             buf = io.BytesIO()
             try:
-                rc_vm = lvm.run_ir(ir, buf)
+                rc_vm = lvm.run_ir(ir, buf, None, [rel])
             except Exception as e:  # noqa: BLE001
                 gap.append((stem, f"{type(e).__name__}: {e}"[:70]))
                 continue
@@ -120,6 +142,34 @@ def test_vm_matches_native() -> None:
         print(f"      目标之外（参考实现自己也发不出来）: "
               f"{', '.join(s for s, _ in out_of_reach)}")
     assert ran, "一份都没跑成 —— 判据没测到东西"
+
+
+def test_command_unit_sees_its_own_name() -> None:
+    """判 F：`/proc/self/cmdline` 给的是**被解释程序自己的**命令行（issue #330）。
+
+    判 A 是"给两份产物**同一个** argv[0]，行为还一样不一样"；这一条问的是另一件事：
+    走**真前门**（`lvm <entry>`）时，VM 挑的那个名字是**什么**。
+
+    这里量的是"VM 把**它被指到的那条路径**当作程序的名字" —— 与它自己的名字无关。
+    证伪很直接：一个**透传**实现（把宿主进程的 cmdline 递过去）在这里打印的是
+    `pyth`（跑 `lvm.py` 的是 Python），而不是 `lome`；`argc` 也会是 host 的 3 而不是 1。
+    所以这两条断言都不是"复述实现"，它们各自钉着一半。
+    """
+    entry = "loment/examples/cmd_hello.lomt"
+    with tempfile.TemporaryDirectory() as td, open(td + "/sink", "wb") as sink:
+        real, sys.stdout = sys.stdout, io.TextIOWrapper(sink, encoding="utf-8")
+        try:
+            rc = lvm.main([entry, "--root", str(ROOT)])
+        finally:
+            sys.stdout.flush()
+            sys.stdout = real
+        with open(td + "/sink", "rb") as f:
+            got = f.read()
+    assert got == entry[:4].encode(), (
+        f"命令单元打印出来的应当是**它自己**名字的头 4 字节 {entry[:4]!r}，得到 {got!r} —— "
+        "如果是 interpreter 自己的名字，说明 `cmdline` 那一处是透传不是合成")
+    assert rc == 1, f"`argc` 应当是 1（只有程序名一个字段），VM 报的退出码是 {rc}"
+    print(f"      真前门：命令单元看到的是自己 {entry[:4]!r}，argc=1")
 
 
 def test_no_start_is_refused() -> None:

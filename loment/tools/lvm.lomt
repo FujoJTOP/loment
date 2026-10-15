@@ -187,6 +187,18 @@ const C_STEPS: u32 = 96;             // 已经执行了多少条指令（见 STE
 const C_PROF_FD: u32 = 104;
 const C_NEDGE: u32 = 108;           // 边表已经用掉多少行
 
+//: T0（`docs/243` §3.4）：VM **合成**的 `/proc/self/cmdline` 在哪儿。
+//: 内容是**被解释程序自己的**命令行 —— 就是解释器被指到的那个输入路径，原样，后跟一个
+//: NUL（内核给真进程的形状就是这样）。它本来就在 `ARGV` 区里躺着（那里装的是**解释器**
+//: 自己的 cmdline，字段之间已经是 NUL 分隔），所以这里只记"起点在区里的偏移"与"连同末尾
+//: NUL 的长度"—— 一个字节都不用搬。
+const C_ARG0: u32 = 112;             // 输入路径在 ARGV 区里的偏移
+const C_ARG0N: u32 = 116;            // 它连同末尾那个 NUL 的长度
+const C_VFD_POS: u32 = 120;          // 合成文件的读游标
+const C_VFD_OPEN: u32 = 124;         // 合成文件开着没有（0 = 没开）
+//: 合成文件的 fd 号。**两边实现必须给同一个数**（`tools/lvm.py` 的 `VFD_BASE`）。
+const VFD: u64 = 1000;
+
 fn ctx_get(a: ptr, k: u32) -> u32 {
     return load32(a, CTX_OFF + k);
 }
@@ -1951,7 +1963,51 @@ fn insertvalue(a: ptr, m: ptr, fr: u32, io: u32, il: u32, do_: u32, dl: u32) -> 
 }
 
 /// 被解释程序唯一能出去的门（`docs/243` §3.4）。表里没有的**点名拒**。
+/// `openat` 的那个路径**恰好**是 `/proc/self/cmdline` 吗（末尾的 NUL 也要对上）。
+fn lit_is_cmdline(m: ptr, p: u32) -> bool {
+    if load8(m, p + str_len("/proc/self/cmdline")) != 0 {
+        return false;
+    }
+    return same(m, p, str_ptr("/proc/self/cmdline"), 0, str_len("/proc/self/cmdline"));
+}
+
 fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
+    if nr == 0 {                                         // read(fd, buf, count)
+        // 解释器**没有真的文件描述符** —— 只认识 257 开的那个合成文件（`docs/243` §3.4）。
+        // 别的 fd **点名拒**：VM 里没有文件系统，装作有就是给错答案。
+        if x1 != VFD {
+            fail("系统调用 read：这个 fd 不是 VM 合成的那一个");
+        }
+        if ctx_get(a, C_VFD_OPEN) == 0 {
+            fail("系统调用 read：合成文件还没打开");
+        }
+        let rp: u32 = x2 as u32;
+        let rw: u32 = x3 as u32;
+        let ro: u32 = ctx_get(a, C_ARG0);
+        let rk: u32 = ctx_get(a, C_VFD_POS);
+        let rl: u32 = ctx_get(a, C_ARG0N) - rk;
+        if rw < rl {
+            rl = rw;
+        }
+        if rp + rl > MEM_SIZE {
+            fail("系统调用 read：越界");
+        }
+        let ab: ptr = ptr_add(a, ARGV_OFF);
+        let ri: u32 = 0;
+        while ri < rl {
+            store8(m, rp + ri, load8(ab, ro + rk + ri) as u8);
+            ri = ri + 1;
+        }
+        ctx_set(a, C_VFD_POS, rk + rl);
+        return rl as u64;
+    }
+    if nr == 3 {                                         // close(fd)
+        if x1 != VFD {
+            fail("系统调用 close：这个 fd 不是 VM 合成的那一个");
+        }
+        ctx_set(a, C_VFD_OPEN, 0);
+        return 0;
+    }
     if nr == 1 {                                         // write(fd, buf, count)
         let fd: u64 = x1;
         let buf: u32 = x2 as u32;
@@ -1996,6 +2052,17 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
     }
     // ⚠ 317 在这里**不实现** —— 它在 Linux 上是 `seccomp` 不是 `getrandom`
     // （见 `tools/lvm.py` 同一处的注释，那是判据 A 纠出来的）。
+    if nr == 257 {                                       // openat(dirfd, path, flags)
+        // **只认识 `/proc/self/cmdline`**，而且给它的是**被解释程序自己的**命令行，
+        // 不是解释器的（下面 `run` 里那段）。别的路径**点名拒**（`docs/243` §3.4）。
+        if lit_is_cmdline(m, x2 as u32) {
+            ctx_set(a, C_VFD_OPEN, 1);
+            ctx_set(a, C_VFD_POS, 0);
+            return VFD;
+        }
+        wstr(2, "lvm: openat 只认识 /proc/self/cmdline（被解释程序自己的命令行）\n");
+        return die(2) as u64;
+    }
     if nr == 60 {                                        // exit(code)
         // ⚠ **退出前先把剖面落盘**。参考那侧靠异常把栈弹干净、由 `run_ir` 收尾再写；
         // 这一侧没有异常 —— 而语料里几乎每一份都是 `_start` 里直接 `exit`，
@@ -2543,6 +2610,12 @@ fn run(a: ptr) -> u32 {
         wstr(2, "用法: lvm IN.ll\n");
         return 2;
     }
+    // VM 合成的 `/proc/self/cmdline`（`docs/243` §3.4）：**被解释程序自己的**命令行 ——
+    // 就是上面那个输入路径，原样。它已经躺在 ARGV 区里了，只要把"起点 + 连同末尾 NUL 的
+    // 长度"记下来；末尾那个 NUL 补写一次，好让 `read` 出去的字节数不取决于命令行怎么结尾。
+    store8(ab, hi32(f1) + lo32(f1), 0 as u8);
+    ctx_set(a, C_ARG0, hi32(f1));
+    ctx_set(a, C_ARG0N, lo32(f1) + 1);
     // 路径就在 argv 缓冲里（NUL 结尾），而那个缓冲在输入区**之外** —— 直接用它。
     let n: u64 = read_file(ptr_add(ab, hi32(f1)), a, SRCCAP as u64);
     if n == 0 {

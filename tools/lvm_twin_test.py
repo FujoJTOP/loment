@@ -107,6 +107,18 @@ def _mirror() -> Path:
     return mir
 
 
+def _mirror_input_path(ll: Path) -> str:
+    """镜像**看到的**输入路径 —— 与 `_run_mirror` 给它的那个实参**必须是同一个字符串**。
+
+    这不是照抄一遍：`docs/243` §3.4 之下，这个字符串就是**被解释程序的 argv[0]**
+    （镜像把它当"程序自己的名字"合成进 `/proc/self/cmdline`）。所以参考那侧也得**用
+    这个名字**跑 —— 否则两边量到的根本不是同一个输入。
+    """
+    if sys.platform != "win32":
+        return str(ll)
+    return f"/tmp/lvm_twin_{os.getpid()}.ll"
+
+
 def _run_mirror(mir: Path, ll: Path, prof: Path | None = None,
                 timeout: int = 180) -> tuple[int, bytes, bytes]:
     """跑镜像 -> `(退出码, stdout 字节, 剖面字节)`。**Linux 上直接跑；Windows 上借 WSL**。
@@ -116,6 +128,9 @@ def _run_mirror(mir: Path, ll: Path, prof: Path | None = None,
 
     ⚠ 两边都先把**二进制与输入**拷进自己的临时区：`/mnt/d` 上就地覆盖后 WSL 会**拿旧的**
     （drvfs 有缓存），症状是"改了源码但跑的是上一版"，而且**不报任何错**。
+
+    ⚠ 递给镜像的那个输入路径**就是被解释程序的 argv[0]**（`docs/243` §3.4），所以它与
+    `_mirror_input_path` **必须一致** —— 改了这里那句 `{tag}.ll` 就要改那边。
     """
     if sys.platform != "win32":
         args = [str(mir), str(ll)] + ([str(prof)] if prof is not None else [])
@@ -176,7 +191,8 @@ def test_twin_matches_reference() -> None:
             buf = io.BytesIO()
             prof = lvm.Profile()
             try:
-                ref = (lvm.run_ir(ll.read_text(encoding="utf-8"), buf, prof), buf.getvalue())
+                ref = (lvm.run_ir(ll.read_text(encoding="utf-8"), buf, prof,
+                                  [_mirror_input_path(ll)]), buf.getvalue())
             except Exception as e:  # noqa: BLE001
                 # 参考自己跑不了 —— 出局，不是缺口（`lvm_test.py` 那张棘轮管它）。
                 out_of_reach.append((src.stem, str(e)[:56]))

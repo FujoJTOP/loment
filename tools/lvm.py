@@ -33,6 +33,22 @@ FRAME_SIZE = 4096
 #: 每个标量占 8 字节（与 `lomelf` 的栈槽模型同口径，`SCALAR_SIZE`）。
 SLOT = 8
 
+#: **合成文件**的 fd 从这儿起（`docs/243` §3.4）。解释器没有真的文件描述符，
+#: 所以真 fd 与合成 fd 不会撞；这个数两边实现**必须一样**（自举镜像里也写 1000）。
+VFD_BASE = 1000
+
+#: `/proc/self/cmdline` 的字段分隔符（也是内核给的那个字节）。
+B_NUL = bytes([0])
+
+
+def _cmdline(argv: list[str]) -> bytes:
+    """内核给 `/proc/self/cmdline` 的形状：**每个字段后面跟一个 NUL**。
+
+    抄这个形状是有意的 —— 被解释程序照着"数 NUL"来算 argc（`docs/223` 生成的入口
+    就是那么干的），形状不对它数出来的就是另一个数。
+    """
+    return b"".join(s.encode("utf-8", "surrogateescape") + B_NUL for s in argv)
+
 
 class LvmError(Exception):
     """解释器自己的错（**不是**"语言不支持" —— 那种要另说，见 `docs/243` §1）。"""
@@ -139,6 +155,15 @@ class Mem:
             raise LvmError(f"读越界: {addr} + {n}")
         return bytes(self.buf[addr:addr + n])
 
+    def cstr(self, addr: int, limit: int = 4096) -> bytes:
+        """读一个 NUL 结尾的字符串（被解释程序里的字面量路径）。上限是"不许挂死"。"""
+        if addr < 0 or addr >= MEM_SIZE:
+            raise LvmError(f"读越界: {addr}")
+        n = 0
+        while n < limit and addr + n < MEM_SIZE and self.buf[addr + n] != 0:
+            n += 1
+        return bytes(self.buf[addr:addr + n])
+
     def alloc(self, n: int, align: int = 8) -> int:
         self.heap = (self.heap + align - 1) // align * align
         a = self.heap
@@ -233,7 +258,7 @@ class Profile:
 
 class Vm:
     def __init__(self, globals_: list, funcs: list, externs: list, out,
-                 profile: Profile | None = None) -> None:
+                 profile: Profile | None = None, argv: list[str] | None = None) -> None:
         self.mem = Mem()
         self.globals = {g.name: g for g in globals_}
         self.funcs = {f.name: f for f in funcs}
@@ -245,6 +270,13 @@ class Vm:
         #: （判据 D 要的正是"记录不许改变被记录的行为"）。
         self.profile = profile
         self.site: tuple[str, str, int] | None = None
+        #: **被解释程序自己的**命令行（`docs/243` §3.4）。它读 `/proc/self/cmdline`
+        #: 想知道"我叫什么" —— 那个文件属于**进程**，而进程是解释器。所以这一处必须
+        #: **合成**，否则程序会以为自己是 `lvm`。给的就是"VM 被指到的那个输入路径"。
+        self.argv = list(argv) if argv is not None else ["<ir>"]
+        #: 合成文件的 fd —— 解释器**没有真的文件描述符**，只认识这一张表里的。
+        self.vfds: dict[int, list] = {}
+        self.next_vfd = VFD_BASE
         self._place_globals()
 
     def _place_globals(self) -> None:
@@ -303,6 +335,16 @@ class Executor(Vm):
     # ------------------------------------------------------------ 系统调用
     def syscall(self, nr: int, a: list[int]) -> int:
         """**唯一**的对外通道（`docs/243` §3.4）。表里没有的就点名拒。"""
+        if nr == 0:                                    # read(fd, buf, count)
+            # 解释器没有真的文件描述符 —— 只认识 257 开的那个合成文件。
+            v = self.vfds.get(a[0])
+            if v is None:
+                raise LvmError(f"read: fd {a[0]} 不是 VM 合成的那一个"
+                               "（`docs/243` §3.4）")
+            data = v[0][v[1]:v[1] + a[2]]
+            v[1] += len(data)
+            self.mem.put(a[1], data)
+            return len(data)
         if nr == 1:                                    # write(fd, buf, count)
             fd, buf, n = a[0], a[1], a[2]
             data = self.mem.get(buf, n)
@@ -310,6 +352,11 @@ class Executor(Vm):
                 self.out.write(data)
                 self.out.flush()
             return n
+        if nr == 3:                                    # close(fd)
+            if self.vfds.pop(a[0], None) is None:
+                raise LvmError(f"close: fd {a[0]} 不是 VM 合成的那一个"
+                               "（`docs/243` §3.4）")
+            return 0
         if nr == 12:                                   # brk(addr)
             # `_IR_HEAP` 的分配器用它向 OS 要页。解释器的堆本来就在地址空间里，
             # 所以这里只需把"当前可信的堆底"如实回一个数：给了就认，没给就报现值。
@@ -336,6 +383,18 @@ class Executor(Vm):
         # 317 = `seccomp`，返回 -1，于是 `selfcheck` 自己报 FAIL；而我的 VM "通过"了。
         # 两边一致才是对的 —— 所以这个分支**删掉**，VM 点名拒（`docs/243` §3.4 的规矩：
         # 表里没有的不装作有）。`selfcheck` 因此留在棘轮里，理由换成了真的那个。
+        if nr == 257:                                  # openat(dirfd, path, flags)
+            # **只认识 `/proc/self/cmdline`**，而且给它的是**被解释程序自己的**命令行，
+            # 不是解释器的（下一段那个 `argv`）。别的路径点名拒 —— VM 里没有文件系统，
+            # 装作有就是给错答案（`docs/243` §3.4）。
+            path = self.mem.cstr(a[1])
+            if path != b"/proc/self/cmdline":
+                raise LvmError(f"openat: 只认识 /proc/self/cmdline（被解释程序自己的"
+                               f"命令行），不认识 {path!r}（`docs/243` §3.4）")
+            fd = self.next_vfd
+            self.next_vfd += 1
+            self.vfds[fd] = [_cmdline(self.argv), 0]
+            return fd
         if nr == 60:                                   # exit(code)
             raise _Exit(a[0] & 0xFF)
         raise LvmError(f"系统调用表里没有 {nr}（`docs/243` §3.4）")
@@ -646,16 +705,22 @@ class Executor(Vm):
 
 # ---------------------------------------------------------------- 前门
 
-def run_ir(text: str, out, profile: Profile | None = None) -> int:
+def run_ir(text: str, out, profile: Profile | None = None,
+           argv: list[str] | None = None) -> int:
     """IR 文本 -> 跑完 -> 进程该退的码。**入口就是 `_start`**（`docs/243` §3.5）。
 
     `profile` 传一个 `Profile` 就记账（T1，`docs/246`）；传 `None`（默认）不记 ——
     **关掉时不写任何字节**，而且被记录程序的行为逐字节不变（判据 D）。
+
+    `argv` 是**被解释程序自己的**命令行（`docs/243` §3.4）：它读 `/proc/self/cmdline`
+    时看到的就是这个。默认 `["<ir>"]` —— 进程内调用手里没有"那个程序叫什么"，
+    就不编一个像路径的东西出来；要真名字的调用方自己传（`lvm_test` 传的就是它
+    喂给原生产物的同一个名字，好让两边逐字节可比）。
     """
     globals_, funcs, externs = lomelf.parse_ll(text)
     if profile is not None:
         profile.bind(funcs)
-    vm = Executor(globals_, funcs, externs, out, profile)
+    vm = Executor(globals_, funcs, externs, out, profile, argv)
     start = next((f for f in funcs if f.name == "_start"), None)
     if start is None:
         raise LvmError("这份 IR 里没有 `_start`")
@@ -666,8 +731,11 @@ def run_ir(text: str, out, profile: Profile | None = None) -> int:
     return 0
 
 
-def run_source(src: Path, root: Path, out=None, profile: Profile | None = None) -> int:
+def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
+               argv: list[str] | None = None) -> int:
     """与 `lomelf` 同一条前门：`.lomt` -> IR -> 跑。"""
+    if argv is None:
+        argv = [str(src)]
     import lomentc  # noqa: PLC0415
 
     mod = lomentc.load(src)
@@ -676,7 +744,7 @@ def run_source(src: Path, root: Path, out=None, profile: Profile | None = None) 
     if errs:
         raise LvmError(f"检查不过: {errs[:2]}")
     return run_ir(lomentc.emit_llvm(mod, root, deps),
-                  out if out is not None else sys.stdout, profile)
+                  out if out is not None else sys.stdout, profile, argv)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -694,10 +762,12 @@ def main(argv: list[str] | None = None) -> int:
     buf = io.BytesIO()
     prof = Profile() if a.profile_out else None
     try:
+        # `--entry` 那段文本**原样**当被解释程序的 argv[0] —— 与自举镜像同一处规矩：
+        # "VM 被指到的那个输入路径"（`docs/243` §3.4）。
         if a.ir:
-            rc = run_ir(Path(a.entry).read_text(encoding="utf-8"), buf, prof)
+            rc = run_ir(Path(a.entry).read_text(encoding="utf-8"), buf, prof, [a.entry])
         else:
-            rc = run_source(Path(a.entry).resolve(), root, buf, prof)
+            rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry])
     except (LvmError, lomelf.ElfError, lomelf.Unsupported) as e:
         sys.stdout.buffer.write(buf.getvalue())
         print(f"lvm: {e}", file=sys.stderr)
