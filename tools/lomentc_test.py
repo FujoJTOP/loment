@@ -2026,6 +2026,52 @@ def test_l0_rule_pair():
         L0_MANUAL_SRC.replace("choose gc_manual", "X")
 
 
+
+#: `docs/246` §5.3 那一刀（"系统调用的实参是**借**"）的三份源 —— **只差一行**。
+_SYSCALL_BORROW_SRC = """module sysborrow
+choose gc_auto_alpha
+choose runtime
+
+fn put(fd: u64, v: u32, nr: u64) {
+    let buf: ptr = alloc(16);
+    store8(buf, 0, v as u8);
+    store8(buf, 1, 0);
+    syscall4(@@NR@@, fd, buf as u64, 2);
+}
+
+fn _start() {
+    put(1, 65, 1);
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+@test
+def test_syscall_borrow_rule():
+    """**交给白名单里的系统调用是"借"**（`docs/246` §5.3）：那一格进 L0，**表外的照旧不进**。
+
+    **Why**：这一刀是"让 L0–L2 真的有事可干"里唯一能动语料的一刀（`tools/loment_gc_surface.py`：
+    证明面 4/23 → **8/23**），而它的实质是**一条语言对内核的断言**（"这批系统调用在调用期间就把
+    缓冲区消费掉、不留存用户指针"）—— 断言错了就是**悬垂指针**。所以判据必须**三个方向都钉**：
+
+      1. 表内（`write` = 1）⇒ 提升（否则这一刀空转）；
+      2. **表外**（`sendto` = 44，故意排除：带 `MSG_ZEROCOPY` 时内核持有那些页）⇒ **不**提升 ——
+         这一格就是"表本身"的守卫：谁把 44 加进白名单，判据立刻红；
+      3. 号**不是字面量**（`nr` 是参数）⇒ **不**提升 —— 不知道是哪个系统调用，就不许当借。
+
+    三份源**只差那一行**（下面最后一条断言钉着），所以"差别来自这一行"这个说法成立。
+    """
+    tbl_in, _ = _l0_emit(_SYSCALL_BORROW_SRC.replace("@@NR@@", "1"))
+    tbl_out, _ = _l0_emit(_SYSCALL_BORROW_SRC.replace("@@NR@@", "44"))
+    tbl_var, _ = _l0_emit(_SYSCALL_BORROW_SRC.replace("@@NR@@", "nr"))
+
+    assert tbl_in == {"put": {"buf": 16}}, f"表内的号应当让这一格进 L0，得到 {tbl_in}"
+    assert tbl_out == {}, f"表外的号不许进 L0，得到 {tbl_out}"
+    assert tbl_var == {}, f"号不是字面量时不许进 L0，得到 {tbl_var}"
+    # 三份源只差那一行
+    a = _SYSCALL_BORROW_SRC.replace("@@NR@@", "X")
+    assert a.count("X") == 1 and a.replace("X", "1") == _SYSCALL_BORROW_SRC.replace("@@NR@@", "1")
+
 #: `gc_ladder` 那一对（`docs/210` §3/§5）：一份 `gc_auto_alpha` 的源里四层**各来一站** ——
 #: `a` 是字面量尺寸（L0）、`b` 尺寸是变量且顶层（L1）、`c` 在循环体里（L2）、`d` 外逃（L3）。
 GC_LADDER_ALPHA_SRC = """module gc_ladder

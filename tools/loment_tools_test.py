@@ -1082,29 +1082,72 @@ def test_gate_reports_how_many_criteria_did_not_run():
     quiet = ci.format_line("loment_tools_test", True, "12/12 通过", 1.2, 0)
     assert "SKIP" not in quiet, quiet
 
-    # (3) 真跑一条: 把 `wsl` 藏掉 = runner 的条件。跳过的条数必须被真的数出来。
-    #     用 `loment_elf_test` 而不是某个更小的套件, 因为**它**就是这条判据要保护的那个
-    #     套件（运行时护栏全在里面）。代价是几秒 —— 相对它挡住的东西不值一提。
+    # (3) **端到端**：造一个真模块喂给 `_run_one_check`（走的就是门禁那条路），
+    #     它打印两条行首 SKIP、一条只是提到 SKIP —— 数出来的必须正好是 2。
+    #
+    #     **为什么不拿某个真实套件来钉**：那个数**随平台走**。第一版钉的是
+    #     "藏掉 `wsl` 之后 `loment_elf_test` 跳过 >= 20 条"，而同一个 PR 的下半
+    #     （`#371` 第二半）恰恰让这族判据在 Linux 上**原生跑**、于是那个数掉到 0 ——
+    #     判据和它的修法在同一个 PR 里互相打架，CI 当场报 `loment_tools_test` 新红。
+    #     这一条要钉的是**报数这件事**，不是某个套件在某个平台上跳几条。
     import shutil
+    import tempfile
 
-    real = shutil.which
-    shutil.which = lambda n: None if n == "wsl" else real(n)
+    probe = Path(tempfile.mkdtemp(prefix="loment-skipcount-"))
     try:
-        r = ci._run_one_check("loment_elf_test")
+        (probe / "loment_skipcount_probe.py").write_text(
+            "def main() -> int:\n"
+            "    print('  PASS  a')\n"
+            "    print('      SKIP: 无 clang/WSL')\n"
+            "    print('  PASS  b')\n"
+            "    print('      SKIP: 需要 WSL')\n"
+            "    print('  PASS  c  # 这一行只是提到 SKIP')\n"
+            "    return 0\n", encoding="utf-8", newline="\n")
+        # 另一份**走共享运行器**的探针：它把 `SKIP` 连**判据名**打出来，逐条预算才对得了账。
+        (probe / "loment_namedskip_probe.py").write_text(
+            "import loment_suite\n"
+            "\n"
+            "TESTS = []\n"
+            "\n"
+            "def test(fn):\n"
+            "    TESTS.append((fn.__name__, fn))\n"
+            "    return fn\n"
+            "\n"
+            "@test\n"
+            "def test_needs_wsl():\n"
+            "    print('      SKIP: 需要 WSL')\n"
+            "\n"
+            "@test\n"
+            "def test_runs():\n"
+            "    print('      跑过了')\n"
+            "\n"
+            "def main() -> int:\n"
+            "    return loment_suite.run(TESTS, 'loment_namedskip_probe')\n",
+            encoding="utf-8", newline="\n")
+        sys.path.insert(0, str(probe))
+        try:
+            r0 = ci._run_one_check("loment_skipcount_probe")
+            r1 = ci._run_one_check("loment_namedskip_probe")
+        finally:
+            sys.path.remove(str(probe))
+            sys.modules.pop("loment_skipcount_probe", None)
+            sys.modules.pop("loment_namedskip_probe", None)
+        assert r0.ok, "探针模块自己没跑通"
+        assert r0.skips == 2, f"跳过数该是 2（两条行首的算、提到的不算），得到 {r0.skips}"
+
+        # (4) `#371` 的**判定面**（2026-10-15 补）：跳过必须**认得出是哪一条**，否则
+        #     `ci.check_budget` 没法逐条对账签入的 `.github/gate-skips.txt`。这一条与上面
+        #     钉"条数"的那条是一对：数得出条数却认不出名字，等于预算对那个套件失明。
+        assert r1.ok, "走共享运行器的探针自己没跑通"
+        assert r1.skips == 1 and r1.skipped == ("test_needs_wsl",), \
+            f"跳过要连名字认出来，得到 {r1.skipped!r}"
+        assert r1.passed == ("test_runs",), f"通过的那条也要认得出来，得到 {r1.passed!r}"
+        assert r1.declared == 2, f"len(TESTS) 要读出来，得到 {r1.declared}"
     finally:
-        shutil.which = real
-    assert r.ok, "跳过的判据不算失败 —— 藏掉 wsl 之后这一条仍然应当是 PASS（这正是问题）"
-    assert r.skips >= 20, f"数出来的跳过条数太少（{r.skips}）—— 计数规则或那个套件变了"
-
-    # (4) `#371` 的**判定面**（2026-10-15 补）：跳过现在**带名字**（`loment_suite.run` 打的
-    #     `  SKIP  <名字>: 原因`），于是 `ci.check_budget` 能逐条对账 `.github/gate-skips.txt`。
-    #     数得出条数却认不出名字 = 那个套件没走共享运行器，预算对它失明。
-    assert len(r.skipped) == r.skips, (
-        f"跳过 {r.skips} 条，只认出 {len(r.skipped)} 个名字 —— 这个套件没走 "
-        f"`loment_suite.run`，逐条预算对不了账")
-    assert r.declared == len(__import__("loment_elf_test").TESTS), "声明条数（len(TESTS)）没读出来"
+        shutil.rmtree(probe, ignore_errors=True)
 
 
+@test
 def test_gate_budget_matches_the_suites():
     """`#371` 两道棘轮的**签入文件本身**说得通吗。
 
@@ -1119,6 +1162,8 @@ def test_gate_budget_matches_the_suites():
     4. 跳过表里点到的**判据名**在那个套件里真的存在（判据改名或删掉之后，那条豁免会变成
        一句永远不生效的谎话）。
     """
+    import ci
+
     floors, skips = ci.read_budget()
 
     declared: dict[str, int] = {}
@@ -1143,13 +1188,41 @@ def test_gate_budget_matches_the_suites():
     print(f"      gate-floors {len(floors)} 个套件 / gate-skips {len(skips)} 条豁免，都对得上")
 
 
+@test
 def test_every_criterion_is_registered():
-    """套件里每个 `def test_*` 都必须挂上 `@test`。
+    """套件里每个 `def test_*` 都必须**有人跑它**：进 `TESTS`，或者在别处被点名过。
 
-    没挂上的后果是**它从不运行，而套件照样绿** —— 与 `#371` 同一个形状（有一层安全检查
+    没人跑的后果是**它从不运行，而套件照样绿** —— 与 `#371` 同一个形状（有一层安全检查
     看不见洞）。新写一条判据、忘了装饰器，是最容易发生也最难发现的一种。
+
+    **为什么不去认"必须挂 `@test`"**：仓里有四种注册惯用法 —— `@test` 装饰器（多数套件）、
+    `check()` 闭包往 `RESULTS` 里塞（`loment_dist_test` / `loment_sign_test`）、手写 `main`
+    里直接调、以及按名字约定收（`lvm_test` / `lvm_twin_test` 的
+    `sorted(globals().items())`）。所以**不去猜惯用法，直接问套件自己**：把模块 import
+    进来，看 `def test_*` 的名字在不在那份 `TESTS` 里。对没有 `TESTS` 的套件
+    （`check()` 闭包那几个）退回到**可达性**：名字在模块里被读到过就算有人跑。
+
+    这条与 `test_gate_budget_matches_the_suites` 一样要 import 全部套件 —— 那份代价那边
+    已经付过了（`len(TESTS)` 只能从 import 拿），这里是同一笔账。
     """
     import ast
+
+    import ci
+
+    def registered(mod) -> set[str] | None:
+        """套件自己说"我要跑哪些"；没有 `TESTS` 就返回 `None`（退回可达性）。"""
+        tests = getattr(mod, "TESTS", None)
+        if not tests:
+            return None
+        out: set[str] = set()
+        for e in tests:
+            if isinstance(e, tuple) and len(e) >= 2:
+                out.add(str(e[0]))          # `(名字, 函数)`；名字可能就是显示名
+                if callable(e[1]):
+                    out.add(getattr(e[1], "__name__", ""))
+            elif callable(e):
+                out.add(e.__name__)         # 裸函数
+        return out
 
     offenders = []
     for name in ci.STATIC_CHECKS:
@@ -1157,14 +1230,24 @@ def test_every_criterion_is_registered():
         if not p.exists():
             continue
         tree = ast.parse(p.read_text(encoding="utf-8"))
+        loaded = {n.id for n in ast.walk(tree)
+                  if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        loaded |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        reg = registered(__import__(name))
         for node in ast.walk(tree):
             if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
                 continue
             decs = [ast.unparse(d) for d in node.decorator_list]
-            if not any(d == "test" or d.endswith(".test") for d in decs):
-                offenders.append(f"{name}.py:{node.lineno} {node.name}")
-    assert not offenders, "这些判据没挂 @test，因而从不运行: " + ", ".join(offenders)
-    print("      每个 def test_* 都挂了 @test（没有'写了却从不运行'的判据）")
+            if any(d == "test" or d.endswith(".test") for d in decs):
+                continue
+            if node.name in loaded:
+                continue          # 被别处点名（`check()` 闭包 / 手写 main）—— 有人跑它
+            if reg is not None and node.name in reg:
+                continue          # 进了 `TESTS` —— 有人跑它（按名字收的那种套件走这条）
+            offenders.append(f"{name}.py:{node.lineno} {node.name}")
+    assert not offenders, ("这些 def test_* 既没挂 @test 也没进 TESTS，因而从不运行: "
+                           + ", ".join(offenders))
+    print("      每个 def test_* 都有人跑（进了 TESTS 或挂 @test）")
 
 
 def main() -> int:

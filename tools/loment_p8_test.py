@@ -640,6 +640,9 @@ def test_m81_falling_off_the_end_is_refused():
             errs = lomentc.check(lomentc.load(f))
             assert not errs, f"{tag}: 合法收尾被误拒: {errs}"
         print(f"      掉出末尾: {len(bad)} 种非法形状都拒(E027), {len(good)} 种合法收尾都放行")
+
+
+@test
 def test_m81_two_units_with_the_same_module_name():
     """M81/单元级唯一性: **两份文件都写 `module same`** 必须先被拒 (`#139`)。
 

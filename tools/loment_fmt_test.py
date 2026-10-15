@@ -188,6 +188,7 @@ def test_loment_fmt_edge_cases():
         print(f"      {len(cases)} 个边界用例一致")
 
 
+@test
 def test_fmt_keeps_declaration_modifiers_on_one_line():
     """**修饰词不单独占一行**（`#46`）—— `pub fn f()` 要待在同一行。
 
