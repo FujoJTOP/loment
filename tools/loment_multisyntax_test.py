@@ -241,9 +241,16 @@ def _rust_has_target() -> bool:
     return "x86_64-unknown-none" in r.stdout
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               timeout=60, shell=False).returncode == 0
     except Exception:                                               # noqa: BLE001
         return False
@@ -251,6 +258,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -474,7 +483,7 @@ def _run_with(td: Path, iface: Path, objs: list[Path], exit_want: int, fname: st
                                [lomelf.load_foreign(p) for p in objs], allow_ports=True)
     exe = td / "ms.elf"
     exe.write_bytes(blob)
-    r = subprocess.run(["wsl", "-e", "bash", "-lc",
+    r = subprocess.run([*_WSLCMD, "bash", "-lc",
                         f"cp {_wsl_path(exe)} /tmp/ms_{exe.stat().st_size}.elf && "
                         f"chmod +x /tmp/ms_{exe.stat().st_size}.elf && "
                         f"/tmp/ms_{exe.stat().st_size}.elf"],
@@ -899,7 +908,7 @@ def test_c_source_named_lomt_end_to_end():
         blob, _ = lomelf.compile_ll(lomentc.emit_llvm(mod, ROOT, deps), [])
         exe = td / "ms.elf"
         exe.write_bytes(blob)
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc",
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc",
                              f"cp {_wsl_path(exe)} /tmp/ms_cinlomt.elf && "
                              f"chmod +x /tmp/ms_cinlomt.elf && /tmp/ms_cinlomt.elf"],
                             capture_output=True, text=True, timeout=120, shell=False)
@@ -920,7 +929,7 @@ def test_c_source_named_lomt_end_to_end():
                             "-o", str(binp), str(cside)],
                            capture_output=True, text=True, shell=False)
         assert r.returncode == 0, r.stderr[-300:]
-        rc2 = subprocess.run(["wsl", "-e", "bash", "-lc",
+        rc2 = subprocess.run([*_WSLCMD, "bash", "-lc",
                               f"chmod +x {_wsl_path(binp)} && {_wsl_path(binp)}; echo -n $?"],
                              capture_output=True, text=True, timeout=120, shell=False)
         assert int(rc2.stdout.strip()) == want, f"clang 那边 {rc2.stdout} != {want}"

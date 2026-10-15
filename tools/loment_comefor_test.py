@@ -414,12 +414,19 @@ def _clang() -> str | None:
     return fb if Path(fb).exists() else None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     import shutil
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -427,6 +434,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(Path(p).resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -483,7 +492,7 @@ def test_comefor_check_matches_loment_twin():
         binn = f"{_T}lomcomefor.bin"
         script = (f"cp {_wsl_path(chk)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(_WORK)} && {binn} > {_wsl_path(outp)} 2>&1; echo -n $?")
-        r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                            capture_output=True, text=True, timeout=300, shell=False)
         got = outp.read_bytes().decode("utf-8") if outp.exists() else ""
     assert r.stdout.strip() == "0", f"孪生该退 0（7 项全过）: rc={r.stdout!r}\n{got[:300]}"
@@ -513,7 +522,7 @@ def test_comefor_twin_selfhost_compiles():
         binn = f"{_T}lomcomefor_s1.bin"
         script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomcomefor.lomt")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, timeout=600, shell=False)
         assert rr.returncode == 0, f"stage1 编译 lomcomefor.lomt 失败: {rr.stderr[-300:]}"
         assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
