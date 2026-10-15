@@ -317,6 +317,29 @@ int main(void) {
         printf("calloc_overflow_null=%d\n", calloc((size_t)-1, 2) == NULL);
     }
 
+    /* ---- stdio: 精度 / `*` / `%p` / `%n` ---- */
+    {
+        char b[64]; int n; int cnt = -1;
+        n = snprintf(b, 64, "[%.3s]", "abcdef");
+        printf("pr_s=%s\n", b); printf("pr_s_ret=%d\n", n);
+        n = snprintf(b, 64, "[%.5d][%.0d][%.3d]", 42, 0, -5);
+        printf("pr_d=%s\n", b); printf("pr_d_ret=%d\n", n);
+        n = snprintf(b, 64, "[%*d][%*d]", 6, 42, -6, 42);
+        printf("pr_star=%s\n", b); printf("pr_star_ret=%d\n", n);
+        n = snprintf(b, 64, "[%.*s][%.*s]", 2, "abcdef", -1, "xyz");
+        printf("pr_starp=%s\n", b); printf("pr_starp_ret=%d\n", n);
+        n = snprintf(b, 64, "[%8.3d][%-5.3d]", 42, 42);
+        printf("pr_mix=%s\n", b); printf("pr_mix_ret=%d\n", n);
+        n = snprintf(b, 64, "[%p]", (void *)0);
+        printf("pr_pnull=%s\n", b); printf("pr_pnull_ret=%d\n", n);
+        /* 拿一个**给定的整数**当指针：真地址两边不同，只有这个值两边可比。 */
+        n = snprintf(b, 64, "[%p]", (void *)0xdeadbeefUL);
+        printf("pr_pval=%s\n", b); printf("pr_pval_ret=%d\n", n);
+        n = snprintf(b, 64, "abc%ndef", &cnt);
+        printf("pr_n=%s\n", b); printf("pr_n_ret=%d\n", n);
+        printf("pr_n_cnt=%d\n", cnt);
+    }
+
     return 0;
 }
 '''.replace("@@ROWS@@", rows) \
@@ -439,10 +462,30 @@ fn say_str(tag: str, p: ptr) -> i64 {
 /// **这一层就是"没有变参"的代价**：libc 那边直接写在调用点，这边要先摆成数组。
 /// 摆法（第 k 个实参在偏移 k*8）与 `stdio.lomt` 文件头写的是同一条。
 fn sp(buf: ptr, cap: u32, f: str, a0: u64, a1: u64, a2: u64, n: u32) -> u32 {
-    let av: ptr = alloc(24);
+    let av: ptr = alloc(48);
     mem_store64(av, 0, a0);
     mem_store64(av, 8, a1);
     mem_store64(av, 16, a2);
+    mem_store64(av, 24, 0 as u64);
+    mem_store64(av, 32, 0 as u64);
+    mem_store64(av, 40, 0 as u64);
+    let fp: ptr = alloc(str_len(f) + 1);
+    return snprintf(buf, cap, cstr_of(fp, f), av, n);
+}
+
+/// 六个实参那一版 —— `[%.*s][%.*s]` 这种要四个。
+/// **`sp` 与 `sp6` 都按 `n` 交账**：`n` 比实际装进去的多，`snprintf` 就会去读没写过的槽
+/// （实测：3 槽的版本配 4 个实参 ⇒ **段错误**，那正是"少给实参时 libc 读越界垃圾"的
+/// Loment 侧翻版）。
+fn sp6(buf: ptr, cap: u32, f: str, a0: u64, a1: u64, a2: u64,
+       a3: u64, a4: u64, a5: u64, n: u32) -> u32 {
+    let av: ptr = alloc(48);
+    mem_store64(av, 0, a0);
+    mem_store64(av, 8, a1);
+    mem_store64(av, 16, a2);
+    mem_store64(av, 24, a3);
+    mem_store64(av, 32, a4);
+    mem_store64(av, 40, a5);
     let fp: ptr = alloc(str_len(f) + 1);
     return snprintf(buf, cap, cstr_of(fp, f), av, n);
 }
@@ -751,6 +794,37 @@ fn _start() {
     say(sc, "malloc_zero_nonnull", b2i((malloc(0 as u64) as u64) != (0 as u64)));
     say(sc, "calloc_overflow_null",
         b2i((calloc(18446744073709551615 as u64, 2 as u64) as u64) == (0 as u64)));
+
+    // ---- stdio: 精度 / `*` / `%p` / `%n`
+    sn = sp(ob, 64, "[%.3s]", lit("abcdef") as u64, 0 as u64, 0 as u64, 1);
+    say_str("pr_s", ob);
+    say(sc, "pr_s_ret", sn as i64);
+    sn = sp(ob, 64, "[%.5d][%.0d][%.3d]", 42 as u64, 0 as u64, (0 as i64 - 5) as u64, 3);
+    say_str("pr_d", ob);
+    say(sc, "pr_d_ret", sn as i64);
+    sn = sp6(ob, 64, "[%*d][%*d]", 6 as u64, 42 as u64, (0 as i64 - 6) as u64,
+             42 as u64, 0 as u64, 0 as u64, 4);
+    say_str("pr_star", ob);
+    say(sc, "pr_star_ret", sn as i64);
+    sn = sp6(ob, 64, "[%.*s][%.*s]", 2 as u64, lit("abcdef") as u64,
+             (0 as i64 - 1) as u64, lit("xyz") as u64, 0 as u64, 0 as u64, 4);
+    say_str("pr_starp", ob);
+    say(sc, "pr_starp_ret", sn as i64);
+    sn = sp(ob, 64, "[%8.3d][%-5.3d]", 42 as u64, 42 as u64, 0 as u64, 2);
+    say_str("pr_mix", ob);
+    say(sc, "pr_mix_ret", sn as i64);
+    sn = sp(ob, 64, "[%p]", 0 as u64, 0 as u64, 0 as u64, 1);
+    say_str("pr_pnull", ob);
+    say(sc, "pr_pnull_ret", sn as i64);
+    sn = sp(ob, 64, "[%p]", 3735928559 as u64, 0 as u64, 0 as u64, 1);
+    say_str("pr_pval", ob);
+    say(sc, "pr_pval_ret", sn as i64);
+    let nslot: ptr = alloc(8);
+    mem_store32(nslot, 0, 4294967295);
+    sn = sp(ob, 64, "abc%ndef", nslot as u64, 0 as u64, 0 as u64, 1);
+    say_str("pr_n", ob);
+    say(sc, "pr_n_ret", sn as i64);
+    say(sc, "pr_n_cnt", mem_load32(nslot, 0) as i64);
 
     syscall4(60, 0, 0, 0);
 }
