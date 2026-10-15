@@ -20,12 +20,26 @@
 // `nargs` 是 libc **没有**的（它数不出来）：少给实参时 libc 读越界垃圾，这里**停止转换**
 // 并把已产出的部分收尾 —— 这是**唯一一处签名上的偏离**，写在这里而不是藏着。
 //
-// **支持**：`%%` `%d` `%i` `%u` `%x` `%X` `%o` `%c` `%s`，标志 `-` 与 `0`，十进制宽度，
-// 以及长度修饰符 `l` `h` `z` `j` `t`（**收下但不改行为** —— 本语言只有一个 64 位整数宽度）。
+// **支持**：`%%` `%d` `%i` `%u` `%x` `%X` `%o` `%c` `%s` `%p` `%n`，标志 `-` 与 `0`，
+// 宽度（十进制**或 `*`**）、精度（`.N` 或 `.*`），以及长度修饰符 `l` `h` `z` `j` `t`
+// （**收下但不改行为** —— 本语言只有一个 64 位整数宽度）。
 //
-// **不支持（如实列）**：精度 `.N`、星号宽度 `*`、`%p`、`%n`、以及浮点的 `%f`/`%e`/`%g`。
-// 浮点那一族不是漏了 —— 语言层没有浮点类型，仓库里是 `f64*.lomt` 的**软浮点**，
-// 要把它接进这里是一次独立的事（docs/232 §6）。
+// 几条**照 libc 的边角**（判据里逐条与 glibc 对跑）：
+//   * 精度的 `0` 标志**失效**，且 `%.0d` 配 0 输出**空串**（不是 "0"）；
+//   * `*` 宽度为负 ⇒ 左对齐 + 取绝对值；`.*` 精度为负 ⇒ **当作没写**；
+//   * `%p` 的 NULL 打 **`(nil)`**，其余打 `0x` + 小写十六进制（不补前导零）；
+//   * `%n` **不产出字符**，把"到目前为止写了多少"写回实参指向的 `int`。
+//
+// **不支持（如实列）：浮点的 `%f`/`%e`/`%g` —— 而且这一条是"不能"，不是"没做"。**
+//
+// 语言层没有浮点类型，仓库里是 `f64*.lomt` 的**软浮点**，接线本来只是几行。**但那串模块
+// 今天编不过**：`stdio` 一旦 `use "f64fmt.lomt"`，整个单元就被 clang 拒 —— 实测 **27 处
+// 非法 IR**（全是 `i32 -> i64` 的混宽运算，**#289** 那一类），散布在 `wide`（5 个函数）、
+// `bigint`（2 个）、`f64`（4 个，含 `f64_mul`/`f64_div`/`fa_*`）。
+//
+// 更要紧的是**由此推出的第二件事**：那串模块**从来没有被编译过**，所以它的**正确性也没被
+// 验证过**。把 `%f` 接上去、再与 glibc 逐字节比，很可能只是把一层"没编译过"换成一条
+// **长尾的数值错**。所以这一格不在这里做 —— 它是独立的一件事（issue 见 `docs/232` §5.1）。
 //
 // **返回值与截断照 libc**：返回"**本该写出**的字符数"（不含 NUL），即使被 `cap` 截断也一样；
 // 而 `cap > 0` 时**总是**补 NUL。这一条最容易写错，判据里专门比它。
@@ -89,20 +103,34 @@ fn sf_digit_char(d: u64, upper: bool) -> u32 {
 /// 仓库里那套"倒着写进临时区再翻转"要求调用方多给一格余量，是个隐式约定
 /// （`numfmt.lomt` 的头注专门为去掉它写过一段）。
 fn sf_int(buf: ptr, cap: u32, total: u32, av: u64, flags: u32, width: u32,
-          base: u32, upper: bool, signed: bool) -> u32 {
+          base: u32, upper: bool, signed: bool, prec: i64) -> u32 {
     let neg: bool = signed && (av as i64) < (0 as i64);
     let mag: u64 = av;
     if neg {
         mag = (0 as u64) - av;
     }
     let nd: u32 = sf_digits(mag, base);
+    // **精度 = 最少位数**（libc 的规矩）：给了精度就按它补零，而 `0` 标志**失效**。
+    // 精度 0 配值 0 ⇒ 一位都不打（`printf("%.0d", 0)` 输出空串，不是 "0"）。
+    let hasp: bool = prec >= (0 as i64);
+    let phas: u32 = prec as u32;
+    let pad: u32 = 0;
+    if hasp {
+        if phas > nd {
+            pad = phas - nd;
+        }
+    }
+    let ndig: u32 = nd;
+    if hasp && phas == 0 && mag == (0 as u64) {
+        ndig = 0;
+    }
     let nsign: u32 = 0;
     if neg {
         nsign = 1;
     }
-    let ntot: u32 = nd + nsign;
+    let ntot: u32 = pad + ndig + nsign;
     let left: bool = (flags & SF_LEFT) != 0;
-    let zero: bool = (flags & SF_ZERO) != 0 && left == false;
+    let zero: bool = (flags & SF_ZERO) != 0 && left == false && hasp == false;
     let cur: u32 = total;
     if width > ntot && zero {
         if neg {
@@ -132,8 +160,14 @@ fn sf_int(buf: ptr, cap: u32, total: u32, av: u64, flags: u32, width: u32,
         div = div * (base as u64);
         k3 = k3 + 1;
     }
+    // 精度补零在前、真数字在后（除数是按 nd 算的，所以必须分两段，不能让循环多跑）。
+    let z: u32 = 0;
+    while z < pad {
+        cur = sf_put(buf, cap, cur, 48);
+        z = z + 1;
+    }
     let i: u32 = 0;
-    while i < nd {
+    while i < ndig {
         let d: u64 = (mag / div) % (base as u64);
         cur = sf_put(buf, cap, cur, sf_digit_char(d, upper));
         div = div / (base as u64);
@@ -149,8 +183,10 @@ fn sf_int(buf: ptr, cap: u32, total: u32, av: u64, flags: u32, width: u32,
     return cur;
 }
 
-/// 一个字节 + 宽度（`%c`）。
-fn sf_char(buf: ptr, cap: u32, total: u32, c: u32, flags: u32, width: u32) -> u32 {
+/// 一个字节 + 宽度（`%c`）。**精度对 `%c` 无效**（libc 同），收下不用。
+fn sf_char(buf: ptr, cap: u32, total: u32, c: u32, flags: u32, width: u32,
+           prec: i64) -> u32 {
+    let _p: i64 = prec;
     let left: bool = (flags & SF_LEFT) != 0;
     let cur: u32 = total;
     if width > 1 && left == false {
@@ -171,9 +207,13 @@ fn sf_char(buf: ptr, cap: u32, total: u32, c: u32, flags: u32, width: u32) -> u3
     return cur;
 }
 
-/// NUL 结尾串 + 宽度（`%s`）。
-fn sf_str(buf: ptr, cap: u32, total: u32, p: ptr, flags: u32, width: u32) -> u32 {
-    let n: u32 = strlen(p);
+/// `n` 个字节 + 宽度（`%s` 与 `%p` 的 `(nil)` 共用）。**精度在这里截断**（libc：`%.3s` 最多 3 个字符）。
+fn sf_str_n(buf: ptr, cap: u32, total: u32, p: ptr, n0: u32, flags: u32, width: u32,
+            prec: i64) -> u32 {
+    let n: u32 = n0;
+    if prec >= (0 as i64) && (prec as u32) < n {
+        n = prec as u32;
+    }
     let left: bool = (flags & SF_LEFT) != 0;
     let cur: u32 = total;
     if width > n && left == false {
@@ -198,28 +238,89 @@ fn sf_str(buf: ptr, cap: u32, total: u32, p: ptr, flags: u32, width: u32) -> u32
     return cur;
 }
 
+/// NUL 结尾串 + 宽度（`%s`）。
+fn sf_str(buf: ptr, cap: u32, total: u32, p: ptr, flags: u32, width: u32,
+          prec: i64) -> u32 {
+    return sf_str_n(buf, cap, total, p, strlen(p), flags, width, prec);
+}
+
+/// `%p` —— glibc 的规矩：**NULL 打 `(nil)`**，其余打 `0x` + 小写十六进制（不补前导零）。
+///
+/// 判据里比它**只比两个确定的用例**：NULL（两边都得 `(nil)`）与一个**给定的整数**当指针
+/// （两边都得 `0xdeadbeef`）—— 真地址两边不同，逐字节比不了，这一点不装作能比。
+fn sf_ptr(buf: ptr, cap: u32, total: u32, v: u64, flags: u32, width: u32) -> u32 {
+    if v == (0 as u64) {
+        return sf_str_n(buf, cap, total, str_ptr("(nil)"), 5, flags, width, 0 as i64 - 1);
+    }
+    let nd: u32 = sf_digits(v, 16);
+    let ntot: u32 = nd + 2;
+    let left: bool = (flags & SF_LEFT) != 0;
+    let cur: u32 = total;
+    if width > ntot && left == false {
+        let k: u32 = 0;
+        while k < width - ntot {
+            cur = sf_put(buf, cap, cur, 32);
+            k = k + 1;
+        }
+    }
+    cur = sf_put(buf, cap, cur, 48);      // '0'
+    cur = sf_put(buf, cap, cur, 120);     // 'x'
+    let div: u64 = 1 as u64;
+    let k2: u32 = 0;
+    while k2 < nd - 1 {
+        div = div * (16 as u64);
+        k2 = k2 + 1;
+    }
+    let i: u32 = 0;
+    while i < nd {
+        let d: u64 = (v / div) % (16 as u64);
+        cur = sf_put(buf, cap, cur, sf_digit_char(d, false));
+        div = div / (16 as u64);
+        i = i + 1;
+    }
+    if width > ntot && left {
+        let k3: u32 = 0;
+        while k3 < width - ntot {
+            cur = sf_put(buf, cap, cur, 32);
+            k3 = k3 + 1;
+        }
+    }
+    return cur;
+}
+
 /// 一个转换说明符 -> 输出。不认识的说明符**原样输出** `%` 与那个字符（不静默吞掉）。
-fn sf_conv(buf: ptr, cap: u32, total: u32, spec: u32, av: u64, flags: u32, width: u32) -> u32 {
+fn sf_conv(buf: ptr, cap: u32, total: u32, spec: u32, av: u64, flags: u32, width: u32,
+           prec: i64) -> u32 {
     if spec == 100 || spec == 105 {              // d i
-        return sf_int(buf, cap, total, av, flags, width, 10, false, true);
+        return sf_int(buf, cap, total, av, flags, width, 10, false, true, prec);
     }
     if spec == 117 {                             // u
-        return sf_int(buf, cap, total, av, flags, width, 10, false, false);
+        return sf_int(buf, cap, total, av, flags, width, 10, false, false, prec);
     }
     if spec == 120 {                             // x
-        return sf_int(buf, cap, total, av, flags, width, 16, false, false);
+        return sf_int(buf, cap, total, av, flags, width, 16, false, false, prec);
     }
     if spec == 88 {                              // X
-        return sf_int(buf, cap, total, av, flags, width, 16, true, false);
+        return sf_int(buf, cap, total, av, flags, width, 16, true, false, prec);
     }
     if spec == 111 {                             // o
-        return sf_int(buf, cap, total, av, flags, width, 8, false, false);
+        return sf_int(buf, cap, total, av, flags, width, 8, false, false, prec);
     }
     if spec == 99 {                              // c
-        return sf_char(buf, cap, total, av as u32, flags, width);
+        return sf_char(buf, cap, total, av as u32, flags, width, prec);
     }
     if spec == 115 {                             // s
-        return sf_str(buf, cap, total, av as ptr, flags, width);
+        return sf_str(buf, cap, total, av as ptr, flags, width, prec);
+    }
+    if spec == 112 {                             // p
+        return sf_ptr(buf, cap, total, av, flags, width);
+    }
+    if spec == 110 {                             // n —— **不产出**，把"到目前为止写了多少"写回实参
+        let slot: ptr = av as ptr;
+        if (slot as u64) != (0 as u64) {
+            mem_store32(slot, 0, total);
+        }
+        return total;
     }
     let t2: u32 = sf_put(buf, cap, total, 37);
     return sf_put(buf, cap, t2, spec);
@@ -277,14 +378,59 @@ pub fn snprintf(buf: ptr, cap: u32, fmt: ptr, args: ptr, nargs: u32) -> u32 {
                         }
                     }
                     let width: u32 = 0;
-                    let morew: bool = true;
-                    while morew {
-                        let wc: u32 = load8(fmt, fi);
-                        if wc >= 48 && wc <= 57 {
-                            width = width * 10 + (wc - 48);
+                    if load8(fmt, fi) == 42 {
+                        // `*`：宽度从**实参**里取。负宽度 = 左对齐 + 取绝对值（libc 的规矩）。
+                        let wv: i64 = 0 as i64;
+                        if ai < nargs {
+                            wv = mem_load64(args, ai * 8) as i64;
+                            ai = ai + 1;
+                        }
+                        if wv < (0 as i64) {
+                            flags = flags | SF_LEFT;
+                            width = (0 as i64 - wv) as u32;
+                        } else {
+                            width = wv as u32;
+                        }
+                        fi = fi + 1;
+                    } else {
+                        let morew: bool = true;
+                        while morew {
+                            let wc: u32 = load8(fmt, fi);
+                            if wc >= 48 && wc <= 57 {
+                                width = width * 10 + (wc - 48);
+                                fi = fi + 1;
+                            } else {
+                                morew = false;
+                            }
+                        }
+                    }
+                    // 精度：`.` 后面接数字或 `*`。**负数精度当作没写**（libc 的规矩）。
+                    let prec: i64 = 0 as i64 - 1;
+                    if load8(fmt, fi) == 46 {
+                        fi = fi + 1;
+                        if load8(fmt, fi) == 42 {
+                            let pv: i64 = 0 as i64;
+                            if ai < nargs {
+                                pv = mem_load64(args, ai * 8) as i64;
+                                ai = ai + 1;
+                            }
+                            if pv >= (0 as i64) {
+                                prec = pv;
+                            }
                             fi = fi + 1;
                         } else {
-                            morew = false;
+                            let pv2: u32 = 0;
+                            let morep: bool = true;
+                            while morep {
+                                let pc: u32 = load8(fmt, fi);
+                                if pc >= 48 && pc <= 57 {
+                                    pv2 = pv2 * 10 + (pc - 48);
+                                    fi = fi + 1;
+                                } else {
+                                    morep = false;
+                                }
+                            }
+                            prec = pv2 as i64;
                         }
                     }
                     let morelen: bool = true;
@@ -300,7 +446,7 @@ pub fn snprintf(buf: ptr, cap: u32, fmt: ptr, args: ptr, nargs: u32) -> u32 {
                     if ai < nargs {
                         let av: u64 = mem_load64(args, ai * 8);
                         ai = ai + 1;
-                        total = sf_conv(buf, cap, total, spec, av, flags, width);
+                        total = sf_conv(buf, cap, total, spec, av, flags, width, prec);
                     }
                     // 实参不够: **不做这个转换** —— libc 会读越界垃圾, 这里停 (文件头写明了)。
                     fi = fi + 1;
