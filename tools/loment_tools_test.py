@@ -1081,19 +1081,37 @@ def test_gate_reports_how_many_criteria_did_not_run():
     quiet = ci.format_line("loment_tools_test", True, "12/12 通过", 1.2, 0)
     assert "SKIP" not in quiet, quiet
 
-    # (3) 真跑一条: 把 `wsl` 藏掉 = runner 的条件。跳过的条数必须被真的数出来。
-    #     用 `loment_elf_test` 而不是某个更小的套件, 因为**它**就是这条判据要保护的那个
-    #     套件（运行时护栏全在里面）。代价是几秒 —— 相对它挡住的东西不值一提。
+    # (3) **端到端**：造一个真模块喂给 `_run_one_check`（走的就是门禁那条路），
+    #     它打印两条行首 SKIP、一条只是提到 SKIP —— 数出来的必须正好是 2。
+    #
+    #     **为什么不拿某个真实套件来钉**：那个数**随平台走**。第一版钉的是
+    #     "藏掉 `wsl` 之后 `loment_elf_test` 跳过 >= 20 条"，而同一个 PR 的下半
+    #     （`#371` 第二半）恰恰让这族判据在 Linux 上**原生跑**、于是那个数掉到 0 ——
+    #     判据和它的修法在同一个 PR 里互相打架，CI 当场报 `loment_tools_test` 新红。
+    #     这一条要钉的是**报数这件事**，不是某个套件在某个平台上跳几条。
     import shutil
+    import tempfile
 
-    real = shutil.which
-    shutil.which = lambda n: None if n == "wsl" else real(n)
+    probe = Path(tempfile.mkdtemp(prefix="loment-skipcount-"))
     try:
-        _name, ok, _tail, _dt, skips = ci._run_one_check("loment_elf_test")
+        (probe / "loment_skipcount_probe.py").write_text(
+            "def main() -> int:\n"
+            "    print('  PASS  a')\n"
+            "    print('      SKIP: 无 clang/WSL')\n"
+            "    print('  PASS  b')\n"
+            "    print('      SKIP: 需要 WSL')\n"
+            "    print('  PASS  c  # 这一行只是提到 SKIP')\n"
+            "    return 0\n", encoding="utf-8", newline="\n")
+        sys.path.insert(0, str(probe))
+        try:
+            _name, ok, _tail, _dt, skips = ci._run_one_check("loment_skipcount_probe")
+        finally:
+            sys.path.remove(str(probe))
+            sys.modules.pop("loment_skipcount_probe", None)
+        assert ok, "探针模块自己没跑通"
+        assert skips == 2, f"跳过数该是 2（两条行首的算、提到的不算），得到 {skips}"
     finally:
-        shutil.which = real
-    assert ok, "跳过的判据不算失败 —— 藏掉 wsl 之后这一条仍然应当是 PASS（这正是问题）"
-    assert skips >= 20, f"数出来的跳过条数太少（{skips}）—— 计数规则或那个套件变了"
+        shutil.rmtree(probe, ignore_errors=True)
 
 
 def main() -> int:
