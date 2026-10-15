@@ -334,6 +334,19 @@ _CASES: list[tuple[str, str]] = [
      "module m\n\nfn f() -> i64 {\n    @;\n    return 0;\n}\n"),
     ("expr-not-expression",
      "module m\n\nfn f() -> u32 {\n    let v: u32 = @ 1;\n    return v;\n}\n"),
+    # ---- 0.1.4.6 的一批"自举侧说得不对或不说"的探针 -------------------------------
+    # 分诊（2026-10-15，已发布 0.1.4.5 对照参考实现）：这几条在已发布编译器上要么给错码、
+    # 要么一声不吭，而参考侧都报得出来。本判据的分工就是把这类分叉**量成 MISSING**，
+    # 而不是靠人一条条去比对。
+    # 注意：`let x = 1;`（#7）与 `let a: f64 = 1.0;`（#323）也量过，是 **DIFF** ——
+    # 自举报 E002、参考报 E019。DIFF 是"假阳性/口径漂移"那一档，必须为 0，所以这两条
+    # **不能**进这份表；它们记在各自的 issue 上，修好（变成 EQUAL）再收进来。
+    ("break-not-a-name",
+     "module m\n\nfn f() -> u32 {\n    let i: u32 = 0;\n    while i < 3 {\n        break;\n    }\n    return i;\n}\n"),
+    ("undeclared-in-return",
+     "module m\n\nfn f() -> u32 {\n    return undefined_thing;\n}\n"),
+    ("bin-literal",
+     "module m\n\nfn f() -> u32 {\n    let v: u32 = 0b1010;\n    return v;\n}\n"),
 ]
 
 
