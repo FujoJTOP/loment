@@ -996,6 +996,40 @@ def test_m88_l0_alpha_pair_is_byte_identical():
 
 
 @test
+def test_m92_slot_table_is_byte_identical():
+    """**块内槽表**（`docs/210` §2.9）那一份真值表源，两个实现**逐字节**一致。
+
+    **源只有一份** —— `lomentc_test.SLOT_TABLE_SRC`（那边同时钉参考侧那四格：哪两个站点
+    精确、掩码是哪几位、表那一行写没写进初值）。各抄一份必然漂，而这一条的全部意义就是
+    "两个实现看的是同一份程序"。
+
+    这一格比别的几格更依赖这条判据：`_slot_plan` 与 `slot_mask_at` 是两套**手写**的
+    token 走法（别名闭包、用法校验、掩码置位），差一格就是"一个站点精确、另一个保守" ——
+    产物里多一条 `store i32 -k` 少一条，逐字节当场看得见。**而真值表那边只钉参考实现**，
+    钉不到镜像。所以这一条不许空转：产物里必须有那条槽表行与至少一条 `-k` 标记。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    import lomentc_test  # noqa: E402  （源只有一份）
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        target = Path(td) / "gc_slots.lomt"
+        target.write_text(lomentc_test.SLOT_TABLE_SRC, encoding="utf-8", newline="\n")
+        want = _unit_ll(target)
+        got = _run_codegen(exe, target, td)
+        if got != want:
+            i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+            a = max(0, (i or 0) - 80)
+            raise AssertionError(
+                f"gc_slots 首个差异 @{i}:\n"
+                f" loment {got[a:(i or 0) + 100]!r}\n python {want[a:(i or 0) + 100]!r}")
+        # 不许空转：两条**带掩码**的借出标记都得在（不然"两边都没发"也能通过）。
+        # 掩码编在块头那个字里（`-(mask + 2)`），所以这里点的是 `-2`（掩码 0）与 `-4`（0b10）。
+        assert got.count("store i32 -2, ptr") == 1 and got.count("store i32 -4, ptr") == 1
+
+
+@test
 def test_m89_l2_epoch_is_byte_identical():
     """L2（**块纪元**，`docs/210` §2）：那一份真值表源，在**两个实现**上逐字节一致。
 
