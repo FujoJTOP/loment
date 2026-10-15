@@ -15,7 +15,7 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "915ef0817f2bb3da069a6461dca11c5137c70b9170b6724a429f99492aa65168"
+   "sha256": "b8398ba697fc511e61f022c63f9c6fd3f3b3a97a98b8f297ecaedf31bebac61b"
   },
   {
    "path": "tools/lomentc_test.py",
@@ -2343,7 +2343,7 @@
   },
   {
    "path": "docs/246-gc-ladder-axis.md",
-   "sha256": "d9a483107cf1ed8ebf739c59b456ea1d60825bc1fd26f93af34e584fb0b80f31"
+   "sha256": "4ed4bca2c0c65d665c9e827c6d4d9b07e2c7b97016efe74404210e74298435a3"
   },
   {
    "path": "docs/manual/index.md",
