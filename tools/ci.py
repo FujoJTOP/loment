@@ -444,6 +444,15 @@ def check_budget(results, floors, skips, *, in_ci: bool) -> list[str]:
                 bad.append(f"{r.name}: 整条套件被跳过，而它不在 {ROOT_SKIPS} 里 —— "
                            f"补一行 `{r.name} *  # 环境: …`")
             continue
+        # **跳过必须有名字**，否则它对这个预算**完全不可见** —— 那正是本版要堵的形状
+        # （一层安全检查看不见的洞）。没搬上 `loment_suite.run` 的套件打的还是
+        # `SKIP <原因>` 那种没名字的写法：`count_skips` 数得到，而这里认不出来。
+        # 把它们改成 `  SKIP  <判据名>: <原因>`（搬上共享运行器，或者照这个形状改名）。
+        unnamed = r.skips - len(r.skipped)
+        if unnamed > 0:
+            bad.append(f"{r.name}: 打了 {r.skips} 条 SKIP，其中 {unnamed} 条**没有名字** —— "
+                       f"它们对预算不可见。跳过要写成 `  SKIP  <判据名>: <原因>`"
+                       f"（把那些判据搬上 `loment_suite.run`，或者照这个形状改名）")
         for crit in r.skipped:
             key = (r.name, crit)
             seen.add(key)

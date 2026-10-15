@@ -1183,7 +1183,16 @@ def test_gate_budget_matches_the_suites():
     for suite, crit in sorted(skips):
         if crit == "*":
             continue
-        names = {n for n, _ in __import__(suite).TESTS}
+        tests = getattr(__import__(suite), "TESTS", None)
+        if tests:
+            names = {n for n, _ in tests}
+        else:
+            # 没搬上共享运行器的套件（`check()` 那一族）没有 `TESTS` —— 名字从**源码**里认：
+            # 那里必须有 `SKIP  <判据名>:` 这么一行。少了这一路，那几家的豁免写错名字
+            # 也没人管（一条永远不生效的谎话）。
+            src = (Path(__file__).parent / f"{suite}.py").read_text(
+                encoding="utf-8", errors="replace")
+            names = {m.group(1).strip() for m in re.finditer(r"SKIP\s+([^:\n]+?):", src)}
         assert crit in names, f"gate-skips.txt 里 {suite} 的 {crit} 不在那个套件里（改名了？）"
     print(f"      gate-floors {len(floors)} 个套件 / gate-skips {len(skips)} 条豁免，都对得上")
 
@@ -1454,6 +1463,32 @@ def test_gate_checks_the_budget_even_when_a_suite_is_red():
         f"输出尾部：{text[-300:]!r}")
     assert rc == 1, "有红又有预算问题时，退出码必须是 1"
     print("      有红的套件时预算照样查（两条一起报出来）")
+
+
+@test
+def test_gate_makes_an_unnamed_skip_loud():
+    """跳过**没有名字**时必须判失败 —— 没名字的跳过对预算完全不可见。
+
+    仓里当时有三个套件没搬上 `loment_suite.run`（`check()` 那一族：`loment_dist_test` /
+    `loment_sign_test` / `loment_eol`），它们打的是 `SKIP <原因>` 这种没名字的写法：
+    `count_skips` 数得到（所以 `N SKIP` 那一栏会报），而**名字**认不出来 —— 于是
+    `gate-skips.txt` 对它们毫无约束力，`CONTRIBUTING.md` 禁的那条路
+    （"给一条既有判据加个环境门让它不跑"）在这三个套件里一直开着。
+
+    这条直接跑 `check_budget`：一条"打了 2 条 SKIP、0 条带名字"的结果必须出问题；
+    反过来"1 条带名字且登记过"不能出问题（否则判据本身在滥杀）。
+    """
+    import ci
+
+    r = ci.Result("probe_unnamed", True, "probe: 1/1 通过", 0.1, 2, ("p",), (), 1, False)
+    bad = ci.check_budget([r], {"probe_unnamed": 1}, set(), in_ci=False)
+    assert any("没有名字" in b for b in bad), f"没名字的跳过没被判失败：{bad}"
+
+    r2 = ci.Result("probe_named", True, "probe: 1/2 通过, 1 SKIP", 0.1,
+                   1, ("p",), ("test_x",), 2, False)
+    assert not ci.check_budget([r2], {"probe_named": 2}, {("probe_named", "test_x")},
+                               in_ci=False), "登记好的跳过不该被判失败"
+    print("      跳过没名字 = 判失败；有名字且登记过 = 放过")
 
 
 def main() -> int:
