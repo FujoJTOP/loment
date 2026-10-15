@@ -991,8 +991,14 @@ def test_libl_matches_libc():
     diff = _first_diff(got, want)
     assert not diff, f"LibL 与 glibc 不一致 @ {diff}"
     # 宿主面那一条的**第二半**：两侧各自写的文件必须逐字节相同 —— 上面比的是 stdout，
-    # 而"写出去的东西对不对"只有比文件才算数（`cmp` 在 WSL 里跑，两个文件都在 /tmp）。
-    r = subprocess.run(["wsl", "-e", "bash", "-lc",
+    # 而"写出去的东西对不对"只有比文件才算数。
+    #
+    # ⚠ **前缀必须是 `_WSLCMD`，不能写死 `["wsl", "-e"]`**：#382 之后 `_wsl()` 在 Linux 上
+    # 直接返回 True，于是这条在 ubuntu runner 上是**原生跑**的 —— 写死 `wsl` 就撞
+    # `FileNotFoundError`（2026-10-15 实测：CI 上 `loment_libl_test` 1/2，而且**跳过数
+    # 从 1 掉到 0** —— 那个 0 正是"这条不再跳过、而是在 Linux 上真跑起来了"的信号）。
+    # 两个文件都落在 `/tmp` 的**绝对路径**上，所以原生与经 WSL 两种情形路径相同。
+    r = subprocess.run([*_WSLCMD, "bash", "-lc",
                         "cmp /tmp/liblio_c.bin /tmp/liblio_l.bin && "
                         "wc -c < /tmp/liblio_l.bin"],
                        capture_output=True, text=True, timeout=120, shell=False)
