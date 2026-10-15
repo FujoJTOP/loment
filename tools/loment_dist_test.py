@@ -448,7 +448,7 @@ def test_windows_installer(zipf: Path) -> None:
         # PowerShell**（所以原先那道 `if not ps` 守卫拦不住），但没有 `cmd` —— 会走到
         # 一半才炸 `FileNotFoundError: 'cmd'`。按本文件对 Windows 专属判据的既有写法
         # 整条跳过，并写明这一半在 CI 上**不覆盖**。
-        print("  SKIP  Windows 安装脚本: 非 Windows —— 这一半在 CI 上不覆盖"
+        print("  SKIP  Windows安装脚本: 非 Windows —— 这一半在 CI 上不覆盖"
               "（要覆盖得用 Windows runner）")
         return
     work = loment_dist.STAGE / "it-win"

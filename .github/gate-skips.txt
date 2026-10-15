@@ -1,13 +1,154 @@
-# 允许**跳过**的判据（`套件 判据名`；`*` = 整条套件被跳过）。
+# 允许**跳过**的判据（一行 `套件 判据名`；`*` = 整条套件被跳过）。
 #
-# 纪律与 `.github/gate-baseline.txt` 同一套：
-#   * 实际跳过必须是这里的**子集** —— 多出来一条，门禁就红。这条挡的是 `CONTRIBUTING.md`
-#     明令禁止的那种做法：**给一条既有判据加个环境门让它不跑**（「不许为了让判据过而
-#     放宽它」），或者新写一条永远跳过的判据。
-#   * **只许变短**：这台机器上修补好了就把它删掉。CI 里没跳的条目会被点名。
+# 纪律（与 `.github/gate-baseline.txt` 同一套）：
+#   * 实际跳过必须是这里的**子集** —— 多出来一条，门禁就红。挡的是 `CONTRIBUTING.md`
+#     明令禁止的那种做法：**给一条既有判据加个环境门让它不跑**（"不许为了让判据过而放宽它"），
+#     或者新写一条永远跳过的判据。
+#   * **只许变短**：哪一条能在这台机器上跑起来了就删掉它。CI 里没跳的会被 `::notice` 点名。
 #   * 每条写清为什么这台机器上跑不了（`环境`），或者为什么它还没做完（`仓库`）。
+#   * 判据名里**不能有空格**：这一行的格式就是「两列」（`套件 判据名`），名字带空格
+#     会被判成格式错。新写的跳过请起不带空格的名字（`签PE`，不是 `签 PE`）。
 #
-# 为什么它一度是空的（`#371`）：runner 上真正会跳的那些**必须从 runner 上量**，本机猜不出来
-# —— 本机有 clang/WSL 时看到的只是子集。落这一版时先推上去，让 gate 把「哪一条跳了」打出来
-# （失败信息里每一条都自带可以直接粘过来的行），照抄回本文件，再推一次。
-
+# 这份表是**从 runner 上量出来的**（本机有 clang/WSL，看到的只是子集）：
+# `tools/ci.py` 判预算失败时，每一条都打出一行可以直接粘进来的文本；原因那一列由
+# 那份量取脚本从套件源码里抽（`gate.out` 每条只留最后一行，带不出原因）。
+lomc_test test_lomc_check_matches_loment_twin  # 环境: 无 clang/WSL
+lomc_test test_lomc_twin_selfhost_compiles  # 环境: 无 clang/WSL
+loment_admit_test test_lomadmit_selfhost_compiles  # 环境: 无 clang/WSL
+loment_admit_test test_malformed_cases_report_the_same_line  # 环境: 见该判据打的 SKIP 行
+loment_admit_test test_the_whole_corpus_matches_python  # 环境: 见该判据打的 SKIP 行
+loment_capasserts_test test_capasserts_check_matches_python_in_all_three_branches  # 环境: 无 clang/WSL
+loment_capasserts_test test_capasserts_emit_writes_same_bytes  # 环境: 无 clang/WSL
+loment_capasserts_test test_capasserts_print_matches_python  # 环境: 无 clang/WSL
+loment_capasserts_test test_capasserts_selfhost_compiles  # 环境: 无 clang/WSL
+loment_channel_test test_release_driver_refuses_channel_gated_constructs  # 环境: 需要 clang + WSL
+loment_cli_test test_cli_check_matches_loment_twin  # 环境: 无 clang/WSL
+loment_cli_test test_cli_twin_selfhost_compiles  # 环境: 无 clang/WSL
+loment_comefor_test test_comefor_check_matches_loment_twin  # 环境: 无 clang/WSL
+loment_comefor_test test_comefor_twin_selfhost_compiles  # 环境: 无 clang/WSL
+loment_cpptrans_test test_translation_runs_same_as_gpp  # 环境: 需要 WSL + g++
+loment_cstrans_test test_a_byte_only_unit_runs_and_proves_it_is_unsigned  # 环境: 需要 dotnet + WSL
+loment_cstrans_test test_translation_runs_same_as_dotnet  # 环境: 需要 dotnet + WSL
+loment_ctrans_test test_translation_runs_same_as_clang  # 环境: 需要 clang + WSL
+loment_dap_test test_breakpoint_stops_on_the_right_line  # 环境: 需要 WSL + Windows 侧 clang
+loment_dap_test test_next_crosses_a_call  # 环境: 需要 WSL + Windows 侧 clang
+loment_dap_test test_step_in_moves_to_another_line  # 环境: 需要 WSL + Windows 侧 clang
+loment_dap_test test_unplaceable_breakpoint_is_reported  # 环境: 需要 WSL + Windows 侧 clang
+loment_dist_test Windows安装脚本  # 环境: 见该判据打的 SKIP 行
+loment_doc_test test_loment_lomdoc_edge_cases  # 环境: 无 clang/WSL
+loment_doc_test test_loment_lomdoc_matches_python  # 环境: 无 clang/WSL
+loment_doc_test test_loment_lomdoc_refuses_foreign_grammar  # 环境: 无 clang/WSL
+loment_editors_test test_vim_grammar_check_matches_loment_twin  # 环境: 无 clang/WSL
+loment_eol_test test_lomeol_matches_python  # 环境: 无 clang/WSL
+loment_eol_test test_lomeol_reports_crlf_like_python  # 环境: 无 clang/WSL
+loment_eol_test test_lomeol_selfhost_compiles  # 环境: 无 clang/WSL
+loment_err_test test_err_check_matches_loment_twin  # 环境: 无 clang/WSL
+loment_err_test test_err_twin_selfhost_compiles  # 环境: 无 clang/WSL
+loment_extblock_test test_extblock_check_matches_loment_twin  # 环境: 无 clang/WSL
+loment_extblock_test test_extblock_twin_selfhost_compiles  # 环境: 无 clang/WSL
+loment_ffi_test test_archive_selects_only_needed_members  # 环境: 需要 clang + WSL
+loment_ffi_test test_c_end_to_end  # 环境: 需要 clang + WSL
+loment_ffi_test test_cpp_end_to_end  # 环境: 需要 clang++ + WSL
+loment_ffi_test test_go_via_process_bridge  # 环境: 需要 WSL
+loment_ffi_test test_java_via_process_bridge  # 环境: 需要 WSL
+loment_ffi_test test_javascript_via_process_bridge  # 环境: 需要 WSL
+loment_ffi_test test_loment_kernel_object_is_reusable_without_clang  # 环境: 无 clang/WSL
+loment_ffi_test test_lua_via_process_bridge  # 环境: 需要 WSL
+loment_ffi_test test_malloc_and_free_are_loments_own_heap  # 环境: 需要 clang + WSL
+loment_ffi_test test_memcpy_and_memset_return_the_destination  # 环境: 需要 clang + WSL
+loment_ffi_test test_multi_object_cross_reference  # 环境: 需要 clang + WSL
+loment_ffi_test test_object_using_memcpy_is_conscripted_and_runs  # 环境: 需要 clang + WSL
+loment_ffi_test test_object_with_rodata_and_data_relocations_runs  # 环境: 需要 clang + WSL
+loment_ffi_test test_perl_via_process_bridge  # 环境: 需要 WSL
+loment_ffi_test test_python_via_process_bridge  # 环境: 需要 WSL
+loment_ffi_test test_rust_end_to_end  # 环境: 需要 rustc + x86_64-unknown-none + clang + WSL
+loment_ffi_test test_stack_protector_object_runs_because_we_give_it_tls  # 环境: 需要 clang + WSL
+loment_ffi_test test_three_args_and_void_call  # 环境: 需要 clang + WSL
+loment_ffi_test test_two_foreign_objects  # 环境: 需要 clang + WSL
+loment_ffi_test test_zig_end_to_end  # 环境: 需要 WSL
+loment_filetype_test test_plan_covers_both_extensions  # 环境: 非 Windows —— 登记的是 HKCU 注册表，别的平台没有对应物
+loment_filetype_test test_registered_state_matches_plan  # 环境: 非 Windows
+loment_fmt_test test_loment_fmt_edge_cases  # 环境: 无 clang/WSL
+loment_fmt_test test_loment_fmt_is_idempotent  # 环境: 无 clang/WSL
+loment_fmt_test test_loment_fmt_matches_python  # 环境: 无 clang/WSL
+loment_fmt_test test_loment_fmt_refuses_foreign_grammar  # 环境: 无 clang/WSL
+loment_genesis_test test_bootstrap_needs_no_clang  # 环境: 无 WSL
+loment_gotrans_test test_translation_runs_same_as_go  # 环境: 需要 go + WSL
+loment_grammar_test test_grammar_scanner_twin_matches_the_independent_reference  # 环境: 无 clang/WSL
+loment_grammar_test test_grammar_twin_selfhost_compiles  # 环境: 无 clang/WSL
+loment_hosted_test test_csharp_nativeaot_library_is_callable  # 环境: 这一侧没有 dotnet (CI 镜像故意不含; 见 docs/222 §8)
+loment_json_test test_json_check_matches_loment_twin  # 环境: 无 clang/WSL
+loment_json_test test_json_decoding_and_lookup  # 环境: 无 clang/WSL
+loment_json_test test_json_library_matches_python  # 环境: 无 clang/WSL
+loment_json_test test_json_twin_selfhost_compiles  # 环境: 无 clang/WSL
+loment_jtrans_test test_bits_translation_runs_same_as_javac  # 环境: 需要 javac + java + WSL
+loment_jtrans_test test_translation_runs_same_as_javac  # 环境: 需要 javac + java + WSL
+loment_libl_test test_libl_matches_libc  # 环境: 无 clang/WSL
+loment_lomc_test test_lomc_selfhost_compiles  # 环境: 无 clang/WSL
+loment_lomc_test test_loment_lomc_check_and_errors  # 环境: 无 clang/WSL
+loment_lomc_test test_loment_lomc_emit_writes_same_bytes  # 环境: 无 clang/WSL
+loment_lomc_test test_loment_lomc_print_matches_python  # 环境: 无 clang/WSL
+loment_lompi_test test_dev_copy_and_repo_copy_do_not_silently_drift  # 环境: 见该判据打的 SKIP 行
+loment_lsp_test test_lsp_check_honours_switches  # 环境: 无 clang/WSL
+loment_lsp_test test_lsp_check_mode_is_python_free  # 环境: 无 clang/WSL
+loment_lsp_test test_lsp_diagnostics_match_selfhosted_checker  # 环境: 无 clang/WSL
+loment_lsp_test test_lsp_protocol_roundtrip  # 环境: 无 clang/WSL
+loment_lumtui_test test_demo_runs_and_renders  # 环境: 无 WSL
+loment_lumtui_test test_font_metrics_match_freetype  # 环境: 无 WSL
+loment_lumtui_test test_fuc_bytes_match_lom_single_source  # 环境: 无 WSL
+loment_lumtui_test test_glyph_raster_matches_freetype  # 环境: 无 WSL
+loment_lumtui_test test_layout_matches_independent_expectation  # 环境: 无 WSL
+loment_lumtui_test test_python_grammar_module_matches_python  # 环境: 无 WSL
+loment_multilang_test test_three_syntaxes_feed_one_program  # 环境: 需要 clang + WSL
+loment_multisyntax_test rust_10_leg  # 环境: 见该判据打的 SKIP 行
+loment_multisyntax_test test_c_source_named_lomt_end_to_end  # 环境: 需要 clang + WSL
+loment_nltrans_test test_the_loment_twin_runs_to_the_same_number_by_itself  # 环境: 需要 WSL 来跑 ELF
+loment_nltrans_test test_the_natural_program_runs_to_the_derived_number  # 环境: 需要 WSL 来跑 ELF
+loment_nltrans_test test_the_surface_program_runs_to_the_derived_numbers  # 环境: 需要 WSL 来跑 ELF
+loment_nltrans_test test_the_surface_twin_is_byte_identical_and_runs_by_itself  # 环境: 需要 WSL 来跑 ELF（逐字节那半已过）
+loment_p7_test test_m67_m78_boot_programs  # 环境: 无 QEMU 或内核镜像
+loment_p8_test test_m83_selfhosted_driver_compiles_itself  # 环境: 无 clang
+loment_p8_test test_m85_driver_checks_before_emitting  # 环境: 无 clang/WSL
+loment_p8_test test_m85_driver_emits_structured_diagnostics  # 环境: 需要 clang + WSL
+loment_p8_test test_m85_driver_gate_on_probe_cases  # 环境: 需要 WSL + clang
+loment_p8_test test_m85_selfhosted_driver_compiles_corpus  # 环境: 无 clang/WSL
+loment_p8_test test_m86_driver_handles_addin  # 环境: 无 clang/WSL
+loment_p8_test test_m86_selfhost_perf_budget  # 环境: 需要 WSL + clang
+loment_p8_test test_m87_driver_strips_grammar_decl  # 环境: 无 clang/WSL
+loment_pe_test test_pe_and_elf_agree_on_net_programs  # 环境: 非 Windows 或无 WSL
+loment_pe_test test_pe_builds_and_runs_without_clang_or_wsl  # 环境: 非 Windows
+loment_pe_test test_pe_links_capability_programs  # 环境: 非 Windows
+loment_pe_test test_pe_runs_natively_matches_linux_behavior  # 环境: 非 Windows 或无 clang/WSL
+loment_pe_test test_pe_runs_the_loment_toolchain_natively  # 环境: 非 Windows
+loment_pe_test test_pe_runs_the_selfhost_compiler_natively  # 环境: 非 Windows
+loment_pe_test test_pe_selfhost_mirror_matches_reference  # 环境: 无 clang/WSL
+loment_pkg_test test_loment_lompkg_edge_cases  # 环境: 无 clang/WSL
+loment_pkg_test test_loment_lompkg_matches_python  # 环境: 无 clang/WSL
+loment_pkg_test test_loment_lompkg_verify_and_lock_roundtrip  # 环境: 无 clang/WSL
+loment_pytrans_test test_agreeing_source_matches_cpython  # 环境: 需要 WSL + CPython
+loment_pytrans_test test_disagreeing_source_follows_loment_not_python  # 环境: 需要 WSL
+loment_rel_test test_lomrel_checksums_same_bytes  # 环境: 无 clang/WSL
+loment_rel_test test_lomrel_emit_writes_same_bytes  # 环境: 无 clang/WSL
+loment_rel_test test_lomrel_matches_python  # 环境: 无 clang/WSL
+loment_rel_test test_lomrel_selfhost_compiles  # 环境: 无 clang/WSL
+loment_sign_test 分离签名  # 环境: 见该判据打的 SKIP 行
+loment_sign_test 签PE  # 环境: 见该判据打的 SKIP 行
+loment_state_test test_real_repo_state_is_coherent  # 环境: 这个检出没有 origin/main（tarball 检出？）
+loment_status_test test_lomstatus_detects_drift  # 环境: 无 clang/WSL
+loment_status_test test_lomstatus_emit_writes_same_bytes  # 环境: 无 clang/WSL
+loment_status_test test_lomstatus_matches_python  # 环境: 无 clang/WSL
+loment_status_test test_lomstatus_selfhost_compiles  # 环境: 无 clang/WSL
+loment_std_test test_std_check_matches_loment_twin  # 环境: 无 clang/WSL
+loment_std_test test_std_modules_match_python  # 环境: 无 clang/WSL
+loment_std_test test_std_twin_selfhost_compiles  # 环境: 无 clang/WSL
+loment_syscalls_test test_lomsyscalls_check_matches_python  # 环境: 无 clang/WSL
+loment_syscalls_test test_lomsyscalls_emit_writes_same_bytes  # 环境: 无 clang/WSL
+loment_syscalls_test test_lomsyscalls_selfhost_compiles  # 环境: 无 clang/WSL
+loment_tools_test test_m30_bare_metal_object_and_link  # 环境: 无 clang
+loment_zwframe_test test_lomzwframe_selfhost_compiles  # 环境: 无 clang/WSL
+loment_zwframe_test test_the_corpus_matches_python_and_the_frame_cannot_carry_payload  # 环境: 见该判据打的 SKIP 行
+lompi_sync lompi_sync[指南]  # 环境: 见该判据打的 SKIP 行
+lompi_sync lompi_sync[标准库]  # 环境: 见该判据打的 SKIP 行
+lompi_sync lompi_sync[源码]  # 环境: 见该判据打的 SKIP 行
+vscode_ext_test test_vscode_ext_manifest_and_grammar  # 环境: 打包前置: 没装 node_modules (npm install --omit=dev 于 editors/vscode) —— 干净检出/别的机器上如此,
+vscode_ext_test test_vscode_vsix_structure  # 环境: 尚未打包 (python tools/vscode_ext.py --emit …)

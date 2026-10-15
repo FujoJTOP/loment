@@ -113,7 +113,7 @@ def strip_signature(data: bytes) -> bytes:
 
 def test_sign_pe(tmp: Path) -> None:
     if os.name != "nt":
-        print("  SKIP  签 PE: 非 Windows 没有 Authenticode")
+        print("  SKIP  签PE: 非 Windows 没有 Authenticode")
         return
     if loment_sign.keygen(TEST_CN) != 0:
         check("--keygen 生成自签证书", False, "keygen 失败")
@@ -122,7 +122,7 @@ def test_sign_pe(tmp: Path) -> None:
 
     setups = sorted(loment_dist.OUT.glob("*-setup.exe"))
     if not setups:
-        print("  SKIP  签 PE: loment/dist 里没有 setup.exe; 先跑 loment_dist --emit")
+        print("  SKIP  签PE: loment/dist 里没有 setup.exe; 先跑 loment_dist --emit")
         return
     work = Path(tempfile.mkdtemp(prefix="loment-sign-"))
     src_bytes = setups[0].read_bytes()

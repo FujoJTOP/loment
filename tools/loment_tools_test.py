@@ -1185,14 +1185,22 @@ def test_gate_budget_matches_the_suites():
             continue
         tests = getattr(__import__(suite), "TESTS", None)
         if tests:
-            names = {n for n, _ in tests}
+            # 归一走 `loment_suite.entries` —— `TESTS` 有 `(名字, 函数)` 与裸函数两种写法
+            names = {n for n, _ in loment_suite.entries(tests)}
         else:
             # 没搬上共享运行器的套件（`check()` 那一族）没有 `TESTS` —— 名字从**源码**里认：
             # 那里必须有 `SKIP  <判据名>:` 这么一行。少了这一路，那几家的豁免写错名字
             # 也没人管（一条永远不生效的谎话）。
             src = (Path(__file__).parent / f"{suite}.py").read_text(
                 encoding="utf-8", errors="replace")
-            names = {m.group(1).strip() for m in re.finditer(r"SKIP\s+([^:\n]+?):", src)}
+            # f-string 里的 `{pair['label']}` 在**源码**里是字面量，而量出来的名字是渲染后的
+            # （`lompi_sync[指南]`）—— 所以占位符当通配符比。
+            pats = [re.compile("^" + ".*".join(
+                        re.escape(p) for p in re.split(r"\{[^}]*\}", n)) + "$")
+                    for n in re.findall(r"SKIP\s+([^:\n]+?):", src)]
+            assert any(p.match(crit) for p in pats), (
+                f"gate-skips.txt 里 {suite} 的 {crit} 在那个套件里找不到（改名了？）")
+            continue
         assert crit in names, f"gate-skips.txt 里 {suite} 的 {crit} 不在那个套件里（改名了？）"
     print(f"      gate-floors {len(floors)} 个套件 / gate-skips {len(skips)} 条豁免，都对得上")
 
