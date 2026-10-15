@@ -2358,6 +2358,10 @@
    "sha256": "dae6fc4c5851a4d74a7a63a9d96efd071d822ff3f4048d9307a6d3da3bc576a3"
   },
   {
+   "path": "docs/250-lvm-compact-form.md",
+   "sha256": "5054446a6f1654a63fe416dab0263ad94777b042d08f34801bdfe808a17e8a74"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "381a8179c9905a5e19aee53249a445786ab9960a91d5ac95cbc3591d85c5a59f"
   },
