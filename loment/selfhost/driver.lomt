@@ -276,6 +276,44 @@ fn wdiag(fd: u64, scr: ptr, file: ptr, fnam: u32,
     return wstr(fd, "}\n");
 }
 
+/// 会把运行期拖进产物的构造 → **人话**（issue #321）。照抄参考实现 `tools/lomentc.py`
+/// 的 `_RUNTIME_SITES` —— 报文的正文要的是"除法 `/`"这一句，不是那一格 token 原文，而两边
+/// 要逐字节一致。不是那八个之一就回空串：调用方据此判断"这条 E022 是不是运行期那一类"
+/// （E022 还有别的起因，不能一律改写）。
+fn rt_phrase(slot: ptr, toks: ptr, tk: u32) -> str {
+    if tok_is(slot, toks, tk, "/") { return "除法 `/`"; }
+    if tok_is(slot, toks, tk, "%") { return "取模 `%`"; }
+    if tok_is(slot, toks, tk, "alloc") { return "`alloc`"; }
+    if tok_is(slot, toks, tk, "free") { return "`free`"; }
+    if tok_is(slot, toks, tk, "str_concat") { return "`str_concat`"; }
+    if tok_is(slot, toks, tk, "str_eq") { return "`str_eq`"; }
+    if tok_is(slot, toks, tk, "panic") { return "`panic`"; }
+    if tok_is(slot, toks, tk, "guard") { return "`guard`（能力域守卫）"; }
+    return "";
+}
+
+/// 运行期那一类 E022 的**结构化**诊断 —— 正文是**一句话**，不是 token（issue #321）。
+/// 与参考实现 `check()` 里那条 f-string 逐字节同形：`{line}: 声明了 …—— {name}（…）。`
+/// +（`nsites > 1` 时）`这一类构造本单元另有 {nsites-1} 处。` + `要运行期就在根单元写 …`。
+/// 分段直接写 fd（**不另开缓冲**：`scr` 那块排得很密，没有 200 字节的连续空位）。
+fn wdiag_rt(fd: u64, scr: ptr, file: ptr, fnam: u32, line: u32, ph: str, nsites: u32) -> u64 {
+    let _a: u64 = wstr(fd, "{\"file\":");
+    let _b: u64 = wjson_str(fd, file, fnam);
+    let _c: u64 = wstr(fd, ",\"line\":");
+    let _d: u64 = wdec(fd, scr, line);
+    let _e: u64 = wstr(fd, ",\"col\":0,\"code\":\"E022\",\"message\":\"");
+    let _f: u64 = wdec(fd, scr, line);
+    let _g: u64 = wstr(fd, ": 声明了 `no_runtime`，但它会让产物带上运行期 —— ");
+    let _h: u64 = write_all(fd, str_ptr(ph), str_len(ph) as u64);
+    let _i: u64 = wstr(fd, "（`no_runtime` 是**保证**：产物里不许出现那段运行期）。");
+    if nsites > 1 {
+        let _j: u64 = wstr(fd, "这一类构造本单元另有 ");
+        let _k: u64 = wdec(fd, scr, nsites - 1);
+        let _l: u64 = wstr(fd, " 处。");
+    }
+    return wstr(fd, "要运行期就在根单元写 `choose runtime`；不要就把这个构造换掉\"}\n");
+}
+
 /// u32 十进制写到 fd (诊断里要报错误码与行号; 驱动器里没有 printf)。
 /// 数字缓冲借 scr 的 [8000, 8064) (布局见 SCR_CAP 上面的表)。
 fn wdec(fd: u64, scr: ptr, v: u32) -> u64 {
@@ -1869,13 +1907,14 @@ fn _start() -> u32 {
     if nsym > (chk_arena_scr() - chk_arena_syms()) / 20 {
         return fail("fujoc-s: 单元声明数超过 checker 符号表容量 (把门面拆小)\n");
     }
+    let tytp: ptr = ptr_add(arena, chk_arena_tyt());
     let ne: u32 = check_arena(unit, toks2, errs, arena,
                               ptr_add(arena, chk_arena_scr()),
                               ptr_add(arena, chk_arena_ctab()),
                               ptr_add(arena, chk_arena_nc()),
                               ptr_add(arena, chk_arena_exs()),
                               ptr_add(arena, chk_arena_env()),
-                              ptr_add(arena, chk_arena_tyt()));
+                              tytp);
     // 开关的规则接在检查器之后 —— 开关表在**驱动器**手上（做装载与裁减的是它）,
     // 与 "`choose` 第三条（库不许）落在装载器" 同一个理由（docs/176 §7.3）。
     let nsw: u32 = switch_rules(unit, toks2, sw, errs, ne * 8);
@@ -1895,18 +1934,35 @@ fn _start() -> u32 {
             wstr(2, ": ");
             let st: u32 = load32(toks2, tk * 20 + 4);
             let ln: u32 = load32(toks2, tk * 20 + 8);
+            // 运行期那一类的 E022：正文写成**那句话**，不是那一格 token（issue #321）。
+            // `rt_phrase` 回空串就说明这条 E022 是别的起因，照旧走 token。
+            let ph: str = rt_phrase(unit, toks2, tk);
+            let isrt: u32 = 0;
+            if code == 22 && str_len(ph) > 0 {
+                isrt = 1;
+            }
             let take: u32 = 24;
             if ln < 24 {
                 take = ln;
             }
-            write_all(2, ptr_add(unit, st), take as u64);
+            if isrt == 1 {
+                write_all(2, str_ptr(ph), str_len(ph) as u64);
+            } else {
+                write_all(2, ptr_add(unit, st), take as u64);
+            }
             wstr(2, "\n");
             // 同一条诊断, 结构化那一份 (docs/182 §5)。**同一份数据两个受众**:
             // 上面那份给人看 (stderr), 这份给报错器看 (一行 JSON)。
             if dfd >= 0 {
-                let _j: u64 = wdiag(dfd as u64, scr, ap, an,
-                                    load32(toks2, tk * 20 + 12), code,
-                                    ptr_add(unit, st), take);
+                if isrt == 1 {
+                    let _k2: u64 = wdiag_rt(dfd as u64, scr, ap, an,
+                                            load32(toks2, tk * 20 + 12), ph,
+                                            load32(tytp, RT_N_SITES));
+                } else {
+                    let _j: u64 = wdiag(dfd as u64, scr, ap, an,
+                                        load32(toks2, tk * 20 + 12), code,
+                                        ptr_add(unit, st), take);
+                }
             }
             e = e + 1;
         }
