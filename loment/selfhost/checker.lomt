@@ -68,6 +68,7 @@ const E_MOVE: u32 = 6;     // E006 移动后使用
 const E_DANGLE: u32 = 12;  // E012 悬垂借用 (返回局部变量的借用)
 const E_MODE: u32 = 22;    // E022 项目模式 `choose` 用法不对 (docs/143 §3.2)
 const E_PARSE: u32 = 19;   // E019 期望表达式 —— 参考实现 `parse_primary` 的口径 (issue #49)
+const E_DEEP: u32 = 23;    // E023 源码太深 —— 嵌套超过 64 层 (issue #44)
 // E005 = 使用了 excluded 的空间。**与 E_CAP(4) 分开**：参考实现的 `loment_diag` 按消息
 // 分码 —— "能力…域/重复" 归 E004、"使用了 excluded 的空间" 归 E005。原先那两条分支
 // 都发 E_CAP，而参考侧同一条消息归类成 5，码集对不上（`loment_rule_parity` 里没有探针，
@@ -3081,7 +3082,30 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
 /// 语句**起点**那一条要在走查里判（要边界），留在 `chk_body`，不在这儿重复。
 fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32) -> u32 {
     let i: u32 = 0;
+    let depth: u32 = 0;
+    let deep_done: u32 = 0;
     while chk_tok_kind(t, i) != 4 {
+        // **太深了要当场说**（issue #44）：参考实现在解析期就设 64 层的上限并报 E023；自举侧
+        // 原先一路走到 codegen 才在递归里把栈用穿 —— **段错误、零输出**。这一趟跑到 codegen
+        // 之前，报出来就整趟不跑，正好把那边的段错误也挡在门外。
+        // 只报**第一次**越界：再往上每层都报一遍对读者没意义（参考实现也只报一条）。
+        if chk_tok_is(src, t, i, "{") {
+            depth = depth + 1;
+            if depth > 64 && deep_done == 0 {
+                o = sym_pub(src, t, out, o, E_DEEP, i);
+                deep_done = 1;
+            }
+        }
+        if chk_tok_is(src, t, i, "}") && depth > 0 {
+            depth = depth - 1;
+        }
+        // 裸 `return;`（不带值）**不是合法构造** —— `loment syntax` 明说它必须带值。
+        // 参考实现报 E019 "期望表达式，得到 ';'"；自举侧原先**段错误、什么都不印**
+        // （issue #335）。
+        if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "return")
+                && chk_tok_is(src, t, i + 1, ";") {
+            o = sym_pub(src, t, out, o, E_PARSE, i + 1);
+        }
         if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "let")
                 && !(i > 0 && (chk_tok_is(src, t, i - 1, "if")
                                || chk_tok_is(src, t, i - 1, "comefor"))) {

@@ -355,6 +355,17 @@ _CASES: list[tuple[str, str]] = [
      "module m\n\nfn f() -> u32 {\n    let a: f64 = 1.0;\n    return 0;\n}\n"),
     ("bin-literal",
      "module m\n\nfn f() -> u32 {\n    let v: u32 = 0b1010;\n    return v;\n}\n"),
+    # ---- 自举侧"死给你看"的两条 (issue #335 / #44) --------------------------------
+    # 裸 `return;` 参考实现报 E019；自举侧原先**段错误、零输出**。
+    ("bare-return",
+     "module m\n\nfn f() {\n    return;\n}\n"),
+    # 深层嵌套参考实现报 E023（源码太深，上限 64 层）；自举侧原先走到 codegen 才把栈用穿
+    # —— 也是段错误。**表达式要包一层括号**，否则后面的用例会被并进这个元组。
+    ("deep-nesting",
+     ("module m\n\nfn f() -> u32 {\n    let x: u32 = 1;\n"
+      + "".join("    if x > 0 {\n" for _ in range(100))
+      + "".join("    }\n" for _ in range(100))
+      + "    return x;\n}\n")),
 ]
 
 
