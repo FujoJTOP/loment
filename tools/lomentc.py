@@ -6060,6 +6060,11 @@ _L0_SAFE_BUILTINS = frozenset(("load8", "store8", "atomic_add"))
 #: 上表**故意排除**的首参为 `ptr` 的内建（每条都要有理由，见上）。判据拿它做完整性检查。
 _L0_PTR_ARG0_UNSAFE = frozenset(("free", "ptr_add", "ptr_sub"))
 
+#: 安全表长成什么样（`docs/246` §5.2）：**名字 -> 它在哪些实参位上只解引用**。
+#: 内建只在 **0 位**安全 —— `store8(p, off, v)` 里 `p` 是缓冲区本身，换到别的位上它就是
+#: 一个"值"，写进去的东西会流到哪儿这里看不见。
+_BUILTIN_SAFE_AT: dict[str, frozenset[int]] = {b: frozenset((0,)) for b in _L0_SAFE_BUILTINS}
+
 
 def _reset_l1(stmts: list) -> None:
     """清空一棵语句树的 `Return.l1` —— `_gc_alpha_pass` 要能**幂等**重跑（同一份 mod 被
@@ -6091,11 +6096,11 @@ def _deref_summary(f: Func, toks: list):
     **"安全"不在这一步判**：这里只记"流进了哪些名字"。`callees` 是否全都安全，由
     `_gc_alpha_pass` 的**全局不动点**定 —— 于是 `load32 -> load16 -> load8` 一层层解开。
     """
-    if not f.params or f.params[0].type != "ptr":
-        return None
-    p = f.params[0].name
     at, end = f.tok_at, f.tok_end
     n = len(toks)
+    ptrs = [i for i, prm in enumerate(f.params) if prm.type == "ptr"]
+    if not ptrs:
+        return None
 
     def word(i: int, text: str) -> bool:
         return 0 <= i < n and toks[i].kind != "string" and toks[i].val == text
@@ -6103,20 +6108,31 @@ def _deref_summary(f: Func, toks: list):
     def ident(i: int) -> bool:
         return 0 <= i < n and toks[i].kind == "ident"
 
-    callees: set[str] = set()
-    k = at
-    while k < end:
-        if ident(k) and toks[k].val == p:
-            if word(k - 1, "let") or word(k + 1, "="):
-                return (True, frozenset())              # 遮蔽 / 重新赋值
-            if (word(k - 1, "(") and ident(k - 2) and not word(k - 3, ".")
-                    and not word(k - 3, ":")
-                    and (word(k + 1, ",") or word(k + 1, ")"))):
-                callees.add(toks[k - 2].val)
-            else:
-                return (True, frozenset())              # 其余任何用法：逃逸
-        k += 1
-    return (False, frozenset(callees))
+    out: dict[int, "frozenset[tuple[str, int]] | None"] = {}
+    for k in ptrs:
+        p = f.params[k].name
+        req: set[tuple[str, int]] = set()
+        bad = False
+        i = at
+        while i < end:
+            if ident(i) and toks[i].val == p:
+                if word(i - 1, "let") or word(i + 1, "="):
+                    bad = True                          # 遮蔽 / 重新赋值
+                    break
+                if (word(i - 1, "(") and ident(i - 2) and not word(i - 3, ".")
+                        and not word(i - 3, ":")
+                        and (word(i + 1, ",") or word(i + 1, ")"))):
+                    pos = _arg_pos(toks, i - 1, i)
+                    if pos is None:
+                        bad = True                      # 数不出实参位 ⇒ 按逃逸算
+                        break
+                    req.add((toks[i - 2].val, pos))
+                else:
+                    bad = True                          # 其余任何用法：逃逸
+                    break
+            i += 1
+        out[k] = None if bad else frozenset(req)
+    return out
 
 
 def _gc_alpha_pass(mod: Module, deps: list[Module] | None = None) -> None:
@@ -6139,19 +6155,22 @@ def _gc_alpha_pass(mod: Module, deps: list[Module] | None = None) -> None:
     `choose`"一致：默认档一行都不动）。
     """
     mods = list(deps or []) + [mod]
-    safe: set[str] = set(_L0_SAFE_BUILTINS)
+    safe: dict[str, set[int]] = {b: {0} for b in _L0_SAFE_BUILTINS}
     changed = True
     while changed:
         changed = False
         for m in mods:
             for f in list(m.funcs) + [g for im in m.impls for g in im.funcs]:
-                if f.name in safe or f.deref is None:
+                if f.deref is None:
                     continue
-                escapes, callees = f.deref
-                if not escapes and callees <= safe:
-                    safe.add(f.name)
-                    changed = True
-    frozen = frozenset(safe)
+                have = safe.setdefault(f.name, set())
+                for k, req in f.deref.items():
+                    if req is None or k in have:
+                        continue
+                    if all(pos in safe.get(callee, ()) for callee, pos in req):
+                        have.add(k)
+                        changed = True
+    frozen = {name: frozenset(ps) for name, ps in safe.items()}
     for m in mods:
         if m.chooses.get("gc") != "gc_auto_alpha":
             continue
@@ -6340,7 +6359,7 @@ def _provably_free(toks: list, s: int, e: int) -> bool:
 
 
 def _l0_promotable(f: Func, toks: list,
-                   safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> dict[str, int]:
+                   safe: "dict[str, frozenset[int]]" = _BUILTIN_SAFE_AT) -> dict[str, int]:
     """`gc_auto_alpha` 的 **L0**：哪些 `alloc(<常量>)` 可以**提升到栈**。回 `{变量名: 字节数}`。
 
     **规则定义在 token 流上，不在 AST 上 —— 这是有意的**，也是它与自举侧
@@ -6401,9 +6420,42 @@ def _l0_promotable(f: Func, toks: list,
     return out
 
 
+def _arg_pos(toks: list, lp: int, i: int) -> "int | None":
+    """`name` 是这次调用的**第几个实参**（`lp` = `(` 的下标，`i` = 名字的下标）。
+
+    数**顶层逗号**：`(`/`[`/`{` 记深，深度 0 上的 `,` 才算分隔。回 `None` ⇒ **判不出来，
+    按外逃算** —— 保守的方向只有一个：把不是外逃的当外逃只是错过一次提升，
+    反过来（把外逃的当成安全位）就是**不安全**。所以泛型的 `<` / 比较号 `>` 一出现就认输
+    （这两样在这个层面分不开）；括号不配平也认输。
+    """
+    depth, pos = 0, 0
+    j = lp + 1
+    while j < i:
+        tok = toks[j]
+        if tok.kind == "string":            # 字面量是**一整个 token**，里面的逗号不算
+            j += 1
+            continue
+        v = tok.val
+        if v in ("(", "[", "{"):
+            depth += 1
+        elif v in (")", "]", "}"):
+            depth -= 1
+            if depth < 0:
+                return None
+        elif v == "," and depth == 0:
+            pos += 1
+        elif v in ("<", ">"):
+            return None
+        j += 1
+    return pos if depth == 0 else None
+
+
 def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
-                   safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> tuple[bool, int, int]:
+                   safe: "dict[str, frozenset[int]]" = _BUILTIN_SAFE_AT) -> tuple[bool, int, int]:
     """`name` 在 `[at, end)` 里**只被解引用透过、从不外逃**？回 `(ok, 声明次数, 最后出现下标)`。
+
+    `safe` 是**逐参数位**的透明表（名字 -> 它在哪些实参位上只解引用，`docs/246` §5.2）；
+    缺省那一份是"只有内建、只在 0 位"。
 
     **L0 与 L1 共用这一条**（它们的差别只在"尺寸要不要字面量"与"插不插 `free`"）——
     抽出来是因为它俩的**安全性判据是同一个**：只要 `name` 不外逃，块就只有它这一个入口，
@@ -6412,6 +6464,8 @@ def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
     一次都不出现时回 `-1`。
     """
     n = len(toks)
+    if safe is None:
+        safe = _BUILTIN_SAFE_AT
 
     def word(i: int, text: str) -> bool:
         return 0 <= i < n and toks[i].kind != "string" and toks[i].val == text
@@ -6419,9 +6473,16 @@ def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
     def ident(i: int) -> bool:
         return 0 <= i < n and toks[i].kind == "ident"
 
-    def safe_callee(i: int) -> bool:
-        return (ident(i) and toks[i].val in safe
-                and not word(i - 1, ".") and not word(i - 1, ":"))
+    def at_safe_pos(i: int) -> bool:
+        """`name` 在 `i`，紧跟一个**非限定**被调名的 `(`, 且**它所在的那个实参位**是该被调
+        只解引用的位（`docs/246` §5.2：规则按**参数位**，不再钉死在第一位）。"""
+        if not (word(i - 1, "(") and ident(i - 2) and not word(i - 3, ".")
+                and not word(i - 3, ":")):
+            return False
+        pos = _arg_pos(toks, i - 1, i)
+        if pos is None:
+            return False
+        return pos in safe.get(toks[i - 2].val, ())
 
     ok, ndecl, last = True, 0, -1
     k = at
@@ -6436,7 +6497,7 @@ def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
             elif word(k + 1, "="):
                 ok = False                          # 重新赋值
                 break
-            elif not (word(k - 1, "(") and safe_callee(k - 2)
+            elif not (at_safe_pos(k)
                       and (word(k + 1, ",") or word(k + 1, ")"))):
                 ok = False                          # 其余任何用法：外逃
                 break
@@ -6445,7 +6506,7 @@ def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
 
 
 def _l1_place(f: Func, toks: list,
-              safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> None:
+              safe: "dict[str, frozenset[int]]" = _BUILTIN_SAFE_AT) -> None:
     """`gc_auto_alpha` 的 **L1（定活）**：把 `free` 挂到 AST 上（`s.l1` / `f.l1`）。
 
     **这一层证的是什么**：某个 `alloc` 出来的块，在**它最后一次被用到之后**立刻还掉。
@@ -6593,7 +6654,7 @@ def _int_lit(v: str) -> int:
 
 
 def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
-           safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> bool:
+           safe: "dict[str, frozenset[int]]" = _BUILTIN_SAFE_AT) -> bool:
     """循环体能不能在末尾**批量归还**（`docs/210` §2 的 **L2**）。**规则也定义在 token 流上。**
 
     这是"回收时间而不是对象"今天能落地的那一半：**体的末尾把分配器的前沿退回去**，
@@ -6623,9 +6684,15 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
     def ident(i: int) -> bool:
         return 0 <= i < n and toks[i].kind == "ident"
 
-    def safe_callee(i: int) -> bool:
-        return (ident(i) and toks[i].val in safe
-                and not word(i - 1, ".") and not word(i - 1, ":"))
+    def at_safe_pos(i: int) -> bool:
+        """`name` 在 `i`：紧跟一个**非限定**被调名的 `(`，且**它所在的那个实参位**是该被调
+        只解引用的位（`docs/246` §5.2）。与 `_ptr_only_uses` 里那条是**同一条规则** ——
+        原先两处各抄了一份，放宽的时候必须一起放宽（漏一处就是两个实现/两个 rung 不一致）。"""
+        if not (word(i - 1, "(") and ident(i - 2) and not word(i - 3, ".")
+                and not word(i - 3, ":")):
+            return False
+        pos = _arg_pos(toks, i - 1, i)
+        return pos is not None and pos in safe.get(toks[i - 2].val, ())
 
     nalloc = 0
     for k in range(at, end):
@@ -6671,7 +6738,7 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
                     return False           # 体内第二处声明（遮蔽）：认不清哪个是哪个
                 elif word(k + 1, "="):
                     return False           # 重新赋值
-                elif not (word(k - 1, "(") and safe_callee(k - 2)
+                elif not (at_safe_pos(k)
                           and (word(k + 1, ",") or word(k + 1, ")"))):
                     return False
         if ndecl != 1:
@@ -6688,7 +6755,7 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
 
 
 def _l2_loop_epochs(f: Func, toks: list,
-                    safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> None:
+                    safe: "dict[str, frozenset[int]]" = _BUILTIN_SAFE_AT) -> None:
     """把 `f` 里每个 `while`/`for` **以及 `if` 的两支**的 `l2` 填上（`docs/210` §2.3 的 L2）。
 
     `if` 的两支与循环体是**同一个形状的块**（`docs/210` §7 原先把它列在"没做"里），规则也
