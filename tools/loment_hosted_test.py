@@ -31,6 +31,13 @@ import loment_dist                                                 # noqa: E402
 import lomentc                                                     # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 CLANG_CANDIDATES = (r"C:\Program Files\LLVM\bin\clang.exe", "clang")
 
 TESTS: list = []
@@ -124,7 +131,7 @@ def _resolves_with_flags(cc: str) -> bool:
 
 def _wsl() -> bool:
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               timeout=60, shell=False).returncode == 0
     except Exception:                                               # noqa: BLE001
         return False
@@ -264,7 +271,7 @@ class Pkg:
             f"./out.bin\n"
             f"echo \"RUN_RC=$?\"\n"
         )
-        r = subprocess.run(["wsl", "-e", "bash", "-lc", script], capture_output=True,
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", script], capture_output=True,
                            text=True, shell=False, encoding="utf-8",
                            errors="replace", timeout=900)
         out = (r.stdout or "") + (r.stderr or "")
@@ -302,7 +309,7 @@ class Env:
         extra = os.environ.get("LOMENT_PATH_EXTRA", "")
         if extra:
             script = f'export PATH="{extra}:$PATH"\n' + script
-        cmd = ["bash", "-lc", script] if self.native else ["wsl", "-e", "bash", "-lc", script]
+        cmd = ["bash", "-lc", script] if self.native else [*_WSLCMD, "bash", "-lc", script]
         r = subprocess.run(cmd, capture_output=True, text=True, shell=False,
                            encoding="utf-8", errors="replace", timeout=1800)
         return r.returncode, (r.stdout or "") + (r.stderr or "")
@@ -344,7 +351,7 @@ def _run_ir(ir: str, td: Path, name: str) -> int:
                        capture_output=True, text=True, shell=False)
     assert r.returncode == 0, r.stderr[-400:]
     script = (f"cd '{_wsl_path(td)}' && gcc {name}.o -o {name}.bin && ./{name}.bin; echo \"RC=$?\"")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script], capture_output=True,
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script], capture_output=True,
                        text=True, encoding="utf-8", errors="replace", timeout=300, shell=False)
     out = (r.stdout or "") + (r.stderr or "")
     assert "RC=" in out, out[-400:]

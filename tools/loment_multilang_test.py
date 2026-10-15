@@ -50,6 +50,13 @@ import lomt_from   # noqa: E402
 import potato_from  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 EX = ROOT / "loment" / "examples" / "multilang"
 
 #: 期望值。**推出来的，不是抄的**（见 `_expected`）：
@@ -80,7 +87,7 @@ def _wsl() -> bool:
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -92,14 +99,14 @@ def _wsl_path(p: Path) -> str:
 
 
 def _wsl_home() -> str:
-    return subprocess.run(["wsl", "-e", "bash", "-lc", "echo -n $HOME"],
+    return subprocess.run([*_WSLCMD, "bash", "-lc", "echo -n $HOME"],
                           capture_output=True, text=True, timeout=60,
                           shell=False).stdout.strip()
 
 
 def _wsl_ok(script: str) -> bool:
     try:
-        return subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        return subprocess.run([*_WSLCMD, "bash", "-lc", script],
                               capture_output=True, text=True, timeout=180,
                               shell=False).returncode == 0
     except Exception:  # noqa: BLE001
@@ -185,7 +192,7 @@ def test_three_syntaxes_feed_one_program():
         out = td / "out.txt"
         err = td / "err.txt"
         r = subprocess.run(
-            ["wsl", "-e", "bash", "-lc",
+            [*_WSLCMD, "bash", "-lc",
              f"chmod +x {_wsl_path(exe)} && cd {_wsl_path(td)} && "
              f"{_wsl_path(exe)} > {_wsl_path(out)} 2> {_wsl_path(err)}; echo -n $?"],
             capture_output=True, text=True, timeout=300, shell=False)

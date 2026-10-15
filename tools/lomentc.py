@@ -4599,7 +4599,14 @@ def _expr_rs(e) -> str:
         if e.name == "alloc":  # M15
             return f"__loment_alloc({a[0]})"
         if e.name == "free":
-            return "{ let _ = " + a[0] + "; 0u32 }"
+            # Rust 后端**兑现不了** `free`：那边的运行期（`_RUST_RUNTIME`）只有一个 bump
+            # 分配器，**没有空闲链表** —— 原生/IR 后端有 `@__loment_free`（bump + 地址序
+            # 空闲链表 + 拆分 + 前沿回退），这里没有对应物。原先这句降级成
+            # `{ let _ = p; 0u32 }`，于是**同一份源**在原生后端真回收、在 Rust 后端
+            # **静默泄漏**（issue #165）。承诺落空比拒绝更坏，所以在这里点名拒。
+            raise LomError(getattr(e, "line", 1), 1,
+                           "rust 后端不支持 `free`：那边的运行期只有一个 bump 分配器，"
+                           "`free` 在那里什么都不会释放。要真回收就用原生/IR 后端")
         if e.name == "load8":
             return f"(__loment_load8({a[0]}, {a[1]}) as u32)"
         if e.name == "store8":
@@ -5641,10 +5648,13 @@ clc:
 roots:
   call void @__loment_markroots()
   call void @__loment_propagate(i32 8)
-  ; **清扫前把空闲链表清空、由这次清扫重新挂** —— 否则「本来就在链上的块」会被再
-  ; free 一次（双重插入，链就毁了）。实测：第一次收集（链是空的）没事，第二次开始
-  ; 把 40000 圈那只探针跑成 arena 耗尽。**重置**比「标记链上的块」少一趟遍历，也更难写错。
-  store i32 0, ptr @__loment_freehead
+  ; **清扫前**不清空**空闲链表**（`#366`）—— 原先这里有一行 `store i32 0, ptr
+  ; @__loment_freehead`，理由是「本来就在链上的块会被再 free 一次（双重插入，链就毁了）」。
+  ; 那条理由站在 `#164` **之前**：当时 `free` 不验所有权，谁调都往里挂。
+  ; `#164` 之后 `__loment_free` 只认**借出中**的块（`next == -1`），已在链上的块**惰性返回**
+  ; —— 于是重置不再防住什么，却把**当前所有空闲块**从分配器手里**永久**丢掉：
+  ; 清扫撞上它们时那道守卫拒绝重挂，而清扫**不会**把它们放回去。字节还在 arena 里、
+  ; 还在前沿之下，`alloc` 再也摸不到。判据见 `loment_elf_test::test_a_collection_keeps_the_free_list`。
   call void @__loment_sweep(i32 8)
   ret void
 }
@@ -5809,13 +5819,11 @@ rc:
   br label %cr
 prop:
   call void @__loment_propagate(i32 %ot)
-  ; **清扫整堆，但「重置空闲链表 + 释放时清标记」两条一起**（与 `__loment_collect` 同形）：
-  ;   ① 只扫子区间而不重置，会让**同一块被挂两次**（前沿退回去之后又长上来，那块还在链上）——
-  ;      链表一坏，`alloc` 就可能返回一个**低地址的假大块**（实测：那正是「目标块总落在
-  ;      `oldtop` 之下」的成因）；
-  ;   ② 既然重置，就必须能重复跑：所以释放那一格顺手把标记清零（`__loment_sweep` 的 `kill:`）。
-  ; 省下的不是清扫那一趟（那趟本来就便宜），是**清标记与传播只覆盖年轻代**（贵的是它们）。
-  store i32 0, ptr @__loment_freehead
+  ; **清扫整堆，但不清空空闲链表**（`#366`，与 `__loment_collect` 同一条）。
+  ; 原先这里也有那一行，理由两条（① 双重插入、② 既然重置就得能重复跑）；**两条都站在
+  ; `#164` 之前**：今天 `__loment_free` 只认借出中的块，已在链上的一律**惰性返回**，
+  ; 所以「同一块被挂两次」不会发生，而重置只会把那些**已经挂在链上**的空闲块
+  ; （`docs/210` §2.7 自己点名的「不是不安全，是白漏内存」）永久丢掉。不做。
   call void @__loment_sweep(i32 8)
   ; **晋升**（不搬移的那一种）：这次小回收的**幸存者从此算老的** —— 把切成处推到前沿。
   ; 少了这一条，「年轻代」就永远是整个堆（`oldtop` 只有全量才动，而全量在小回收够用的
@@ -7404,7 +7412,18 @@ class _Ir:
         **不再是内联的纯 bump**：`free` 兑现之后，分配与回收必须是同一份状态的读写者，
         而"只涨不落的前沿 + 什么都不做的 free"正是 `docs/175` §3.4 点名的那个形状
         （**允诺却不兑现**）。
+
+        **触发也发在这里**（`#367`）：它原先在 `alloc` 的**调用点**上，而 `str_concat`
+        走的是这个函数、不经过那一处 —— 于是拼接分配的字节**不计入**那个计数器，
+        只拼字符串的程序**一次收集都不跑**（`gc_auto_alpha` 也救不了：它的自适应阈值与
+        空间触发都住在 `__loment_maybe_collect` 里，而那个函数一次都不会被调用）。
+        挪到这儿之后**每一次**分配都计数；发的是同一段文本、同一顺序、同一个实参，
+        所以只含 `alloc` 的程序产物字节**完全不变**。
         """
+        if self.gc_any:
+            # 先问一句"该收了没有"—— 收在**分配之前**，所以不需要"分配失败再重试"那条路，
+            # 也就不必动 `__loment_alloc` 一个字节（另外两档的产物因此逐字节不变）。
+            self.w(f"call void @__loment_maybe_collect(i32 {size_var})")
         p = self.t()
         self.w(f"{p} = call ptr @__loment_alloc(i32 {size_var})")
         return p
@@ -7413,10 +7432,6 @@ class _Ir:
         """str_len / str_eq / str_concat / str_byte / slice_len 的 IR 降级。"""
         if e.name == "alloc":  # M15: bump 分配器
             _, sz = self.expr(e.args[0], "u32")
-            if self.gc_any:
-                # 先问一句"该收了没有"—— 收在**分配之前**，所以不需要"分配失败再重试"那条路，
-                # 也就不必动 `__loment_alloc` 一个字节（另外两档的产物因此逐字节不变）。
-                self.w(f"call void @__loment_maybe_collect(i32 {sz})")
             return "ptr", self.alloc_ir(sz)
         if e.name == "free":
             _, p = self.expr(e.args[0], "ptr")

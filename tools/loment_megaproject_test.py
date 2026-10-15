@@ -67,6 +67,13 @@ import lomelf       # noqa: E402
 import lomentc      # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 PROJ = ROOT / "loment" / "examples" / "megaproject"
 
 #: 模块数与每模块函数数。**"100 个大型模块、1000 个函数"是这个判据的题面**，不是可调参数。
@@ -427,7 +434,7 @@ def _run_elf(exe: Path) -> int:
         return r.returncode
     if shutil.which("wsl"):
         r = subprocess.run(
-            ["wsl", "-e", "bash", "-lc",
+            [*_WSLCMD, "bash", "-lc",
              f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
             capture_output=True, text=True, timeout=900, shell=False)
         return int((r.stdout or "").strip() or -1)

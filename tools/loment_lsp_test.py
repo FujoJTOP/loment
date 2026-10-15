@@ -59,11 +59,18 @@ def _clang() -> str | None:
     return fb if Path(fb).exists() else None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True, text=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True, text=True,
                               timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -71,6 +78,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -131,17 +140,17 @@ class Batch:
                   ["chmod", "+x", f"{_T}loment_lsp.bin"],
                   ["rm", "-f", f"{_T}loment_lsp_in.bin"],
                   ["cp", _wsl_path(inp), f"{_T}loment_lsp_in.bin"]):
-            r = subprocess.run(["wsl", "-e", *a], capture_output=True, shell=False)
+            r = subprocess.run([*_WSLCMD, *a], capture_output=True, shell=False)
             assert r.returncode == 0, (a, r)
         r = subprocess.run(
-            ["wsl", "-e", "bash", "-lc",
+            [*_WSLCMD, "bash", "-lc",
              f"{_T}loment_lsp.bin < {_T}loment_lsp_in.bin > {_T}loment_lsp_out.bin "
              f"2>{_T}loment_lsp_err.bin; echo -n $?"],
             capture_output=True, text=True, timeout=300, shell=False)
         rc = int(r.stdout.strip() or -1)
-        raw = subprocess.run(["wsl", "-e", "cat", f"{_T}loment_lsp_out.bin"],
+        raw = subprocess.run([*_WSLCMD, "cat", f"{_T}loment_lsp_out.bin"],
                              capture_output=True, shell=False).stdout
-        err = subprocess.run(["wsl", "-e", "cat", f"{_T}loment_lsp_err.bin"],
+        err = subprocess.run([*_WSLCMD, "cat", f"{_T}loment_lsp_err.bin"],
                              capture_output=True, shell=False).stdout.decode("utf-8", "replace")
         return parse_frames(raw), rc, err
 
@@ -282,12 +291,12 @@ def test_lsp_check_mode_is_python_free():
             for a in (["rm", "-f", f"{_T}loment_lsp.bin"],
                       ["cp", _wsl_path(elf), f"{_T}loment_lsp.bin"],
                       ["chmod", "+x", f"{_T}loment_lsp.bin"]):
-                subprocess.run(["wsl", "-e", *a], capture_output=True, shell=False)
+                subprocess.run([*_WSLCMD, *a], capture_output=True, shell=False)
             # 把**绝对 WSL 路径**当数据传给 --check (不经 shell, 也不猜仓库在哪) ——
             # 早先这里写死了 `cd /mnt/d/Dev/FujoOS-FujoLang`, 换个检出位置就 rc=2
             # (服务打不开文件), 会被误读成"服务没构建"。
             abs_probe = _wsl_path(probe)
-            r = subprocess.run(["wsl", "-e", f"{_T}loment_lsp.bin", "--check", abs_probe],
+            r = subprocess.run([*_WSLCMD, f"{_T}loment_lsp.bin", "--check", abs_probe],
                                capture_output=True, text=True, timeout=180, shell=False)
             out = r.stdout
             assert r.returncode == 1, f"有错文件应当 rc=1, 实得 {r.returncode}: {out!r} {r.stderr[-200:]!r}"
@@ -300,7 +309,7 @@ def test_lsp_check_mode_is_python_free():
                 # 路径之后正好是 `:行:列` (两个冒号)
                 assert head[len(abs_probe):].count(":") == 2, ln
             clean = _wsl_path(ROOT / "loment" / "examples" / "mathutil.lomt")
-            r2 = subprocess.run(["wsl", "-e", f"{_T}loment_lsp.bin", "--check", clean],
+            r2 = subprocess.run([*_WSLCMD, f"{_T}loment_lsp.bin", "--check", clean],
                                 capture_output=True, text=True, timeout=180, shell=False)
             assert r2.returncode == 0 and r2.stdout.strip() == "", (r2.returncode, r2.stdout)
     finally:
@@ -357,7 +366,7 @@ def test_lsp_check_honours_switches():
 
     def run(src: str) -> subprocess.CompletedProcess:
         probe.write_text(src, encoding="utf-8", newline="\n")
-        return subprocess.run(["wsl", "-e", f"{_T}loment_lsp.bin", "--check",
+        return subprocess.run([*_WSLCMD, f"{_T}loment_lsp.bin", "--check",
                                _wsl_path(probe)],
                               capture_output=True, text=True, timeout=180, shell=False)
 
@@ -368,7 +377,7 @@ def test_lsp_check_honours_switches():
             for a in (["rm", "-f", f"{_T}loment_lsp.bin"],
                       ["cp", _wsl_path(elf), f"{_T}loment_lsp.bin"],
                       ["chmod", "+x", f"{_T}loment_lsp.bin"]):
-                subprocess.run(["wsl", "-e", *a], capture_output=True, shell=False)
+                subprocess.run([*_WSLCMD, *a], capture_output=True, shell=False)
             off = run(SW_OFF_SRC)
             assert off.returncode == 0 and off.stdout.strip() == "", \
                 f"关着的开关体不该被检查, 实得 rc={off.returncode}: {off.stdout!r}"

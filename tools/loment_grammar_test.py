@@ -238,10 +238,8 @@ def test_declaration_is_stripped_before_the_target_parser_sees_it():
         if not _wsl():
             print("      （没有 WSL，跳过跑那一步）")
             return
-        s = str(exe.resolve()).replace("\\", "/")
-        r = subprocess.run(["wsl", "-e", "bash", "-lc",
-                            f"chmod +x {s if s.startswith('/') else '/mnt/' + s[0].lower() + s[2:]}"
-                            f" && {'/mnt/' + s[0].lower() + s[2:]}; echo -n $?"],
+        r = subprocess.run([*_WSLCMD, "bash", "-lc",
+                            f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
                            capture_output=True, text=True, timeout=300)
     assert r.stdout.strip() == "42", f"跑出来该是 42，得到 {r.stdout.strip()!r}"
     print("      声明抹成等长空白、行号不动；端到端跑出 42")
@@ -469,7 +467,7 @@ def test_front_door_translates_a_foreign_grammar_into_loment_in_process():
             return
         s = str(exe.resolve()).replace("\\", "/")
         w = s if s.startswith("/") else "/mnt/" + s[0].lower() + s[2:]
-        r = subprocess.run(["wsl", "-e", "bash", "-lc", f"chmod +x {w} && {w}; echo -n $?"],
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", f"chmod +x {w} && {w}; echo -n $?"],
                            capture_output=True, text=True, timeout=300)
     assert r.stdout.strip() == "42", f"跑出来该是 42，得到 {r.stdout.strip()!r}"
     print("      别的写法 -> 翻成 Loment（无 extern fn）-> 真编真跑出 42")
@@ -803,11 +801,18 @@ def _clang() -> str | None:
     return fb if Path(fb).exists() else None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -815,6 +820,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(Path(p).resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -910,7 +917,7 @@ def test_grammar_scanner_twin_matches_the_independent_reference():
         binn = f"{_TW}chk.bin"
         script = (f"cp {_wsl_path(chk)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(td)} && {binn} > {_wsl_path(outp)} 2>&1; echo -n $?")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, text=True, timeout=300, shell=False)
         got = outp.read_bytes().decode("utf-8") if outp.exists() else ""
     assert rr.stdout.strip() == "0", f"孪生该退 0: rc={rr.stdout!r}\n{got[:400]}"
@@ -940,7 +947,7 @@ def test_grammar_twin_selfhost_compiles():
         binn = f"{_TW}s1.bin"
         script = (f"cp {_wsl_path(s1)} {binn} && chmod +x {binn} && "
                   f"cd {_wsl_path(ROOT)} && {binn} loment/tools/lomgrammar.lomt")
-        rr = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        rr = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                             capture_output=True, timeout=600, shell=False)
         assert rr.returncode == 0, f"stage1 编译 lomgrammar.lomt 失败: {rr.stderr[-300:]}"
         assert len(rr.stdout) > 20000, f"产物太小 ({len(rr.stdout)}B)"
