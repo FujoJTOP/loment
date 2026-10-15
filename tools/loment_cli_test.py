@@ -23,6 +23,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc  # noqa: E402
 import lomelf  # noqa: E402
 import lomc  # noqa: E402  (边界操作那条判据的**独立**尺子: 参考实现真正的词法器)
@@ -1328,16 +1329,7 @@ def test_cli_twin_selfhost_compiles():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_cli_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_cli_test")
 
 
 if __name__ == "__main__":

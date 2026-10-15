@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomc  # noqa: E402
 import lomentc  # noqa: E402
 
@@ -1089,24 +1090,85 @@ def test_gate_reports_how_many_criteria_did_not_run():
     real = shutil.which
     shutil.which = lambda n: None if n == "wsl" else real(n)
     try:
-        _name, ok, _tail, _dt, skips = ci._run_one_check("loment_elf_test")
+        r = ci._run_one_check("loment_elf_test")
     finally:
         shutil.which = real
-    assert ok, "跳过的判据不算失败 —— 藏掉 wsl 之后这一条仍然应当是 PASS（这正是问题）"
-    assert skips >= 20, f"数出来的跳过条数太少（{skips}）—— 计数规则或那个套件变了"
+    assert r.ok, "跳过的判据不算失败 —— 藏掉 wsl 之后这一条仍然应当是 PASS（这正是问题）"
+    assert r.skips >= 20, f"数出来的跳过条数太少（{r.skips}）—— 计数规则或那个套件变了"
+
+    # (4) `#371` 的**判定面**（2026-10-15 补）：跳过现在**带名字**（`loment_suite.run` 打的
+    #     `  SKIP  <名字>: 原因`），于是 `ci.check_budget` 能逐条对账 `.github/gate-skips.txt`。
+    #     数得出条数却认不出名字 = 那个套件没走共享运行器，预算对它失明。
+    assert len(r.skipped) == r.skips, (
+        f"跳过 {r.skips} 条，只认出 {len(r.skipped)} 个名字 —— 这个套件没走 "
+        f"`loment_suite.run`，逐条预算对不了账")
+    assert r.declared == len(__import__("loment_elf_test").TESTS), "声明条数（len(TESTS)）没读出来"
+
+
+def test_gate_budget_matches_the_suites():
+    """`#371` 两道棘轮的**签入文件本身**说得通吗。
+
+    `.github/gate-floors.txt` 说每个套件该有多少条判据，`.github/gate-skips.txt` 说哪些判据
+    允许在这台机器上不跑。`ci.check_budget` 拿它们判成败 —— 所以文件本身错了就是整个机制错了。
+    这条钉四件事：
+
+    1. 两份都能被 `ci.read_budget()` 读出来（格式对）；
+    2. **每个有 `TESTS` 的套件都在地板里，且数字 == `len(TESTS)`** —— 漏一个套件就等于它
+       从此不受地板约束（「把判据删光」那条路又通了）；
+    3. 两份里点到的套件名都在 `STATIC_CHECKS` 里（写错名字 = 那一行永远不生效）；
+    4. 跳过表里点到的**判据名**在那个套件里真的存在（判据改名或删掉之后，那条豁免会变成
+       一句永远不生效的谎话）。
+    """
+    floors, skips = ci.read_budget()
+
+    declared: dict[str, int] = {}
+    for name in ci.STATIC_CHECKS:
+        tests = getattr(__import__(name), "TESTS", None)
+        if tests:
+            declared[name] = len(tests)
+
+    missing = sorted(set(declared) - set(floors))
+    assert not missing, f"这些套件有判据却不在 gate-floors.txt 里: {missing}"
+    wrong = {n: (floors[n], c) for n, c in declared.items() if floors.get(n) != c}
+    assert not wrong, f"地板与实测不符（文件, 实测）: {wrong}"
+
+    unknown = sorted({s for s, _ in skips if s not in ci.STATIC_CHECKS})
+    assert not unknown, f"预算里点到了 STATIC_CHECKS 里没有的套件: {unknown}"
+
+    for suite, crit in sorted(skips):
+        if crit == "*":
+            continue
+        names = {n for n, _ in __import__(suite).TESTS}
+        assert crit in names, f"gate-skips.txt 里 {suite} 的 {crit} 不在那个套件里（改名了？）"
+    print(f"      gate-floors {len(floors)} 个套件 / gate-skips {len(skips)} 条豁免，都对得上")
+
+
+def test_every_criterion_is_registered():
+    """套件里每个 `def test_*` 都必须挂上 `@test`。
+
+    没挂上的后果是**它从不运行，而套件照样绿** —— 与 `#371` 同一个形状（有一层安全检查
+    看不见洞）。新写一条判据、忘了装饰器，是最容易发生也最难发现的一种。
+    """
+    import ast
+
+    offenders = []
+    for name in ci.STATIC_CHECKS:
+        p = Path(__file__).resolve().parent / f"{name}.py"
+        if not p.exists():
+            continue
+        tree = ast.parse(p.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
+                continue
+            decs = [ast.unparse(d) for d in node.decorator_list]
+            if not any(d == "test" or d.endswith(".test") for d in decs):
+                offenders.append(f"{name}.py:{node.lineno} {node.name}")
+    assert not offenders, "这些判据没挂 @test，因而从不运行: " + ", ".join(offenders)
+    print("      每个 def test_* 都挂了 @test（没有'写了却从不运行'的判据）")
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_tools_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_tools_test")
 
 
 if __name__ == "__main__":

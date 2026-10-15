@@ -149,6 +149,9 @@ GLOBS = [
     "tools/loment_gc_surface.py", "tools/loment_gc_surface_test.py",
     "tools/loment_gc_why.py", "tools/loment_gc_why_test.py",
     "tools/loment_syscalls.py", "tools/loment_manual.py", "tools/ci.py",
+    # 各判据套件共用的运行器 (`#371`): 门禁要看"哪条判据跳过了"，它跟 `ci.py` 是一对，
+    # 所以排在它旁边（**位置必须与自举那份 `lomrel.lomt` 逐行对齐**）。
+    "tools/loment_suite.py",
     "tools/vscode_ext.py", "tools/vscode_ext_test.py",
     # 调试器 (docs/190): DAP 适配器 + ptrace 后端, 及其无头判据。
     # **位置与自举那份 `lomrel.lomt` 对齐** —— 见下面那条注释。

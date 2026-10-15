@@ -14,12 +14,15 @@ CI 流水线:
 import argparse
 import json
 import os
+import pathlib
+import re
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+from typing import NamedTuple
 
 from _safepath import safe_open
 
@@ -354,6 +357,105 @@ def count_skips(text: str) -> int:
     return sum(1 for ln in text.splitlines() if ln.lstrip().startswith("SKIP"))
 
 
+#: 判据条数地板。一行 `套件 条数`；数值 = `len(该套件的 TESTS)`。与环境无关，所以**精确相等**。
+ROOT_FLOORS = ".github/gate-floors.txt"
+#: 允许跳过的判据。一行 `套件 判据名 # 环境/仓库: 理由`；`*` = 整条套件被跳过。
+ROOT_SKIPS = ".github/gate-skips.txt"
+
+_SKIP_LINE_RE = re.compile(r"^\s*SKIP\s+([^:]+):\s*(.*)$")
+_PASS_LINE_RE = re.compile(r"^\s*PASS\s+(\S+)\s*$")
+
+
+def read_budget() -> tuple[dict[str, int], set[tuple[str, str]]]:
+    """读两份预算：`(地板, 允许的跳过)`。
+
+    地板：`套件 条数` —— 条数是 `len(TESTS)`，**与环境无关**，所以必须精确相等。
+    跳过：`套件 判据名` —— 实际跳过必须是它的**子集**。
+
+    `#` 起头是注释，行尾 `#` 之后也是注释（两条纪律与 `.github/gate-baseline.txt` 同一套）。
+    文件不见了**不跳过**：门禁不猜，直接判失败。
+    """
+    floors: dict[str, int] = {}
+    skips: set[tuple[str, str]] = set()
+    base = pathlib.Path(__file__).resolve().parent.parent
+    for rel, keep in ((ROOT_FLOORS, "floor"), (ROOT_SKIPS, "skip")):
+        p = base / rel
+        if not p.exists():
+            raise FileNotFoundError(f"{rel} 不见了 —— 门禁不猜，直接判失败")
+        for ln in p.read_text(encoding="utf-8").splitlines():
+            body = ln.split("#", 1)[0].strip()
+            if not body:
+                continue
+            parts = body.split()
+            if len(parts) != 2:
+                raise ValueError(f"{rel}: 这一行要写成 `套件 值`: {ln!r}")
+            suite, val = parts
+            if keep == "floor":
+                floors[suite] = int(val)
+            else:
+                skips.add((suite, val))
+    return floors, skips
+
+
+def read_criterion_lines(out: str) -> tuple[list[str], list[str], bool]:
+    """从一条套件的输出里读 `(通过的判据, 跳过的判据, 是否整条套件级跳过)`。
+
+    判据名出自 `loment_suite.run` 打的那两行。**整条套件级跳过**（`loment_hosted_test`
+    那种循环之前就 `return 0` 的）一行判据都不打，只有一句 `套件: SKIP —— …`，
+    所以那一路靠"输出里有 SKIP 而没有任何判据行"来认。
+    """
+    lines = out.splitlines()
+    passed = [m.group(1) for ln in lines if (m := _PASS_LINE_RE.match(ln))]
+    skipped = [m.group(1) for ln in lines if (m := _SKIP_LINE_RE.match(ln))]
+    level = (not passed and not skipped
+             and any(ln.lstrip().startswith("SKIP") for ln in lines))
+    return passed, skipped, level
+
+
+def check_budget(results, floors, skips, *, in_ci: bool) -> list[str]:
+    """两道棘轮。返回**问题清单**（非空 = 门禁判失败）。
+
+    1. **地板**：`len(TESTS)` 与签名文件精确相等。少了 = 有人删了判据；多了 = 有人加了
+       判据没更新地板。两个方向都红 —— 否则那份文件会说谎。
+    2. **跳过**：实际跳过 ⊆ 预算，多出来一条就红。这条挡的正是 `CONTRIBUTING.md` 禁止的
+       那种做法：**给一条既有判据加个环境门让它不跑**，或者新写一条永远跳过的判据。
+       反过来（预算里有、这次没跳）只在 CI 里 `::notice` —— 本机有没有 clang/WSL 与 runner
+       不同，本机看到子集是正常的。
+
+    问题清单里**带上可以直接粘进预算文件的行**：门禁得能教会你怎样让它满意，否则第一次
+    落地的代价就是猜。
+    """
+    bad: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for r in results:
+        if r.declared:
+            want = floors.get(r.name)
+            if want is None:
+                bad.append(f"{r.name}: 不在 {ROOT_FLOORS} 里（新套件？给它记一行："
+                           f"`{r.name} {r.declared}`）")
+            elif r.declared != want:
+                how = "少了" if r.declared < want else "多了"
+                bad.append(f"{r.name}: 判据条数 {how}（{want} -> {r.declared}）—— "
+                           f"少了是有人删判据；多了是没更新 {ROOT_FLOORS}")
+        if r.level_skip:
+            key = (r.name, "*")
+            seen.add(key)
+            if key not in skips:
+                bad.append(f"{r.name}: 整条套件被跳过，而它不在 {ROOT_SKIPS} 里 —— "
+                           f"补一行 `{r.name} *  # 环境: …`")
+            continue
+        for crit in r.skipped:
+            key = (r.name, crit)
+            seen.add(key)
+            if key not in skips:
+                bad.append(f"{r.name} 的 {crit}: 跳过了而没登记 —— 要么让它跑起来，要么补一行 "
+                           f"`{r.name} {crit}  # 环境/仓库: 为什么它在这台机器上跑不了`")
+    if in_ci:
+        for suite, crit in sorted(skips - seen):
+            print(f"::notice::{ROOT_SKIPS} 里的 {suite} {crit} 这次**没跳** —— 修好了就删掉它")
+    return bad
+
+
 def format_line(name: str, ok: bool, tail: str, dt: float, skips: int) -> str:
     """`:: [static] …` 那一行的**纯函数**版本 —— 判据能直接钉它的形状。
 
@@ -363,19 +465,33 @@ def format_line(name: str, ok: bool, tail: str, dt: float, skips: int) -> str:
     return f":: [static] {name:14s} {'PASS' if ok else 'FAIL'}  {dt:6.1f}s{mark}  {tail}"
 
 
-def _report(r: tuple[str, bool, str, float, int]) -> None:
+class Result(NamedTuple):
+    """一条检查的结果。**前五项的位置与老的 5 元组一致** —— 按索引取的那几处不用改。"""
+
+    name: str
+    ok: bool
+    tail: str
+    dt: float
+    skips: int
+    passed: tuple[str, ...]      # 真跑过且通过的判据名
+    skipped: tuple[str, ...]     # 打了 SKIP 的判据名（运行器会连名字一起打）
+    declared: int                # `len(TESTS)`；没有 TESTS 的 driver 脚本是 0
+    level_skip: bool             # 整条套件级跳过（循环之前就 return 0 那种）
+
+
+def _report(r: "Result") -> None:
     """一行结果。**只在一处打** —— 两个路径各打一次会变成打两遍 (上一版就是这么错的)。"""
-    name, ok, tail, dt, skips = r
-    print(format_line(name, ok, tail, dt, skips), flush=True)
+    print(format_line(r.name, r.ok, r.tail, r.dt, r.skips), flush=True)
 
 
-def _run_one_check(name: str) -> tuple[str, bool, str, float, int]:
+def _run_one_check(name: str) -> Result:
     """在**当前进程**里跑一条检查。`-j` 时它是进程池的工作单元 (所以必须在模块级)。"""
     import contextlib
     import io
 
     buf = io.StringIO()
     t0 = time.perf_counter()
+    mod = None
     try:
         mod = __import__(name)
         old_argv, sys.argv = sys.argv, [name]  # 防 argparse 读 ci.py 的 argv
@@ -390,10 +506,16 @@ def _run_one_check(name: str) -> tuple[str, bool, str, float, int]:
     dt = time.perf_counter() - t0
     out = buf.getvalue()
     tail = out.strip().splitlines()
+    passed, skipped, level = read_criterion_lines(out)
+    try:
+        declared = len(getattr(mod, "TESTS", None) or ())
+    except Exception:                                                # noqa: BLE001
+        declared = 0
     # `#371`: 跳过被记成**通过**, 所以那个数得单独数出来报 —— 否则这一行报的是
     # "没抛异常的总数"。CI 是 ubuntu 容器, 里面没有 `wsl`, 于是 104 条判据在 runner 上
     # 一条都不跑而门禁全绿 (最重的是 `loment_elf_test`: 运行时护栏整条在里面)。
-    return name, rc == 0, (tail[-1] if tail else ""), dt, count_skips(out)
+    return Result(name, rc == 0, (tail[-1] if tail else ""), dt, count_skips(out),
+                  tuple(passed), tuple(skipped), declared, level)
 
 
 def run_static(only: tuple[str, ...] = (), jobs: int = 1, names: list[str] | None = None):
@@ -557,22 +679,34 @@ def main():
     print(f"fujoci: 静态门禁 墙钟 {wall:.1f}s / 各条合计 {slow_total:.1f}s "
           f"/ 最慢一条 {slowest:.1f}s（-j {a.jobs}）")
     print("  最慢的 8 条：")
-    for name, _ok, _tail, dt, _sk in sorted(static, key=lambda r: -r[3])[:8]:
-        pct = (dt / slow_total * 100) if slow_total else 0
-        print(f"    {name:24s} {dt:7.1f}s  {pct:4.1f}%")
-    if any(not ok for _, ok, _t, _d, _s in static):
+    for r in sorted(static, key=lambda x: -x.dt)[:8]:
+        pct = (r.dt / slow_total * 100) if slow_total else 0
+        print(f"    {r.name:24s} {r.dt:7.1f}s  {pct:4.1f}%")
+    if any(not r.ok for r in static):
         print("-" * 60)
         print("fujoci: 静态门禁失败 — 中止 (接口漂移优先于运行时回归)")
         return 1
     if a.static_only:
         print("-" * 60)
-        print(f"fujoci: 静态门禁 {sum(1 for _, ok, _t, _d, _s in static if ok)}/{len(static)} PASS")
+        print(f"fujoci: 静态门禁 {sum(1 for r in static if r.ok)}/{len(static)} PASS")
         # `#371`: **"PASS" 不等于"跑了"**。跳过被运行器记成通过, 所以这里单独报一次总数 ——
         # 不报的话, 那一行读起来就是覆盖面, 而 runner 上有一整族判据根本不执行。
-        skipped = sum(r[4] for r in static)
+        skipped = sum(r.skips for r in static)
         if skipped:
             print(f"fujoci: 其中 {skipped} 条判据**没跑**（环境不满足, 见各行的 `N SKIP`）"
                   f"—— 这一行才是覆盖面")
+        # **"没跑"本身也要有代价**：签入的预算说清哪些跳过是接受的（`.github/gate-skips.txt`）
+        # 与每个套件该有多少条判据（`.github/gate-floors.txt`）。多出来的跳过、被删掉的判据，
+        # 在这一步判失败 —— 否则"把判据改得永远不跑"与"把判据删掉"都是能过的。
+        floors, budget_skips = read_budget()
+        bad = check_budget(static, floors, budget_skips,
+                          in_ci=bool(os.environ.get("GITHUB_ACTIONS")))
+        if bad:
+            print("-" * 60)
+            print(f"fujoci: 判据预算对不上 {len(bad)} 条：")
+            for b in bad:
+                print(f"  - {b}")
+            return 1
         return 0
 
     cases = []
