@@ -4981,8 +4981,22 @@ fn count_args(src: ptr, toks: ptr, lp: u32) -> u32 {
 /// 却没有任何全局可引用 —— **实测**：一份只用整数除法（于是 `@__loment_` 出现、
 /// 运行期被发出）而不用 `alloc` 的单元，编译期直接报
 /// `use of undefined value '@__loment_freehead'`。文本与 `lomentc._IR_HEAP` 同序。
-fn emit_heap(s: ptr, out: ptr) -> u32 {
-    return emit_str(s, out, "; ---- 分配器（docs/175 §3.4 的 `gc_manual`）------------------------------------
+fn emit_heap(s: ptr, out: ptr, lms: u32) -> u32 {
+    // **LMS 第 3 级入口 A**（`docs/247` §5.3）：`lms` 开着时，`alloc` 分配不出**先收一次
+    // 再试**，还不行才 abort。这段文本与 `lomentc._IR_HEAP_LMS` **逐字节同源** ——
+    // 四处增量与参考那一侧的四处改写一一对应：
+    //   ① 全局声明（`@__loment_lms_retry`）；② `floop` 的 phi 多一条入边；
+    //   ③ `boom` 换成 `rescue`/`dead`；④ **两条成功返回前**各清一次重试标记。
+    // ⚠ **④ 不能省**：不清的话"这一次"用掉的唯一一次重试会**留给下一次分配** ——
+    // 那是**假的能力**（第二次真耗尽时它不救了）。
+    // ⚠ 上面那句"脚本从它生成"是**旧注释**：树里**没有**那个脚本，这一段是手维护的。
+    let o: u32 = 0;
+    if lms == 1 {
+        o = emit_str(s, out, "@__loment_lms_retry = internal global i1 false");
+        o = emit_str(s, out, "
+");
+    }
+    o = emit_str(s, out, "; ---- 分配器（docs/175 §3.4 的 `gc_manual`）------------------------------------
 ;
 ; 这里以前是**纯 bump**（`@__loment_off` 只涨不落），而 `free` 是个**占位** ——
 ; 写它编得过、跑起来什么都不发生。`docs/175` §3.4 把那种形状点名叫「**允诺却不兑现**」，
@@ -5016,9 +5030,17 @@ entry:
   %head = load i32, ptr @__loment_freehead
   br label %floop
 floop:
-  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]
+");
+    if lms == 1 {
+        o = emit_str(s, out, "  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ], [ %head2, %rescue ]
+  %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ], [ 0, %rescue ]
+");
+    } else {
+        o = emit_str(s, out, "  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]
   %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ]
-  %fend = icmp eq i32 %cur, 0
+");
+    }
+    o = emit_str(s, out, "  %fend = icmp eq i32 %cur, 0
   br i1 %fend, label %bump, label %fit
 fit:
   %hp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %cur
@@ -5066,16 +5088,38 @@ taken:
   store i32 -1, ptr %tppb
   %ko = add i32 %cur, 8
   %kp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %ko
-  ret ptr %kp
+");
+    if lms == 1 {
+        o = emit_str(s, out, "  store i1 false, ptr @__loment_lms_retry
+");
+    }
+    o = emit_str(s, out, "  ret ptr %kp
 bump:
   %off = load i32, ptr @__loment_off
   %nxtoff = add i32 %off, %need
   %fits = icmp ule i32 %nxtoff, 65536
   br i1 %fits, label %bok, label %boom
 boom:
+");
+    if lms == 1 {
+        o = emit_str(s, out, "  ; ---- LMS 第 3 级入口 A（docs/247 §5.3）：先拉回，拉不回来才死 ----
+  %lmsdone = load i1, ptr @__loment_lms_retry
+  br i1 %lmsdone, label %dead, label %rescue
+rescue:
+  store i1 true, ptr @__loment_lms_retry
+  call void @__loment_collect()
+  %head2 = load i32, ptr @__loment_freehead
+  br label %floop
+dead:
   call void @__loment_abort()
   unreachable
-bok:
+");
+    } else {
+        o = emit_str(s, out, "  call void @__loment_abort()
+  unreachable
+");
+    }
+    o = emit_str(s, out, "bok:
   store i32 %nxtoff, ptr @__loment_off
   %wp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %off
   store i32 %need, ptr %wp
@@ -5084,7 +5128,12 @@ bok:
   store i32 -1, ptr %wp4
   %bo = add i32 %off, 8
   %bp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %bo
-  ret ptr %bp
+");
+    if lms == 1 {
+        o = emit_str(s, out, "  store i1 false, ptr @__loment_lms_retry
+");
+    }
+    o = emit_str(s, out, "  ret ptr %bp
 }
 
 define internal void @__loment_free(ptr %p) {
@@ -5163,6 +5212,7 @@ setprev:
 @__loment_freehead = internal global i32 0
 
 ");
+    return o;
 }
 
 /// **`hosted` 那一份分配器**（`docs/228` 的 A = `docs/219` §8b 的 **S1e**）——
@@ -5176,8 +5226,17 @@ setprev:
 /// sealed 产物的字节不变。**`gc_any` 档也走不到**：收集器的标记表按 arena 偏移索引、
 /// 行数 = arena/8，换 arena 要同时换表的口径，那是收集器的活（`docs/228` §4 的 B1）。
 /// 它**不静默**：那一档发 `; loment-heap: static 65536`（见 `emit_llvm` 里那个门）。
-fn emit_heap_hosted(s: ptr, out: ptr) -> u32 {
-    return emit_str(s, out, "; ---- 分配器（`docs/228` 的 `hosted` 那一份；`docs/175` §3.4）--------------------
+fn emit_heap_hosted(s: ptr, out: ptr, lms: u32) -> u32 {
+    // 与 `emit_heap` **同形** —— **LMS 第 3 级入口 A**（`docs/247` §5.3）那四处增量一处不少：
+    // 参考那一侧的 `_IR_HEAP_LMS_HOSTED` 是**同一份变换**做出来的（`_heap_with_lms_rescue`），
+    // 所以两边必须逐字节同源。少了这一段，`hosted` + `lms_open` 会**静默分叉**。
+    let o: u32 = 0;
+    if lms == 1 {
+        o = emit_str(s, out, "@__loment_lms_retry = internal global i1 false");
+        o = emit_str(s, out, "
+");
+    }
+    o = emit_str(s, out, "; ---- 分配器（`docs/228` 的 `hosted` 那一份；`docs/175` §3.4）--------------------
 ;
 ; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**宿主**来、寻址走 `%hb`。
 ;
@@ -5216,9 +5275,17 @@ entry:
   %head = load i32, ptr @__loment_freehead
   br label %floop
 floop:
-  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]
+");
+    if lms == 1 {
+        o = emit_str(s, out, "  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ], [ %head2, %rescue ]
+  %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ], [ 0, %rescue ]
+");
+    } else {
+        o = emit_str(s, out, "  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]
   %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ]
-  %fend = icmp eq i32 %cur, 0
+");
+    }
+    o = emit_str(s, out, "  %fend = icmp eq i32 %cur, 0
   br i1 %fend, label %bump, label %fit
 fit:
   %hp = getelementptr i8, ptr %hb, i32 %cur
@@ -5266,16 +5333,38 @@ taken:
   store i32 -1, ptr %tppb
   %ko = add i32 %cur, 8
   %kp = getelementptr i8, ptr %hb, i32 %ko
-  ret ptr %kp
+");
+    if lms == 1 {
+        o = emit_str(s, out, "  store i1 false, ptr @__loment_lms_retry
+");
+    }
+    o = emit_str(s, out, "  ret ptr %kp
 bump:
   %off = load i32, ptr @__loment_off
   %nxtoff = add i32 %off, %need
   %fits = icmp ule i32 %nxtoff, 1048576
   br i1 %fits, label %bok, label %boom
 boom:
+");
+    if lms == 1 {
+        o = emit_str(s, out, "  ; ---- LMS 第 3 级入口 A（docs/247 §5.3）：先拉回，拉不回来才死 ----
+  %lmsdone = load i1, ptr @__loment_lms_retry
+  br i1 %lmsdone, label %dead, label %rescue
+rescue:
+  store i1 true, ptr @__loment_lms_retry
+  call void @__loment_collect()
+  %head2 = load i32, ptr @__loment_freehead
+  br label %floop
+dead:
   call void @__loment_abort()
   unreachable
-bok:
+");
+    } else {
+        o = emit_str(s, out, "  call void @__loment_abort()
+  unreachable
+");
+    }
+    o = emit_str(s, out, "bok:
   store i32 %nxtoff, ptr @__loment_off
   %wp = getelementptr i8, ptr %hb, i32 %off
   store i32 %need, ptr %wp
@@ -5284,7 +5373,12 @@ bok:
   store i32 -1, ptr %wp4
   %bo = add i32 %off, 8
   %bp = getelementptr i8, ptr %hb, i32 %bo
-  ret ptr %bp
+");
+    if lms == 1 {
+        o = emit_str(s, out, "  store i1 false, ptr @__loment_lms_retry
+");
+    }
+    o = emit_str(s, out, "  ret ptr %bp
 }
 
 define internal void @__loment_free(ptr %p) {
@@ -5364,6 +5458,7 @@ setprev:
 @__loment_freehead = internal global i32 0
 
 ");
+    return o;
 }
 
 /// **自动回收**（`choose gc_auto`）—— 文本与 `lomentc._IR_GC` **逐字节同源**
@@ -5393,6 +5488,23 @@ setprev:
 /// 本单元要不要**收集器与根表**（`docs/210` §2.1）：`gc_auto`（576）**或** `gc_auto_alpha`
 /// （572）。此前只有 `gc_auto` —— alpha 的 L3 残差没人收（只有分配器）；这一步给 alpha
 /// 也配上收集器（它的触发是自适应那支，见 `emit_gc_trigger`）。
+/// `lms` 开着吗（`docs/247`）—— **第 3 级入口 A** 的开关。**扫 token 流**，与
+/// `gc_alpha_tier` 同一个形状（那边扫 `choose gc_auto_alpha`）。
+///
+/// ⚠ **它只是这个开关的一半** —— 另一半是"**这份产物里真的有收集器**"
+/// （`gc_any(s)`）。两个条件缺一不可：`gc_manual` 下没有东西可收，
+/// "拉回"在那里是一句空话（`docs/247` §5.3 明写的边界）。
+fn lms_open_tier(src: ptr, toks: ptr) -> u32 {
+    let i: u32 = 0;
+    while tok_kind(toks, i) != 4 {
+        if tok_is(src, toks, i, "choose") && tok_is(src, toks, i + 1, "lms_open") {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 fn gc_any(s: ptr) -> u32 {
     if load32(s, 576) == 1 {
         return 1;
@@ -6836,9 +6948,23 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
             if extern_named(s, src, toks, "malloc") == 0 {
                 emit_str(s, out, "declare ptr @malloc(i64)\n");
             }
-            emit_heap_hosted(s, out);
+            // **LMS 第 3 级入口 A**（`docs/247` §5.3）：两个条件缺一不可 ——
+            // `lms` 开着 **且** 这份产物里有收集器（`gc_any`）。见 `lms_open_tier`。
+            // ⚠ **`hosted` 与 `gc_auto_alpha` 定义上冲突**（`CORE_CONFLICTS`），所以
+            // 这一支里 `gc_any` 只可能是 `gc_auto`。
+            let lms_rescue_h: u32 = 0;
+            if lms_open_tier(src, toks) == 1 && gc_any(s) == 1 {
+                lms_rescue_h = 1;
+            }
+            emit_heap_hosted(s, out, lms_rescue_h);
         } else {
-            emit_heap(s, out);
+            // **LMS 第 3 级入口 A**（`docs/247` §5.3）：两个条件缺一不可 ——
+            // `lms` 开着 **且** 这份产物里有收集器（`gc_any`）。见 `lms_open_tier`。
+            let lms_rescue: u32 = 0;
+            if lms_open_tier(src, toks) == 1 && gc_any(s) == 1 {
+                lms_rescue = 1;
+            }
+            emit_heap(s, out, lms_rescue);
         }
     }
     if gc_any(s) == 1 {
