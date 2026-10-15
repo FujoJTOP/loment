@@ -7412,7 +7412,18 @@ class _Ir:
         **不再是内联的纯 bump**：`free` 兑现之后，分配与回收必须是同一份状态的读写者，
         而"只涨不落的前沿 + 什么都不做的 free"正是 `docs/175` §3.4 点名的那个形状
         （**允诺却不兑现**）。
+
+        **触发也发在这里**（`#367`）：它原先在 `alloc` 的**调用点**上，而 `str_concat`
+        走的是这个函数、不经过那一处 —— 于是拼接分配的字节**不计入**那个计数器，
+        只拼字符串的程序**一次收集都不跑**（`gc_auto_alpha` 也救不了：它的自适应阈值与
+        空间触发都住在 `__loment_maybe_collect` 里，而那个函数一次都不会被调用）。
+        挪到这儿之后**每一次**分配都计数；发的是同一段文本、同一顺序、同一个实参，
+        所以只含 `alloc` 的程序产物字节**完全不变**。
         """
+        if self.gc_any:
+            # 先问一句"该收了没有"—— 收在**分配之前**，所以不需要"分配失败再重试"那条路，
+            # 也就不必动 `__loment_alloc` 一个字节（另外两档的产物因此逐字节不变）。
+            self.w(f"call void @__loment_maybe_collect(i32 {size_var})")
         p = self.t()
         self.w(f"{p} = call ptr @__loment_alloc(i32 {size_var})")
         return p
@@ -7421,10 +7432,6 @@ class _Ir:
         """str_len / str_eq / str_concat / str_byte / slice_len 的 IR 降级。"""
         if e.name == "alloc":  # M15: bump 分配器
             _, sz = self.expr(e.args[0], "u32")
-            if self.gc_any:
-                # 先问一句"该收了没有"—— 收在**分配之前**，所以不需要"分配失败再重试"那条路，
-                # 也就不必动 `__loment_alloc` 一个字节（另外两档的产物因此逐字节不变）。
-                self.w(f"call void @__loment_maybe_collect(i32 {sz})")
             return "ptr", self.alloc_ir(sz)
         if e.name == "free":
             _, p = self.expr(e.args[0], "ptr")
