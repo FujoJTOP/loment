@@ -1972,6 +1972,30 @@ fn vm_syscall(a: ptr, m: ptr, nr: u64, x1: u64, x2: u64, x3: u64) -> u64 {
         }
         return ctx_get(a, C_HEAP) as u64;
     }
+    if nr == 39 {                                        // getpid
+        // 如实转出去：这是**这台机器的事实**。
+        return syscall4(39, 0, 0, 0) as u64;
+    }
+    if nr == 63 {                                        // uname(struct utsname *p)
+        // ⚠ **合成，不转宿主** —— 它描述的是**目标平台**（`docs/243` §3.4）：
+        // 宿主是什么都不影响，这里给的就是 `Linux`，判据 A 才有意义。
+        let up: u32 = x1 as u32;
+        if up + 390 > MEM_SIZE {
+            fail("uname 越界");
+        }
+        mz(m, up, 390);
+        store8(m, up, 76 as u8);          // L
+        store8(m, up + 1, 105 as u8);     // i
+        store8(m, up + 2, 110 as u8);     // n
+        store8(m, up + 3, 117 as u8);     // u
+        store8(m, up + 4, 120 as u8);     // x
+        return 0;
+    }
+    if nr == 201 {                                       // time(NULL)
+        return syscall4(201, 0, 0, 0) as u64;
+    }
+    // ⚠ 317 在这里**不实现** —— 它在 Linux 上是 `seccomp` 不是 `getrandom`
+    // （见 `tools/lvm.py` 同一处的注释，那是判据 A 纠出来的）。
     if nr == 60 {                                        // exit(code)
         // ⚠ **退出前先把剖面落盘**。参考那侧靠异常把栈弹干净、由 `run_ir` 收尾再写；
         // 这一侧没有异常 —— 而语料里几乎每一份都是 `_start` 里直接 `exit`，

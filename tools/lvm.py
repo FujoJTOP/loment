@@ -14,8 +14,10 @@ phi 的两趟模型。
 
 from __future__ import annotations
 
+import os
 import re
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -317,6 +319,23 @@ class Executor(Vm):
                     self.mem.heap = want
                 return self.mem.heap
             return self.mem.heap
+        if nr == 39:                                   # getpid
+            # 如实转出去：这是**这台机器的事实**，被解释程序问的就是"我"是谁。
+            return os.getpid()
+        if nr == 63:                                   # uname(struct utsname *p)
+            # ⚠ **合成，不转宿主** —— 它描述的是**目标平台**，不是解释器跑在哪台机器上。
+            # 判据 A 比的是"这份产物在目标平台上会打印什么"，所以这里必须给 Linux：
+            # 宿主是 Windows 也照样给 Linux（`docs/243` §3.4 那条规矩）。
+            fields = [b"Linux", b"loment", b"0.1.5", b"#1 LVM T0", b"x86_64", b"(none)"]
+            self.mem.put(a[0], b"".join(f[:64].ljust(65, b"\0") for f in fields))
+            return 0
+        if nr == 201:                                  # time(NULL)
+            return int(time.time())
+        # ⚠ **317 不是 getrandom** —— 我一开始照 `selfcheck` 的名字猜它是，写了个
+        # `os.urandom` 分支。**判据 A 当场把这个臆造纠了出来**：原生产物在 Linux 上拿到
+        # 317 = `seccomp`，返回 -1，于是 `selfcheck` 自己报 FAIL；而我的 VM "通过"了。
+        # 两边一致才是对的 —— 所以这个分支**删掉**，VM 点名拒（`docs/243` §3.4 的规矩：
+        # 表里没有的不装作有）。`selfcheck` 因此留在棘轮里，理由换成了真的那个。
         if nr == 60:                                   # exit(code)
             raise _Exit(a[0] & 0xFF)
         raise LvmError(f"系统调用表里没有 {nr}（`docs/243` §3.4）")

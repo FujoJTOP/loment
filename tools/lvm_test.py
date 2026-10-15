@@ -39,8 +39,15 @@ VM_KNOWN_GAPS: dict[str, str] = {
         "⚠ 这一条**可能永远对不上** —— VM 自己就是那个进程，它的 cmdline 是解释器的，"
         "不是被解释程序的。要么 VM 伪造一份，要么这条永远留在\"目标之外\"。"),
     "register_hello": "同 `cmd_hello`：要 257（openat）读 `/proc/self/cmdline`。",
-    "bootprobe": "要系统调用 **63（uname）**。VM 要如实回答得伪造一个与宿主一致的 utsname。",
-    "selfcheck": "要系统调用 **39（getpid）**（还有其余几个）。见 `docs/243` §3.4 那张表。",
+    # `bootprobe`（63 uname）**已经收进来了**（2026-10-15，issue #329）：VM 合成目标平台的
+    # utsname。`selfcheck` 收不成，理由与原来那条不同 —— 见下面那一条。
+    "selfcheck": (
+        "要系统调用 **317** —— 而 317 在 Linux 上是 **`seccomp`，不是 `getrandom`**（318 才是）。"
+        "原生产物拿到 -1，于是 `selfcheck` 自己报 `FAIL getrandom` 并退 1；VM 表里没有 317，"
+        "**点名拒**（退 2，stdout 为空）。两者**不是同一个形状** —— 一个是"
+        "「程序自己失败」，一个是「VM 不支持」 —— 所以它留在棘轮里。"
+        "⚠ 这一条曾被我按名字猜成 getrandom 并实现掉，是判据 A 把那个臆造纠出来的："
+        "**VM「通过」了，而原生失败**。"),
 }
 
 
