@@ -83,7 +83,7 @@
   },
   {
    "path": "tools/loment_internet_test.py",
-   "sha256": "8f40f7b79c1d6c5d5c0f9c36a89e5c65e26461d6e927b1876bbdcf0cb343050a"
+   "sha256": "9b238b8598730e2cf25dcaad1f18140134a42f7c7f2c99ad4ade8ef3b258428c"
   },
   {
    "path": "tools/loment_os_test.py",
@@ -107,7 +107,7 @@
   },
   {
    "path": "lompi/lpi_cli.lomt",
-   "sha256": "f1fb7c518f0987f1e18eacf71990be67e749f9c4357695c771da8b9d8141a30c"
+   "sha256": "c10ab38aeae254308ce577ebed702c53db362ef9983459d0411b5b9907e58c06"
   },
   {
    "path": "lompi/lpi_dir.lomt",
@@ -707,11 +707,11 @@
   },
   {
    "path": "lompi/store/internet/0.1.0/dns.lomt",
-   "sha256": "f299747f17183994cb374b5203f60a82e3f8438e0f4be82a27c0a016b53d5d48"
+   "sha256": "2cdbe24caae208e8f1aa6c5bd32ee86bbfce0ddd55c1005544e1f387717e3f4d"
   },
   {
    "path": "lompi/store/internet/0.1.0/http.lomt",
-   "sha256": "1d08564467aec573cc2cb77aa14feb8046cedc61f9c0c1e9e0109180966d0dd7"
+   "sha256": "ce1e4f8fc817d1123a66002856e324a395f1bf5116dada8bb48071066649f227"
   },
   {
    "path": "lompi/store/internet/0.1.0/internet.lomt",
@@ -719,7 +719,7 @@
   },
   {
    "path": "lompi/store/internet/0.1.0/ip.lomt",
-   "sha256": "185445e6d0f35e02b867cd387e8940d57d144f795d3f295b2f105e66f856265c"
+   "sha256": "be219bf838d6ec9cfd264628f077ba092f0b1237354cc8b5194bbbf15ed825db"
   },
   {
    "path": "lompi/store/internet/0.1.0/pkg.lomp",
@@ -731,7 +731,7 @@
   },
   {
    "path": "lompi/store/internet/0.1.0/tcp.lomt",
-   "sha256": "dbda44ccf00bad8e2b95744b4ab272c950bb05175b002cd1bd383ee847631259"
+   "sha256": "a1a49b76d74d217e89dbe87c419183126e4535435a371e2bae20825ded9ff22d"
   },
   {
    "path": "lompi/store/internet/0.1.0/udp.lomt",
@@ -775,7 +775,7 @@
   },
   {
    "path": "tools/loment_lompi_test.py",
-   "sha256": "ae8493563dbba8891bc1b1fa1a663bcf2fc82ee2199d525d94b5189c0ec88f82"
+   "sha256": "7087ce79c317b14784819c01ef2b87574998f882ced516b6ad41a2b9e2f0c64b"
   },
   {
    "path": "tools/loment_publish.py",

@@ -81,22 +81,32 @@ pub fn tcp_recv(fd: i64, p: ptr, cap: u64) -> i64 {
     return syscall7(TCPP_SYS_RECVFROM, fd as u64, p as u64, cap, 0, 0, 0);
 }
 
-/// 把 n 字节都发出去 (处理短写)。返回总共发出的字节数; 出错返回负数。
-/// 收/发被打断或超时 (`sock_retry`) 时**不再重试**, 返回"发出去几个"的负数编码:
-/// `-(sent) - 1` —— 调用方能据此知道进度, 而不是把一次超时当成整条链路坏了。
-pub fn tcp_send_all(fd: i64, p: ptr, n: u64) -> i64 {
+/// 把 n 字节都发出去 (处理短写)。**返回发出去的字节数 (0..n)**, 出错时把 errno 的绝对值
+/// 写进 `out_err` (4 字节小端; 全 0 = 这一趟没出错)。收/发被打断或超时 (`sock_retry`) 时
+/// **不再重试** —— 调用方拿 `sent` 当进度, 自己带着偏移再调一次。
+///
+/// 为什么不再用"进度编码成 `-(sent) - 1`": `sent == 0` 时正好等于 `-1`, 而那也正是 EPERM
+/// 的值 —— 调用方分不出"一个字节都没发出去、可以重试"和"不允许", 两种都不可检测
+/// (issue #299)。形参多一个, 语义才没有歧义。
+pub fn tcp_send_all(fd: i64, p: ptr, n: u64, out_err: ptr) -> i64 {
+    store8(out_err, 0, 0 as u8);
+    store8(out_err, 1, 0 as u8);
+    store8(out_err, 2, 0 as u8);
+    store8(out_err, 3, 0 as u8);
     let sent: u64 = 0;
     while sent < n {
         let here: ptr = ((p as u64) + sent) as ptr;
         let r: i64 = tcp_send(fd, here, n - sent);
         if r < 0 {
-            if sock_retry(r) {
-                return -(sent as i64) - 1;
-            }
-            return r;
+            let e: i64 = 0 - r;                  // errno 取正; 两边同为 i64 (见 #316)
+            store8(out_err, 0, (e & 255) as u8);
+            store8(out_err, 1, ((e >> 8) & 255) as u8);
+            store8(out_err, 2, ((e >> 16) & 255) as u8);
+            store8(out_err, 3, ((e >> 24) & 255) as u8);
+            return sent as i64;
         }
         if r == 0 {
-            return sent as i64;
+            return sent as i64;                  // 对端一个字节都不收
         }
         sent = sent + (r as u64);
     }
@@ -109,5 +119,7 @@ fn test_tcp_send_all_zero() -> bool {
     // n == 0 时不该发系统调用 —— 这条在 Windows 上也能跑 (自检走 Loment->Rust,
     // 那里的 syscall 是 Linux 的 asm; 真发出去会崩)。
     let z: ptr = 0 as ptr;
-    return tcp_send_all(0, z, 0) == 0;
+    let eb: ptr = alloc(4);
+    let got: i64 = tcp_send_all(0, z, 0, eb);
+    return got == 0 && load8(eb, 0) == 0 && load8(eb, 3) == 0;
 }
