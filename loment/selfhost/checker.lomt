@@ -390,6 +390,38 @@ fn chk_expr_start(src: ptr, t: ptr, i: u32) -> bool {
     return chk_tok_is(src, t, i, "&");
 }
 
+/// 数值字面量后面**紧跟的原始字节**是不是构成了一个语言不支持的形式（issue #12）。
+///
+/// **判原始字节，不判 token 相邻** —— 按 token 相邻去认（"数字后面跟标识符"）会把
+/// `48 as u32` 误判（`as` 是 ident token），实测全仓 **1843 处**误报；按原始字节判是
+/// **0 处**。区别就在 `48 as` 的 `48` 后面是空格，而 `0b1010` 的 `0` 后面就是 `b`。
+///
+/// 认出三种：`0b…` / `0o…`（`0` 后面直接跟 `b`/`o`）、`1_000`（数字后面跟 `_`）、
+/// `1.5`（数字后面跟 `.` + 数字 —— 点后面跟 `.` 的 `0..8` 范围不算）。
+fn chk_bad_num_suffix(src: ptr, t: ptr, i: u32) -> bool {
+    if chk_tok_kind(t, i) != 1 {
+        return false;
+    }
+    let e: u32 = tok_start(t, i) + tok_len(t, i);
+    let b: u32 = load8(src, e);
+    if b == 95 {
+        return true;
+    }
+    if tok_len(t, i) == 1 && load8(src, tok_start(t, i)) == 48 {
+        if b == 98 || b == 66 || b == 111 || b == 79 {
+            return true;
+        }
+    }
+    if b == 46 {
+        let c: u32 = load8(src, e + 1);
+        if c >= 48 && c <= 57 {
+            return true;
+        }
+    }
+    return false;
+}
+
+
 /// 核心模式的取值属于**哪一维**（`docs/175` §3.0/§3.4）。
 ///   0 = `mode`（`std` / `no_std`）；1 = `gc`（`gc_manual` / `gc_auto`）；
 ///   2 = `runtime`（`runtime` / `no_runtime`）；3 = `port`（`sealed` / `hosted`）；
@@ -2808,6 +2840,15 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let tyt: ptr = chk_tyt_of(oc);
     let j: u32 = b + 1;
     let c: u32 = envc;
+    // 数值字面量的**不支持形式**（`0b1010` / `1_000` / `1.5`，issue #12）—— 走一遍 token
+    // 报到字面量自己身上，而不是等它被切成两个 token 后在下游出洋相。
+    let q: u32 = b;
+    while q < e && chk_tok_kind(t, q) != 4 {
+        if chk_bad_num_suffix(src, t, q) {
+            chk_pub(src, t, oc, p, E_PARSE, q);
+        }
+        q = q + 1;
+    }
     while j < e && chk_tok_kind(t, j) != 4 {
         // 结构 token 直接跳过: `while x {` 的 `{` 若落到"赋值"分支, 会一路扫到体内第一个
         // `=` 并把它当成赋值语句, 报出"赋值目标不是左值"(ok.lomt 的 `14@84:{` 假报)。
