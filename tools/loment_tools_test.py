@@ -1418,6 +1418,44 @@ def test_gate_workflow_fails_when_the_budget_disagrees():
     print("      判据预算对不上时，两个跑片的 job 都会红")
 
 
+@test
+def test_gate_checks_the_budget_even_when_a_suite_is_red():
+    """有套件红的时候，判据预算**照样要查** —— 否则最需要它的时候它不跑。
+
+    形状（2026-10-15 在 CI 上实测到）：`main()` 原先在"有红就中止"那一步就 `return 1`，
+    而预算那一段写在它**后面** —— 于是任何一条套件红（哪怕那条红早就登记在基线里、
+    根本不算新红）都会把整段跳过。那天的第 5 片有 109 条判据跳过，**一条都没量到**，
+    就因为它有一条基线内的红。
+
+    这里把 `run_static` 换掉，喂它一条红的、一条带**未登记**跳过的，直接跑 `main()`：
+    要求输出里**同时**出现预算那句。
+    """
+    import contextlib
+    import io
+
+    import ci
+
+    red = ci.Result("probe_red_suite", False, "probe: 1/1 通过", 0.1,
+                    0, ("p",), (), 1, False)
+    skip = ci.Result("probe_skip_suite", True, "probe: 1/2 通过, 1 SKIP", 0.1,
+                     1, ("p",), ("test_needs_the_moon",), 2, False)
+    orig_run, orig_argv = ci.run_static, sys.argv
+    out = io.StringIO()
+    try:
+        ci.run_static = lambda *a, **k: [red, skip]
+        sys.argv = ["ci.py", "--static-only"]
+        with contextlib.redirect_stdout(out):
+            rc = ci.main()
+    finally:
+        ci.run_static, sys.argv = orig_run, orig_argv
+    text = out.getvalue()
+    assert "判据预算对不上" in text, (
+        "有套件红的时候预算那一段没跑 —— 跳过表与地板在那一次跑里完全没有约束力。"
+        f"输出尾部：{text[-300:]!r}")
+    assert rc == 1, "有红又有预算问题时，退出码必须是 1"
+    print("      有红的套件时预算照样查（两条一起报出来）")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_tools_test")
 

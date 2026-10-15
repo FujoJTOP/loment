@@ -682,10 +682,12 @@ def main():
     for r in sorted(static, key=lambda x: -x.dt)[:8]:
         pct = (r.dt / slow_total * 100) if slow_total else 0
         print(f"    {r.name:24s} {r.dt:7.1f}s  {pct:4.1f}%")
-    if any(not r.ok for r in static):
-        print("-" * 60)
-        print("fujoci: 静态门禁失败 — 中止 (接口漂移优先于运行时回归)")
-        return 1
+    # **预算要在"有红就中止"那一步之前查。** 原先它在下面那个 `return 1` 之后，于是
+    # **最需要它的时候它不跑**：任何一条套件红（哪怕那条红早就登记在基线里、根本不算新红）
+    # 都会从这里中止，把预算那整段跳过 —— 跳过表与地板在那一次跑里**完全没有约束力**。
+    # 2026-10-15 实测到的形状：第 5 片有 109 条判据跳过，一条都没量到，就因为该片有一条
+    # 基线内的红。这与本版要堵的是同一个洞（"没跑"却在某条路径上不算账）。
+    budget_bad: list[str] = []
     if a.static_only:
         print("-" * 60)
         print(f"fujoci: 静态门禁 {sum(1 for r in static if r.ok)}/{len(static)} PASS")
@@ -699,14 +701,20 @@ def main():
         # 与每个套件该有多少条判据（`.github/gate-floors.txt`）。多出来的跳过、被删掉的判据，
         # 在这一步判失败 —— 否则"把判据改得永远不跑"与"把判据删掉"都是能过的。
         floors, budget_skips = read_budget()
-        bad = check_budget(static, floors, budget_skips,
-                          in_ci=bool(os.environ.get("GITHUB_ACTIONS")))
-        if bad:
+        budget_bad = check_budget(static, floors, budget_skips,
+                                  in_ci=bool(os.environ.get("GITHUB_ACTIONS")))
+        if budget_bad:
             print("-" * 60)
-            print(f"fujoci: 判据预算对不上 {len(bad)} 条：")
-            for b in bad:
+            print(f"fujoci: 判据预算对不上 {len(budget_bad)} 条：")
+            for b in budget_bad:
                 print(f"  - {b}")
-            return 1
+    if any(not r.ok for r in static):
+        print("-" * 60)
+        print("fujoci: 静态门禁失败 — 中止 (接口漂移优先于运行时回归)")
+        return 1
+    if budget_bad:
+        return 1
+    if a.static_only:
         return 0
 
     cases = []
