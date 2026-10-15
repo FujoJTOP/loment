@@ -2084,6 +2084,52 @@ def test_l0_rule_pair():
         L0_MANUAL_SRC.replace("choose gc_manual", "X")
 
 
+
+#: `docs/246` §5.3 那一刀（"系统调用的实参是**借**"）的三份源 —— **只差一行**。
+_SYSCALL_BORROW_SRC = """module sysborrow
+choose gc_auto_alpha
+choose runtime
+
+fn put(fd: u64, v: u32, nr: u64) {
+    let buf: ptr = alloc(16);
+    store8(buf, 0, v as u8);
+    store8(buf, 1, 0);
+    syscall4(@@NR@@, fd, buf as u64, 2);
+}
+
+fn _start() {
+    put(1, 65, 1);
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+@test
+def test_syscall_borrow_rule():
+    """**交给白名单里的系统调用是"借"**（`docs/246` §5.3）：那一格进 L0，**表外的照旧不进**。
+
+    **Why**：这一刀是"让 L0–L2 真的有事可干"里唯一能动语料的一刀（`tools/loment_gc_surface.py`：
+    证明面 4/23 → **8/23**），而它的实质是**一条语言对内核的断言**（"这批系统调用在调用期间就把
+    缓冲区消费掉、不留存用户指针"）—— 断言错了就是**悬垂指针**。所以判据必须**三个方向都钉**：
+
+      1. 表内（`write` = 1）⇒ 提升（否则这一刀空转）；
+      2. **表外**（`sendto` = 44，故意排除：带 `MSG_ZEROCOPY` 时内核持有那些页）⇒ **不**提升 ——
+         这一格就是"表本身"的守卫：谁把 44 加进白名单，判据立刻红；
+      3. 号**不是字面量**（`nr` 是参数）⇒ **不**提升 —— 不知道是哪个系统调用，就不许当借。
+
+    三份源**只差那一行**（下面最后一条断言钉着），所以"差别来自这一行"这个说法成立。
+    """
+    tbl_in, _ = _l0_emit(_SYSCALL_BORROW_SRC.replace("@@NR@@", "1"))
+    tbl_out, _ = _l0_emit(_SYSCALL_BORROW_SRC.replace("@@NR@@", "44"))
+    tbl_var, _ = _l0_emit(_SYSCALL_BORROW_SRC.replace("@@NR@@", "nr"))
+
+    assert tbl_in == {"put": {"buf": 16}}, f"表内的号应当让这一格进 L0，得到 {tbl_in}"
+    assert tbl_out == {}, f"表外的号不许进 L0，得到 {tbl_out}"
+    assert tbl_var == {}, f"号不是字面量时不许进 L0，得到 {tbl_var}"
+    # 三份源只差那一行
+    a = _SYSCALL_BORROW_SRC.replace("@@NR@@", "X")
+    assert a.count("X") == 1 and a.replace("X", "1") == _SYSCALL_BORROW_SRC.replace("@@NR@@", "1")
+
 #: `gc_ladder` 那一对（`docs/210` §3/§5）：一份 `gc_auto_alpha` 的源里四层**各来一站** ——
 #: `a` 是字面量尺寸（L0）、`b` 尺寸是变量且顶层（L1）、`c` 在循环体里（L2）、`d` 外逃（L3）。
 GC_LADDER_ALPHA_SRC = """module gc_ladder
@@ -2132,6 +2178,70 @@ def test_gc_ladder_rule():
     # 两份源**只差那一行**
     assert GC_LADDER_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \
         GC_LADDER_MANUAL_SRC.replace("choose gc_manual", "X")
+
+
+#: 块内精确（`docs/210` §2.9）那张真值表 —— 逐格摆开**什么形状精确、掩码是哪几位**。
+#: 站点一律是 `let NAME: ptr = alloc(...)`；`a`/`ae` 那种靠**别名**（`let ae: ptr = a;`）
+#: 走到 L3（`_ptr_only_uses` 过得去的是 L0/L1，不要掩码）。
+SLOT_TABLE_SRC = """module slottbl
+choose gc_auto_alpha
+choose runtime
+
+fn call_it(p: ptr, v: u64) {
+    store8(p, 8, (v & 255) as u8);
+}
+
+fn _start() {
+    let n: u32 = 8;
+    let a: ptr = alloc(n);
+    let ae: ptr = a;
+    store8(ae, 0, 1);
+    let ra: u32 = load8(ae, 0);
+    let b: ptr = alloc(n);
+    let be: ptr = b;
+    let v: u64 = 3;
+    store8(be, 8, (v & 255) as u8);
+    let c: ptr = alloc(n);
+    call_it(c, 5);
+    let d: ptr = alloc(n);
+    let de: ptr = d;
+    let off: u32 = 4;
+    store8(de, off, 1);
+    syscall4(60, (ra + (v as u32)) as u64, 0, 0);
+}
+"""
+
+
+@test
+def test_slot_table_rule():
+    """**块内槽表**（`docs/210` §2.9）：什么形状算精确、掩码是哪几位，逐格钉住。
+
+    **Why**：这一格的"对"与"错"几乎**看不见** —— 精确与保守扫出来的字在绝大多数程序里
+    是同一批（保守那条按**值**判"长得像不像地址"，而能被证成非指针的值本来就不会长得像
+    地址，见 `docs/210` §4.2 那段"行为上只在陈旧字节那个角落看得见差别"）。所以它只能靠
+    **逐格的真值表**证伪，判据本身必须把每一格点名。
+
+    **How to apply**：四个站点四格，各对着规则的一条：
+
+      * ① 直接 `store8`、值是字面量 -> **精确且掩码 0**（一个指针位都没有）；
+      * ② 同一个字收的是**非字面量** -> **精确但置位**（"可能是指针"就扫它）；
+      * ③ 块交给用户函数写 -> **不精确**（编译器看不进去，退回保守）；
+      * ④ `store8` 的偏移是变量 -> **不精确**（认不出写的是哪个字）。
+
+    再加两条钉子：只有**精确站点**改写块头（保守站点一个字节都不动），而掩码是
+    **编在块头那个字里**的（`-(mask + 2)`）—— 它**不进任何表**：掩码本来就是每个站点一个
+    常数，头上那个 32 位字装得下。少了这条钉子的后果是"掩码算了但没写下去"，
+    收集器于是每一块都按保守扫，这一格静默地什么都不做。
+    """
+    m = parse(SLOT_TABLE_SRC)
+    slots = getattr(m.funcs[1], "slots", {})
+    assert slots == {"a": 0, "b": 2}, f"精确站点掩码: {slots}"
+    ll = lomentc.emit_llvm(m, ROOT)
+    # 借出标记：`-(mask + 2)` —— a（掩码 0）是 `-2`、b（掩码 0b10）是 `-4`；保守站点还是 `-1`
+    assert ll.count("store i32 -2, ptr") == 1 and ll.count("store i32 -4, ptr") == 1, \
+        "精确站点的借出标记没带上掩码"
+    assert ll.count("store i32 -1, ptr") >= 2, "保守站点的借出标记不该动"
+    assert "@__loment_slots" not in ll, "掩码不该再进任何表"
 
 
 #: `surfaces`（`docs/222`, v11）：**每一个面至少两站**，外加两处"归 `other`"的形态
