@@ -752,6 +752,124 @@ def test_multi_object_cross_reference():
         print("      多目标文件 (a.o 调 b.o, 跨对象重定位) -> 退出码 22")
 
 
+#: **两个成员各有同名局部符号**。`static` 的东西在目标文件里是 `bind=0` 的**局部**符号，
+#: 名字就是程序员写的那个（`slot`）—— 两个文件里都叫 `slot`。zlib 那边是编译器生成的
+#: `.LC0` / `.my_version` 一类，同一回事。
+C_LOCAL_A = """
+static int slot = 11;
+int get_a(void) { slot = slot + 1; return slot; }
+"""
+C_LOCAL_B = """
+static int slot = 21;
+int get_b(void) { slot = slot + 1; return slot; }
+"""
+
+LOMENT_LOCAL_COLLIDE = """module collide
+choose runtime
+
+extern fn get_a() -> i32;
+extern fn get_b() -> i32;
+
+fn _start() {
+    // 各自 ++ 自己的 slot：12 与 22。**两个都对**才退 7 —— 串了的话第二个会读到
+    // 第一个的槽（老病"先来的为准"），于是要么 3、要么 4。
+    if get_a() != 12 { syscall4(60, 3, 0, 0); }
+    if get_b() != 22 { syscall4(60, 4, 0, 0); }
+    syscall4(60, 7, 0, 0);
+}
+"""
+
+
+@test
+def test_local_symbols_do_not_collide_across_members():
+    """**局部符号必须按对象区分**（2026-10-15，`FujoJTOP/loment#359`）。
+
+    标签表是**按名字**查的、而且"先来的为准" —— 而 `.LC0` / `.L.str` 这种**局部**名字
+    每个成员里都有。不分对象的话，第二个成员的 `.LC0` 会解析到**第一个成员的** `.LC0` 上：
+    **静默指错地址**，不报任何错。修法是给局部符号加对象前缀（`docs/219` §8b 记了很久的
+    "某个成员的数据/重定位还有残留缺陷"，真凶就是这个 —— 与 S1f 修过的**节符号**同一类，
+    只是当时没顺手修普通局部符号）。
+
+    `b.o` **放在前面**：那正是触发顺序（先来的定义赢）。夹具刻意让两个字符串长度相同、
+    内容不同 —— 撞上时读到的是**另一个成员**的字节，于是能分辨"指错"与"没读"。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "a.c").write_text(C_LOCAL_A, encoding="utf-8", newline="\n")
+        (td / "b.c").write_text(C_LOCAL_B, encoding="utf-8", newline="\n")
+        # `-O0`：`-O1` 会把那个 `static` 直接折成常量，于是**根本不留具名局部符号** ——
+        # 那样这条判据就是空的（实测：第一版夹具正是这样，关掉修也绿）。
+        assert compile_c(clang, td / "a.c", td / "a.o", ("-O0",)) == 0, "C 编译失败"
+        assert compile_c(clang, td / "b.c", td / "b.o", ("-O0",)) == 0, "C 编译失败"
+        # **先确认这两个成员真的有同名局部符号** —— 否则这条判据测的是别的东西。
+        # 比的是**去掉按对象前缀之后**的名字：修好之后登记的名字长成 `$<对象>$<原名>`，
+        # 取最后一个 `$` 之后那段就是原名的样子（没修时整串就是原名，所以这条检查两边都成立）。
+        fa = lomelf.ForeignObject(td / "a.o")
+        fb = lomelf.ForeignObject(td / "b.o")
+        raw = lambda s: {n.rsplit("$", 1)[-1] for n in s}      # noqa: E731
+        shared = raw(fa.dsyms) & raw(fb.dsyms)
+        assert shared, f"两个成员没有同名局部符号，这条判据空跑了: {sorted(fa.dsyms)[:4]}"
+        # 名字级：**标签表里不许再同名**（同名 ⇒ 后登记的那个会被"先来的为准"挡掉）。
+        assert not (set(fa.dsyms) & set(fb.dsyms)), (
+            f"两个成员的局部符号在标签表里还是同名: {sorted(set(fa.dsyms) & set(fb.dsyms))[:4]}")
+        (td / "m.lomt").write_text(LOMENT_LOCAL_COLLIDE, encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [td / "b.o", td / "a.o"], 7)
+        assert rc == 7, (f"两个成员的局部常量串了（**先来的为准**那条老病）：rc={rc}，"
+                         f"期望 7（3 = 第一个成员读错，4 = 第二个读错）{err[-200:]!r}")
+        print(f"      两个成员的同名局部符号（{sorted(shared)[:2]}…）各自解对 -> 退出码 7")
+
+
+#: **进入 C 函数时 `rsp % 16` 必须是 8**（SysV：`call` 那一刻 rsp ≡ 0，`call` 压入返回地址
+#: 之后就是 8）。我们自己的调用约定实参走栈、帧不对齐，所以调用点必须**显式对齐**。
+C_ALIGN = """
+unsigned long entry_align(void) {
+    unsigned long sp;
+    __asm__ volatile("mov %%rsp, %0" : "=r"(sp));
+    return sp % 16;
+}
+"""
+
+LOMENT_ALIGN = """module align
+choose runtime
+
+extern fn entry_align() -> u64;
+
+fn _start() {
+    syscall4(60, entry_align(), 0, 0);
+}
+"""
+
+
+@test
+def test_extern_call_sites_are_sixteen_byte_aligned():
+    """**调 C 之前 `rsp` 要按 SysV 对齐**（2026-10-15，`FujoJTOP/loment#359`）。
+
+    不修的话，**任何用到 16 字节 SSE 存的 C 函数当场 `#GP`**（`si_code=SI_KERNEL`、
+    `si_addr=NULL` —— 那不是段越界，是**对不齐**）。实测：zlib 的 `compress` 就死在
+    `movaps %xmm0,-0x70(%rbp)` 上；`deflateInit` 那条路偏偏又是好的，所以症状看起来
+    "时好时坏"。**判据直接量那个不变量**：让 C 侧把进入时的 `rsp % 16` 报出来，
+    它必须是 **8**（= 退出码 8）。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "al.c").write_text(C_ALIGN, encoding="utf-8", newline="\n")
+        assert compile_c(clang, td / "al.c", td / "al.o") == 0, "C 编译失败"
+        (td / "m.lomt").write_text(LOMENT_ALIGN, encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [td / "al.o"], 8)
+        assert rc == 8, (f"C 侧看到的栈对齐是 {rc}（mod 16），SysV 要求 **8** —— "
+                         f"调用点没对齐，任何 `movaps` 到栈的库函数都会 #GP "
+                         f"{err[-200:]!r}")
+        print("      C 侧报进入时 rsp % 16 == 8（SysV 要的那个数）-> 退出码 8")
+
+
 @test
 def test_archive_selects_only_needed_members():
     """**静态库 `.a`**: 只挑定义"当前需要的符号"的成员, **不整包收**。

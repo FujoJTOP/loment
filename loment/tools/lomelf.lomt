@@ -213,6 +213,7 @@ const PHI: u64 = 4294967296;
 const RAX: u32 = 0;
 const RCX: u32 = 1;
 const RDX: u32 = 2;
+const RBX: u32 = 3;                // 只为 extern 调用点的 `rsp` 对齐 (SysV；见 do_call_extern)
 const RSP: u32 = 4;
 const RBP: u32 = 5;
 const RSI: u32 = 6;
@@ -222,6 +223,8 @@ const R9: u32 = 9;
 
 const ADD: u32 = 0;
 const SUB: u32 = 5;
+const AND_: u32 = 4;               // Group1 的 /4 = and（`and rsp, -16` 那个）
+const LOCAL_PREFIX: u32 = 5;       // `$` + 4 字节对象号（见 `copy_local_name`）
 const CMP: u32 = 7;
 
 fn hi32(v: u64) -> u32 {
@@ -2840,7 +2843,17 @@ fn do_call_extern(tab: ptr, out: ptr, c: u32, t: ptr, lp: u32, rp: u32, nargs: u
         d = em_pop(out, d, c_arg_reg(k));
         k = k + 1;
     }
+    // ⚠ **C ABI 要求 `call` 那一刻 `rsp ≡ 0 (mod 16)`**（System V）—— 与参考实现
+    // `tools/lomelf.py` 的 `_call` 同一处、同三条、同序。不修的话，**任何用到 16 字节 SSE
+    // 存的 C 函数当场 `#GP`**（`si_code=SI_KERNEL`、`si_addr=NULL` —— 那不是段越界，是
+    // **对不齐**）：实测 zlib 的 `compress` 就死在 `movaps %xmm0,-0x70(%rbp)` 上
+    // （`FujoJTOP/loment#359`）。用 RBX 存原 rsp：SysV 的**被调方保存**寄存器，C 返回时
+    // 仍是原值；而 Loment 生成的代码不用 rbx。这三条之间只有这一次 C 调用（实参早已求值完、
+    // 压弹已平衡），所以嵌套调用踩不到它 —— **对齐必须是 `call` 前的最后一步**。
+    d = em_mov_rr(out, d, RBX, RSP, 1);
+    d = em_alu_ri(out, d, AND_, RSP, 4294967280);
     d = em_call_lbl(out, d, tab, cs + 1, ce - cs - 1);
+    d = em_mov_rr(out, d, RSP, RBX, 1);
     // **返回值照旧落回目标槽** —— 与内部调用同一步。少了这一句, 调用结果**丢掉**, 后面
     // 读到的是那个槽的旧值: 症状是"程序能跑、结果是假 0" (参考侧实测第一版就是这样:
     // `c_add(3,4) + c_mul(5,6)` 退出码 0 而不是 37)。
@@ -3005,8 +3018,15 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr,
                                 nl = 4;
                                 setcell(tab, C_EXTN, put_secname(t, cur, oi, shndx));
                             } else {
-                                noff = copy_name(tab, t, mem, stro2 + nmoff2);
-                                nl = cstr_len(mem, stro2 + nmoff2);
+                                // **局部**（`bind == 0`）一律**按对象改名** —— 与参考实现
+                                // 同一条、与查找处同一个函数。见 `copy_local_name` 的说明。
+                                if bind == 0 {
+                                    noff = copy_local_name(tab, t, mem, stro2 + nmoff2, oi);
+                                    nl = cstr_len(mem, stro2 + nmoff2) + LOCAL_PREFIX;
+                                } else {
+                                    noff = copy_name(tab, t, mem, stro2 + nmoff2);
+                                    nl = cstr_len(mem, stro2 + nmoff2);
+                                }
                             }
                             if lbl_find(tab, t, noff, nl, 0, 0) == NO {
                                 let val: u32 = lo32(rd64(mem, o2 + 8));
@@ -3098,8 +3118,15 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr,
                     nlen3 = 4;
                     setcell(tab, C_EXTN, put_secname(t, cur, oi, rd16(mem, symoff + 6)));
                 } else {
-                    nlen3 = cstr_len(mem, stro3 + nmoff3);
-                    noff3 = copy_name(tab, t, mem, stro3 + nmoff3);
+                    // **与登记处同一套**：局部符号按对象改名（`bind` 在符号记录的第 4 字节
+                    // 高 4 位）。两处必须一致，否则查不到 —— 见 `copy_local_name`。
+                    if (load8(mem, symoff + 4) as u32) / 16 == 0 {
+                        nlen3 = cstr_len(mem, stro3 + nmoff3) + LOCAL_PREFIX;
+                        noff3 = copy_local_name(tab, t, mem, stro3 + nmoff3, oi);
+                    } else {
+                        nlen3 = cstr_len(mem, stro3 + nmoff3);
+                        noff3 = copy_name(tab, t, mem, stro3 + nmoff3);
+                    }
                 }
                 let fi: u32 = cell(tab, C_NFREL);
                 let fb: u32 = TB_FREL + fi * 32;
@@ -3176,6 +3203,39 @@ fn apply_relocs(tab: ptr, t: ptr, txt: ptr, gb: ptr) -> u32 {
 }
 
 /// 把外部符号名拷进输入缓冲尾部的名字池, 返回它在 `t` 里的偏移。
+/// 把一个**局部**符号名按对象改名后放进名字池（`$` + 4 字节对象号 + 原名），返回**起点**。
+///
+/// **为什么必须改**（2026-10-15，`FujoJTOP/loment#359`）：`.LC0` / `.L.str` / `my_version`
+/// 这种局部名字**每个成员里都有**，而标签表是**按名字**查的、而且"先来的为准" —— 不改名时，
+/// 第二个成员的 `.LC0` 会解析到**第一个成员的** `.LC0` 上：**静默指错地址**，不报任何错。
+/// 实测：zlib 的 `deflate.o` 排在 `zutil.o` 之前时，`zlibVersion()` 返回的指针就落到
+/// deflate.o 的常量上。与上面那条节符号**同一个道理**（S1f 当时只修了节符号）。
+///
+/// ⚠ **登记处与查找处必须用这同一个函数**（`link_object` 与 `apply_relocs` 各一处）——
+/// 只改一半的症状是"查不到"，与"静默指错"是两种不同的坏。
+///
+/// 前缀是**二进制**（不是十进制文本）：名字池里的条目是**按长度**比的（`lbl_find` 走
+/// `span_eq`），不靠 NUL 结尾，所以这里怎么高效怎么来。前缀 1+4 字节 = `LOCAL_PREFIX`。
+fn copy_local_name(tab: ptr, t: ptr, p: ptr, off: u32, oi: u32) -> u32 {
+    let cur: u32 = cell(tab, C_EXTN);
+    let n: u32 = cstr_len(p, off);
+    if cur + n + LOCAL_PREFIX >= IN_CAP {
+        return fail("输入缓冲没有空间放外部符号名");
+    }
+    store8(t, cur, 36 as u8);
+    store8(t, cur + 1, (oi % 256) as u8);
+    store8(t, cur + 2, ((oi / 256) % 256) as u8);
+    store8(t, cur + 3, ((oi / 65536) % 256) as u8);
+    store8(t, cur + 4, ((oi / 16777216) % 256) as u8);
+    let k: u32 = 0;
+    while k < n {
+        store8(t, cur + LOCAL_PREFIX + k, load8(p, off + k) as u8);
+        k = k + 1;
+    }
+    setcell(tab, C_EXTN, cur + LOCAL_PREFIX + n);
+    return cur;
+}
+
 fn copy_name(tab: ptr, t: ptr, p: ptr, off: u32) -> u32 {
     let cur: u32 = cell(tab, C_EXTN);
     let n: u32 = cstr_len(p, off);

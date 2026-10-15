@@ -1850,6 +1850,14 @@ def test_lomelf_selfhost_links_foreign_object():
         # 摆错顺序（bss 与对象数据重叠）、或数据重定位算错，都会当场红。
         ("ffi6", ffitest.LOMENT_DATA_SOURCE,
          [(ffitest.C_DATA_SOURCE, "datac")], ["datac"], 100),
+        # **局部符号按对象改名**（2026-10-15，`FujoJTOP/loment#359`）：两个成员各有同名的
+        # 局部常量（`.LC0`），`b.o` 排在前面 —— 老病是"先来的为准"，第二个成员的常量会
+        # 解析到第一个上（静默指错）。两侧都要各自解对，产物还要逐字节相同。
+        ("ffi7", ffitest.LOMENT_LOCAL_COLLIDE,
+         [(ffitest.C_LOCAL_A, "a"), (ffitest.C_LOCAL_B, "b")], ["b", "a"], 7),
+        # **C 调用点的栈对齐**（同一天同一笔）：C 侧报进入时 `rsp % 16`，SysV 要 **8**。
+        # 自举侧也要有自己的对齐序列，而且与参考**逐字节相同**。
+        ("ffi8", ffitest.LOMENT_ALIGN, [(ffitest.C_ALIGN, "al")], ["al"], 8),
     ]
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)

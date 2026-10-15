@@ -1108,7 +1108,21 @@ class Emitter:
                 self.asm.emit(push_r(RAX))
             for reg, _a in zip(C_ARG_REGS, args):
                 self.asm.emit(pop_r(reg))
+            # ⚠ **C ABI 要求 `call` 那一刻 `rsp ≡ 0 (mod 16)`**（System V）。我们自己的调用
+            # 约定把实参压栈再弹出，压弹是**平衡**的、但**对齐不是** —— 我们的帧不对齐，于是
+            # 到了这里 rsp 常常是 8（mod 16）。不修的话**任何用到 16 字节 SSE 存的 C 函数都会
+            # 当场 `#GP`**：实测（`FujoJTOP/loment#359`）zlib 的 `compress` 就死在
+            # `movaps %xmm0,-0x70(%rbp)` 上（`si_code=SI_KERNEL`、`si_addr=NULL` —— 那不是
+            # 段越界，是**对不齐**）。
+            #
+            # 用 **RBX** 存原 rsp：它是 SysV 的**被调方保存**寄存器，C 返回时一定还是原值；
+            # 而 Loment 生成的代码**不用 rbx**（`docs/173` 那条"状态基址放 rbx"的注解就是靠
+            # 这一点）。这三条之间**只有这一次 C 调用**（实参早已求值完、压弹已平衡），
+            # 所以嵌套调用也踩不到它 —— 顺序不能反：对齐必须是 `call` 前的最后一步。
+            self.asm.emit(mov_rr(RBX, RSP))
+            self.asm.emit(alu_ri(AND_, RSP, -16))
             self.asm.call(callee[1:])
+            self.asm.emit(mov_rr(RSP, RBX))
             # **返回值照旧落回目标槽** —— 与内部调用同一步。少了这一句, 调用结果**丢掉**,
             # 后面读到的是那个槽的旧值: 症状是"程序能跑、结果是假 0" (实测第一版就是这样:
             # `c_add(3,4) + c_mul(5,6)` 退出码 0 而不是 37)。
@@ -5087,13 +5101,26 @@ class ForeignObject:
                     continue
                 end = raw.index(b"\x00", strt["off"] + nameoff)
                 nm = raw[strt["off"] + nameoff:end].decode("utf-8", "replace")
-                name_of[(si, k)] = nm
                 # **`st_info` 的高 4 位是绑定, 低 4 位是类型** —— `ELF64_ST_INFO(bind, type)`
                 # 就是 `(bind << 4) | type`。原文这里是 `info & 0x0F`, 取到的是**类型**:
                 # 收定义时靠"类型是 FUNC/OBJECT"误打误撞能对, 但一旦要判绑定 (比如"未定义
                 # 的符号是不是全局的") 就整个失效 —— 实测它让归档的固定点选不出成员
                 # (`c_sub` 的 info=0x10, `&0x0F` 得 0 被当成 LOCAL)。
                 bind = info >> 4
+                # ⚠ **局部符号（`bind == 0`）必须按对象改名**（2026-10-15）。理由与上面那条
+                # 节符号**一模一样**，只是 S1f 当时只修了节符号：
+                #   `.LC0` / `.L.str` / `my_version` 这种名字**每个成员里都有**，而下面那张
+                #   标签表是**按名字**查的、而且"先来的为准" —— 不改名时，第二个成员的
+                #   `.LC0` 会解析到**第一个成员的** `.LC0` 上：**静默指错地址**，不报任何错。
+                #   实测（`FujoJTOP/loment#359`）：zlib 的 `deflate.o` 排在 `zutil.o` 之前时，
+                #   `zlibVersion()` 返回的指针就落到 deflate.o 的常量上（`docs/219` §8b 那条
+                #   记了很久的"某个成员的数据/重定位还有残留缺陷"）。改完两边都读回 `1.3.1`。
+                # **只改局部**：跨对象的解析正是靠全局/弱符号，改了它们反而把 C 库拼不起来。
+                # 名字是**内部的**（不进产物 —— 我们的产物没有符号表），所以两侧各取各的形
+                # 也行，只要各自自洽；这里取 `$<对象名>$<原名>`，与节符号那条同一个形状。
+                if bind == 0:
+                    nm = f"${name}${nm}"
+                name_of[(si, k)] = nm
                 if shndx == 0:
                     if bind in (1, 2):                     # GLOBAL / WEAK
                         undefined.append(nm)

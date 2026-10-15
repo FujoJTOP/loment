@@ -7740,9 +7740,33 @@ def _alloc_promoted(toks: list, a: int, funcs: list) -> bool:
     return False
 
 
-def _heap_needed(mods: list) -> bool:
+def _declares_extern(mods: list) -> bool:
+    """这份单元（**连同依赖**）声明了 `extern fn` 吗 —— 也就是"它要链一份外面的东西"。
+
+    **为什么要问这个**（`docs/219` S2 / `FujoJTOP/loment#359`）：真 C 库总是要 `malloc`
+    （zlib 的 `zutil.o` 就要），而收编面那两条薄壳（`malloc`/`free`）**只在堆在时才发**
+    —— 堆不在，链接期就是"引用了未定义的符号 malloc"。所以"要调外部库"这件事本身
+    就该把堆带上。判据放宽到"有 `extern fn` 就发堆"，是 `docs/219` §8b 里写下的修法。
+    """
+    for m in mods:
+        toks = getattr(m, "toks", None) or []
+        for i, tk in enumerate(toks):
+            if tk.kind == "ident" and tk.val == "extern":
+                nxt = toks[i + 1] if i + 1 < len(toks) else None
+                if nxt is not None and nxt.kind == "ident" and nxt.val == "fn":
+                    return True
+    return False
+
+
+def _heap_needed(mods: list, rt_on: bool = True) -> bool:
     """这份单元（**连同依赖**）要不要那块 arena —— 与自举侧 `heap_needed` 同一条规则：
-    `alloc`（**没被 L0 提到栈上的那些**）/ `str_concat` / `free` 三者之一出现即算。
+
+    * 三个**运行期构造**之一出现即算：`alloc`（**没被 L0 提到栈上的那些**）/ `str_concat`
+      / `free`；
+    * **多一条（2026-10-15）**：根开了运行期、而这份单元**声明了 `extern fn`** ——
+      见 `_declares_extern` 的说明（真 C 库要 `malloc`，堆不在就发不出那两条薄壳）。
+      `no_runtime` 那一档**不跟**：那一维是**保证**（`docs/217`）——产物里不带运行期，
+      于是那样一个单元链一个要 `malloc` 的库时，报的是**未定义的符号**（响亮，且是它选的）。
 
     **必须在发射函数体之前算出来**：`gc_auto_alpha` 的写屏障挂在每个 `store8` 站点上，
     而屏障**引用堆** —— 一份把 `alloc` 全 L0 提走的单元没有堆，那儿的屏障就成了未定义符号
@@ -7751,6 +7775,8 @@ def _heap_needed(mods: list) -> bool:
     它与 `emit_llvm` 里那条**文本判据**（`"@__loment_alloc" in text_all`）说的必须是同一件事
     —— 自举侧两侧同源（`heap_needed` 预扫描 + 同一份发堆门），逐字节判据一直钉着这一点。
     """
+    if rt_on and _declares_extern(mods):
+        return True
     for m in mods:
         toks = getattr(m, "toks", None) or []
         funcs = getattr(m, "funcs", None) or []
@@ -7828,10 +7854,6 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **`gc_auto`**：自动那一档（`docs/210` §2.1 / §2.4）—— 编译器发精确根表 + 在每个分配点
     # 问一句"该收了没有"，收集器在运行期里。与 `gc_alpha` **互斥**（两档不同时成立）。
     gc_auto = mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_auto"
-    # **写屏障要不要挂**（`docs/210` §2.7 / `FujoJTOP/loment#239`）：alpha 档**且**这份
-    # 单元真的要那块 arena。判据得在**发射函数体之前**算好 —— 屏障是在 `store8` 站点上
-    # 发的，而它引用堆。与自举侧同一条规则（那边预扫描成 `s+516`）。
-    _has_heap_pre = _heap_needed([mod, *deps])
     # **运行期维**（`docs/217` / `docs/175` §3.6）。两个方向各一句话：
     #   * `runtime`    ⇒ 产物里**一定**有那段运行期 —— 这里的 `rt_on` 无条件发 `_IR_RUNTIME`；
     #   * `no_runtime` ⇒ 产物里**一定没有** —— 那条**不在这里**：它在 `check()` 里拒
@@ -7841,7 +7863,14 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 就不该装它（一个只会除法的裸机引导程序不该凭空多 64 KiB 的 .bss）。它仍旧按需 ——
     # 而"用得到 `alloc`"这一半由 `check()` 管着：`no_runtime` 下写 `alloc` 是拒的，
     # 所以"产物里有分配器"必然意味着"根写过 `choose runtime`"。
+    # **多一条按需**（2026-10-15）：根开了运行期、而这份单元声明了 `extern fn` ——
+    # 真要链外部库了，堆就带上（`_declares_extern` 的说明）。这个判断要用到 `rt_on`，
+    # 所以 `rt_on` 在这里先算（它只是一次字典读取，没有副作用）。
     rt_on = mod.chooses.get("runtime", CORE_DEFAULTS["runtime"]) == "runtime"
+    # **写屏障要不要挂**（`docs/210` §2.7 / `FujoJTOP/loment#239`）：alpha 档**且**这份
+    # 单元真的要那块 arena。判据得在**发射函数体之前**算好 —— 屏障是在 `store8` 站点上
+    # 发的，而它引用堆。与自举侧同一条规则（那边预扫描成 `s+516`）。
+    _has_heap_pre = _heap_needed([mod, *deps], rt_on)
     meta: list[str] = []
     dbg_types: dict = {}  # M59: 局部变量类型 -> DIBasicType (全模块共享一份)
 
@@ -7934,7 +7963,8 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **调用**，堆全局不再出现在**单元体**里 —— 判据必须落在"分配器被引用了没有"上，
     # 而不是"堆那个符号出现过没有"。两者分开判会漏发（实测：`free` 一用就报
     # "未定义的标签"；而只用整数除法、不用 alloc 的单元会反过来——发出分配器却没有全局）。
-    _needs_heap = "@__loment_alloc" in text_all or "@__loment_free" in text_all
+    _needs_heap = ("@__loment_alloc" in text_all or "@__loment_free" in text_all
+                   or _has_heap_pre)
     # **`hosted` 的堆从宿主来**（`docs/228` 的 A = `docs/219` §8b 的 **S1e**）。
     # 闸门是 `choose port hosted`，因为"堆封在这份产物里"是 `sealed` 的一半含义 ——
     # 一次 `malloc` 是**运行期**对外面的依赖，给 `sealed` 加上它就等于把那条保证改掉

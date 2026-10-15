@@ -6369,7 +6369,24 @@ fn runtime_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
 /// **被 L0 提升掉的那条不算** —— 参考实现是按**发射出来的文本**判的
 /// （`"@__loment_alloc" in text_all`），提到栈上的 `alloc` 不产生任何对分配器的引用；
 /// 少判这一步，孪生会在全提升的程序上多带一份运行期 + 分配器（实测：逐字节判据立刻红）。
-fn heap_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
+fn heap_needed(s: ptr, src: ptr, toks: ptr, rt_on: u32) -> u32 {
+    // **外源库也要那块 arena**（`docs/219` S2 / `FujoJTOP/loment#359`，2026-10-15）：
+    // 根开了运行期、而这份单元声明了 `extern fn` ⇒ 发堆。真 C 库总要 `malloc`（zlib 的
+    // `zutil.o` 就要），而收编面那两条薄壳**只在堆在时才发** —— 堆不在，链接期就是
+    // "引用了未定义的符号 malloc"。与参考实现 `_declares_extern` 同一条规则。
+    // **`no_runtime` 不跟**：那一维是保证（`docs/217`），产物里不带运行期。
+    // **不另写一个函数**：这一层加函数真的会慢下去（`docs/231` §2.2 量过 +4.7s）。
+    if rt_on == 1 {
+        let j: u32 = 0;
+        while tok_kind(toks, j) != 4 {
+            if tok_kind(toks, j) == 0 && tok_is(src, toks, j, "extern") == 1 {
+                if tok_kind(toks, j + 1) == 0 && tok_is(src, toks, j + 1, "fn") == 1 {
+                    return 1;
+                }
+            }
+            j = j + 1;
+        }
+    }
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
         let hit: u32 = 0;
@@ -6603,10 +6620,11 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     store32(s, 512, runtime_needed(s, src, toks));
     // `choose runtime` = **强制带**（`docs/217`）：用不到也发 `_IR_RUNTIME`。
     // 参考实现那一半是 `if rt_on or "@__loment_" in text_all:` —— 同一个或。
-    if rt_tier(src, toks) == 1 {
+    let rt_on: u32 = rt_tier(src, toks);
+    if rt_on == 1 {
         store32(s, 512, 1);
     }
-    store32(s, 516, heap_needed(s, src, toks));
+    store32(s, 516, heap_needed(s, src, toks, rt_on));
     store32(s, 532, strings_needed(src, toks));
     // 符号表: 登记函数。同时识别 trait 声明 (方法只声明不发射) 与 impl 块 (方法名 = <类型>_<方法>)
     let i: u32 = 0;
