@@ -185,19 +185,33 @@ fn _start() {
 
 **还差的**（按依赖顺序）：
 
-1. **自举 codegen**（`loment/selfhost/codegen.lomt`）：`emit_ty` 认 `fn(...)` -> `i64`；
-   `fn_addr` 发 `ptrtoint ptr @名字 to i64`；间接调用发 `load` -> `inttoptr` -> `call %fp(...)`。
-   **落点在 `expr_atom` 的调用分支**（`expr_postfix` 里那个 `dot`/`ty` 是**基表达式的类型
-   token**，所以"callee 的类型 token 是 `fn`"判得出来）。
-2. **镜像链接器**（`loment/tools/lomelf.lomt`）：`do_ptrcast` 剥 `@`；`do_call` 的间接分支
-   （`call rcx`）—— 与参考**逐字节同**（`loment_elf_test` 的孪生那格钉着）。
-3. **`choose fp` 那一维**：`CORE_DIMS` / `CORE_DIM_ORDER` / `CORE_DEFAULTS`（默认 `no_fp`）/
+1. **自举侧那三处缺陷**（见下面 §6.6 —— 已经二分到最小复现，是**下一步的入口**）。
+2. **`choose fp` 那一维**：`CORE_DIMS` / `CORE_DIM_ORDER` / `CORE_DEFAULTS`（默认 `no_fp`）/
    `CORE_DIM_ZH` 四张表**两处实现各一份**，加闸（样板在 `check()` 里那条
    `_eff["vm"] == "vm" and loment_channel.RELEASE`）。
-4. **消费方清单 §3**（每个入口一条判据）。
-5. **`docs/208` 那两条门禁前提**改成带开关的模式。
-6. **判据与 parity 正例**：`loment_rule_parity._CASES` 这一族目前只有负例的思路，
-   正例（`fn(A,B)` 用对了）要另找落点 —— 它是**正样例**，而那张表只收负例。
+3. **消费方清单 §3**（每个入口一条判据）。
+4. **`docs/208` 那两条门禁前提**改成带开关的模式。
+5. **判据与 parity 正例**：`loment_rule_parity._CASES` 只收负例，正例（`fn(A,B)` 用对了）
+   要另找落点。
+
+## 6.6 自举侧卡在哪：三处，各有最小复现（2026-10-15）
+
+拿**自举驱动**跑最小探针，基线（同一份程序但**不出现 `fn` 类型**）**照常通过**，所以下面
+三条都是新语法带出来的、**互相独立**的缺陷：
+
+| # | 最小复现 | 症状 | 已经排除掉的 |
+|---|---|---|---|
+| 1 | `let p: fn(u64) -> u64 = fn_addr("inc");` —— **完全不用它** | 9~10 条诊断，且**扫描游标失步**（一路报进 `__prelude`） | 不是 `fn_addr`（`let x: u64 = fn_addr("inc");` 只有一条该有的 E1）；不是空格（`fn (u64)` 一模一样）；**不是复合表溢出**（在 `chk_ty_new` 里加 `n >= 110` 的哨兵，没响）；**也不是 `chk_ty_range` 建类型那一段**（把它改成 `return 0`，失步照旧）⇒ 落在**跳类型那一侧** |
+| 2 | `fn apply(f: fn(u64) -> u64, a: u64) -> u64 { return f(a); }` | 一条 `E2 … f` —— **形参没进函数体的 env** | 与 #1 无关（这份里没有 `let`） |
+| 3 | `fn pick() -> fn(u64) -> u64 { return fn_addr("inc"); }` | 一条 `E1 … return` —— 函数的**返回类型**是用 `chk_ty_of_tok` 编码的，而那个函数只认**单 token** 的类型 | 与 #1/#2 无关 |
+
+**#1 的下一步探针**：`chk_skip_type` 的 `fn` 分支**确实走到了**（临时 `panic` 打进去、
+退出码 4），所以别再查"分支到没到"，要查**它返回的那个下标**。最省事的读法是**用一条
+指向该下标的诊断把值读回来**：`sym_pub(src, t, p, o, E_TYPE, k)` —— 报出来的
+`E2 @<k> line <那一行的行号>` 就是它落在哪。（`panic(n)` 在这个驱动里**不回显数字**，
+只给退出码，所以不能用它当读数通道。）
+
+`loment_rule_parity` 102/102、`loment_p8_test` 28/28 —— **这两条一直没回归**。
 
 ## 7. 与 `docs/245` 的关系
 
