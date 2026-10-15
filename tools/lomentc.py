@@ -164,7 +164,10 @@ _IR_HEAP = '''; ---- 分配器（docs/175 §3.4 的 `gc_manual`）--------------
 ; 块的形状（8 字节头，8 字节对齐）：
 ;   +0  i32  size   —— 这一块的**总长**（含头）
 ;   +4  i32  next   —— 下一块**空闲**块的偏移；0 = 链尾（所以偏移 0 永远不是块）
-;                    **-1 = 这块正借在外面**（`alloc` 发的）—— `free` 靠它挡住双重释放
+;                    **负数 = 这块正借在外面**（`alloc` 发的）—— `free` 看**符号**挡双重释放。
+;                    值是 `-(mask + 2)`，`mask` 是**块内槽掩码**（`docs/210` §2.9）：
+;                    `-1`（恰好是原先那个数）⇒ 块内**整块保守扫**；`≤ -2` ⇒ 块内精确。
+;                    掩码**不进任何表** —— 它就是这个字本身。
 ; 载荷从 +8 开始。整个 arena 是 `@__loment_heap`，偏移从 0 起算。
 ;
 ; 三条规则，各有它要挡的东西：
@@ -178,7 +181,7 @@ _IR_HEAP = '''; ---- 分配器（docs/175 §3.4 的 `gc_manual`）--------------
 ;   * **`free` 先验所有权**（2026-10-13）：越界 / 未对齐 / 头不合常理 / **已经释放过**的，
 ;     一律**惰性返回**（不 abort，也绝不挂链）。双重释放会把同一块**同时**放在前沿与空闲
 ;     链表上，于是两次 `alloc` 拿到同一段内存 —— 那是这个分配器唯一能真正毁掉程序的形状。
-;     残余边界（对齐得正好、后面那个字又恰好是 -1 的派生指针）写在 `docs/210` §2.8。
+;     残余边界（对齐得正好、后面那个字又恰好是**负数**的派生指针）写在 `docs/210` §2.8。
 ;
 ; **还没做的**（下一层）：物理相邻的两块不合并（coalesce）。非 LIFO 的碎片化因此还在，
 ; 而且它是收集器那一层的活（`docs/175` §3.4 的 `gc_auto`）。
@@ -283,7 +286,7 @@ hdr:
   %h4 = add i32 %hi, 4
   %hpp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %h4
   %nx = load i32, ptr %hpp
-  %onloan = icmp eq i32 %nx, -1
+  %onloan = icmp slt i32 %nx, 0
   br i1 %onloan, label %sane, label %out
 sane:
   %szok = icmp uge i32 %sz, 8
@@ -361,8 +364,9 @@ _IR_HEAP_HOSTED = '''; ---- 分配器（`docs/228` 的 `hosted` 那一份；`doc
 ;
 ; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**宿主**来、寻址走 `%hb`。
 ;
-; **`free` 的所有权校验与 `_IR_HEAP` 是同一套**（借出标记 `next == -1` + 四条廉价检查，
-; 2026-10-13），残余边界同样写在 `docs/210` §2.8。
+; **`free` 的所有权校验与 `_IR_HEAP` 是同一套**（借出标记是负数 + 四条廉价检查；2026-10-13 起
+; 标记由原先那个 `-1` 放宽成 `-(掩码 + 2)`，好让块头带上**块内槽掩码**，见 `docs/210` §2.9），
+; 残余边界同样写在 `docs/210` §2.8。
 ; 块的形状、地址序、首次适配 + 拆分、前沿回退一个字节没动 —— 因为 arena 仍是**一段
 ; 连续内存**（偏移是 i32；多段才是重写分配器，见 `docs/228` §4 的 B2）。
 ;
@@ -491,7 +495,7 @@ hdr:
   %h4 = add i32 %hi, 4
   %hpp = getelementptr i8, ptr %hb, i32 %h4
   %nx = load i32, ptr %hpp
-  %onloan = icmp eq i32 %nx, -1
+  %onloan = icmp slt i32 %nx, 0
   br i1 %onloan, label %sane, label %out
 sane:
   %szok = icmp uge i32 %sz, 8
@@ -5465,6 +5469,17 @@ done:
 
 ; **传播**：从 `%from` 起扫块，把块里**长得像堆内地址**的字递归标记上，直到不动点。
 ; 起点参数化是给分代那一档用的（小回收只扫年轻代）—— 全量那一趟传 8。
+;
+; **块内精确**（`docs/210` §2.9）：借出块头上那个字**就是掩码本身** —— 精确站点写
+; `-(mask + 2)`，保守（以及空闲块）留在 `-1`。于是这里算出来：`1` ⇒ **整块扫**
+; （也就是这一层加进来之前的行为），`≥ 2` ⇒ 掩码 = 那个数减 2，**只扫置了位的那些字**
+; （位 0 = 载荷第一个 8 字节）。掩码由编译器在**分配站点**上推出来，规则与 L0/L1/L2 同一条
+; 纪律（非逃逸 + 直接定偏移写，见 §2.9）。
+; **没有槽表**：早先的稿子把掩码放在一张 per-program 的表里、头上只存下标 —— 那是多余的，
+; 掩码本来就是**每个站点一个常数**，头上那个字有 32 位，装得下（`_SLOT_WORDS` 因此是 30）。
+; 少一张表就少一处两套实现要同时改的东西。
+; **空闲块一律保守**：`next ≥ 0` 说明它挂在空闲链表上（或 0 = 链尾）。那种块本来不该被扫，
+; 但既然有指针指进来了就照老样子扫一遍 —— **宁可多留，不可漏**。
 define internal void @__loment_propagate(i32 %from) {
 entry:
   br label %pl
@@ -5494,13 +5509,38 @@ wb:
 ws:
   %wsstart = add i32 %wi, 8
   %wsend = add i32 %wi, %wsz
+  %w4 = add i32 %wi, 4
+  %w4p = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %w4
+  %wnx = load i32, ptr %w4p
+  %wlv = icmp slt i32 %wnx, 0
+  br i1 %wlv, label %wk, label %wall
+wk:
+  %wneg = sub i32 0, %wnx
+  %wz0 = icmp ule i32 %wneg, 1
+  br i1 %wz0, label %wall, label %wm
+wm:
+  %wsub = sub i32 %wneg, 2
+  %wm64 = zext i32 %wsub to i64
+  br label %wl0
+wall:
+  br label %wl0
+wl0:
+  %wmask = phi i64 [ -1, %wall ], [ %wm64, %wm ]
   br label %wl
 wl:
-  %wj = phi i32 [ %wsstart, %ws ], [ %wj2, %wlc2 ]
-  %wacc = phi i32 [ %acc, %ws ], [ %wacc2, %wlc2 ]
+  %wj = phi i32 [ %wsstart, %wl0 ], [ %wj2, %wlc2 ]
+  %wacc = phi i32 [ %acc, %wl0 ], [ %wacc2, %wlc2 ]
   %wjd = icmp uge i32 %wj, %wsend
   br i1 %wjd, label %wn, label %wx
 wx:
+  %wdif = sub i32 %wj, %wsstart
+  %wshr = lshr i32 %wdif, 3
+  %wsh64 = zext i32 %wshr to i64
+  %wone = shl i64 1, %wsh64
+  %wbs = and i64 %wmask, %wone
+  %wnzs = icmp ne i64 %wbs, 0
+  br i1 %wnzs, label %wscan, label %wlc2
+wscan:
   %wjp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %wj
   %wv = load i64, ptr %wjp
   %wb2 = ptrtoint ptr @__loment_heap to i64
@@ -5512,7 +5552,7 @@ wmk2:
   %wr = call i32 @__loment_markp(i32 %wd32)
   br label %wlc2
 wlc2:
-  %wacc2 = phi i32 [ %wacc, %wx ], [ %wr, %wmk2 ]
+  %wacc2 = phi i32 [ %wacc, %wx ], [ %wacc, %wscan ], [ %wr, %wmk2 ]
   %wj2 = add i32 %wj, 8
   br label %wl
 wn:
@@ -6136,12 +6176,187 @@ def _gc_alpha_pass(mod: Module, deps: list[Module] | None = None) -> None:
         if m.chooses.get("gc") != "gc_auto_alpha":
             continue
         toks = m.toks
-        for f in list(m.funcs) + [g for im in m.impls for g in im.funcs]:
+        #: **按 token 位置排序** —— 槽表的次序必须与自举侧那趟**线性 token 走法**一致，
+        #: 而 `list(m.funcs) + impls` 会把 impl 里的函数排到所有顶层函数**之后**（源码里
+        #: 它们可能夹在中间）。排序之后两边数的是同一个次序。
+        funcs = sorted(list(m.funcs) + [g for im in m.impls for g in im.funcs],
+                       key=lambda g: g.tok_at)
+        # **块内槽掩码**（`docs/210` §2.9）每次都从头算 —— 这一趟要**幂等**（同一份 mod
+        # 被 emit 两次不会把表叠两遍）。掩码直接编进块头，所以这里只是"站点名 -> 掩码"。
+        for f in funcs:
+            f.slots = {}
+        for f in funcs:
             f.l0 = _l0_promotable(f, toks, frozen)
             f.l1 = []
             _reset_l1(f.body)
             _l2_loop_epochs(f, toks, frozen)   # L2 在 L0 之后（它要读 f.l0）
             _l1_place(f, toks, frozen)         # L1 在最后（它要读 f.l0 与 s.l2）
+        # 层梯走完再算掩码：被 L0/L1/L2 接走的站点根本不落到分配器上，也就不需要它。
+        for f in funcs:
+            for name, mask in _slot_plan(f, toks, frozen):
+                f.slots[name] = mask
+
+
+
+#: 块内精确（`docs/210` §2.9）能看穿的**写/读**内建。内建表里只有这两个 ——
+#: `store16/32/64` 在 `bytes.lomt` 里是**用户函数**（`w64` 那样按字节拼），编译器看不进去，
+#: 所以带它们的站点一律退回保守。这也解释了为什么这一格在真语料上"点得着的少"：
+#: 真代码写堆结构都走辅助函数。
+_SLOT_STORE = "store8"
+_SLOT_LOAD = "load8"
+
+#: 掩码**直接编在块头那个 32 位字里**（`-(mask + 2)`），所以一个站点最多认前 30 个载荷字
+#: （240 字节）—— 留出符号位与"`1` = 保守"那一格。超出的站点**取消资格**：截断成
+#: "只扫前 240 字节"是**不安全**的（后面的字会被漏掉），所以只能退回保守。
+_SLOT_WORDS = 30
+
+
+def _slot_plan(f: Func, toks: list, safe: "frozenset[str] | set[str]") -> list:
+    """`f` 的**块内精确**站点 —— `[(变量名, 槽掩码), ...]`，按站点在源里出现的次序。
+
+    规则（`docs/210` §2.9；与 L0/L1/L2 同一条纪律：**定义在 token 流上**）：
+
+    1. 候选只能是 `let P: ptr = alloc(<任意>);` —— 尺寸可以是变量（所以 L0 接不到）；
+    2. `P` 的**别名集** `A`（`let Q: ptr = R;` 且 `R` 已在 `A` 里）里每个名字，在函数体内
+       **每一处**都只能是：那条声明本身、一条别名声明、`store8(N, <整数字面量>, V)` 或
+       `load8(N, <偏移>)` 里**第一个实参**的那一次出现。**别的任何用法一律取消资格** ——
+       交给函数、`as u64`、`ptr_add`、`free`、被赋给别的变量、被重新赋值、被遮蔽。
+    3. 掩码：`store8(N, <off>, V)` 写的那个**字**（`off >> 3`）置位，**除非** `V` 可证非指针
+       （一个整数字面量，或 `_ptr_free_names` 收进来的名字）。其余一切算"可能是指针"。
+       一个**没有**被写过的字不是槽：程序从没往那儿放过东西，留着的是上一任住户的字节。
+
+    **为什么安全**：第 2 条保证这块内存只有一个入口，而且**写进来的每一处编译器都看得见** ——
+    于是没被置位的字**确实**收不到指针。这是 L0/L1 那条"不外逃"证明的第三次使用
+    （`docs/210` §9：GC 是一次分类，不是更好的算法）。
+
+    **只对 L3 站点可能成立**：不外逃的块早被 L0（字面量尺寸）或 L1 接走了，落不到分配器上。
+    """
+    n = len(toks)
+
+    def word(i: int, text: str) -> bool:
+        return 0 <= i < n and toks[i].kind != "string" and toks[i].val == text
+
+    def ident(i: int) -> bool:
+        return 0 <= i < n and toks[i].kind == "ident"
+
+    at, end = f.tok_at, f.tok_end
+    params = {p.name for p in f.params}
+
+    def close_paren(i: int) -> int:
+        d = 0
+        while i < end:
+            if toks[i].kind != "string":
+                if toks[i].val == "(":
+                    d += 1
+                elif toks[i].val == ")":
+                    d -= 1
+                    if d == 0:
+                        return i
+            i += 1
+        return -1
+
+    # ---- 候选与别名：先扫一遍，把 `let N : ptr = ...` 全收下来
+    decl: dict[str, int] = {}            # 名字 -> 那次 `let` 的下标
+    aliases: dict[str, str] = {}         # 别名 -> 它指向的名字
+    cands: list[str] = []                # 候选（是 `alloc(...)` 的那些），按出现次序
+    k = at
+    while k < end:
+        if word(k, "let") and ident(k + 1):
+            nm = k + 1
+            if word(nm + 1, ":") and word(nm + 2, "ptr") and word(nm + 3, "="):
+                name = toks[nm].val
+                if name in decl or name in params or word(nm - 1, "if"):
+                    k += 1
+                    continue
+                if word(nm + 4, "alloc") and word(nm + 5, "("):
+                    decl[name] = nm
+                    cands.append(name)
+                elif ident(nm + 4) and word(nm + 5, ";"):
+                    decl[name] = nm
+                    aliases[name] = toks[nm + 4].val
+        k += 1
+
+    out: list[tuple[str, int]] = []
+    for root in cands:
+        # **L0 / L1 接走的站点不要掩码**：`_ptr_only_uses` 过得去就说明这块不外逃，
+        # 于是它要么被提到栈上（L0，根本不调分配器）、要么被定活插了 `free`（L1）——
+        # 两条路都到不了收集器。于是这一格**只对 L3 可能成立**（`docs/210` §2.9）。
+        decl_nm = decl[root]
+        esc_ok, ndecl, _last = _ptr_only_uses(toks, at, end, root, decl_nm, safe)
+        if esc_ok and ndecl == 1:
+            continue
+        # 别名闭包
+        group = {root}
+        changed = True
+        while changed:
+            changed = False
+            for q, r in aliases.items():
+                if r in group and q not in group:
+                    group.add(q)
+                    changed = True
+        mask, ok = 0, True
+        for nm in group:
+            k = at
+            while k < end:
+                if ident(k) and toks[k].val == nm:
+                    if k == decl[nm]:
+                        k += 1
+                        continue
+                    # 别名声明 `let Q : ptr = nm ;`
+                    if (word(k + 1, ";") and word(k - 1, "=") and word(k - 2, "ptr")
+                            and word(k - 3, ":") and ident(k - 4) and word(k - 5, "let")
+                            and toks[k - 4].val in group):
+                        k += 1
+                        continue
+                    # `store8(nm, <字面量>, V)`
+                    if (word(k - 2, _SLOT_STORE) and word(k - 1, "(") and word(k + 1, ",")
+                            and toks[k + 2].kind == "number" and word(k + 3, ",")):
+                        close = close_paren(k - 1)
+                        if close < 0:
+                            ok = False
+                            break
+                        off = _int_lit(toks[k + 2].val) & 0xFFFFFFFF
+                        vs, ve = k + 4, close
+                        if not _provably_free(toks, vs, ve):
+                            w = off >> 3
+                            if w >= _SLOT_WORDS:
+                                ok = False
+                                break
+                            mask |= 1 << w
+                        k = close + 1
+                        continue
+                    # `load8(nm, ...)` —— 只读，不写字
+                    if word(k - 2, _SLOT_LOAD) and word(k - 1, "(") and word(k + 1, ","):
+                        close = close_paren(k - 1)
+                        if close < 0:
+                            ok = False
+                            break
+                        k = close + 1
+                        continue
+                    ok = False
+                    break
+                k += 1
+            if not ok:
+                break
+        if ok:
+            out.append((root, mask))
+    return out
+
+
+def _provably_free(toks: list, s: int, e: int) -> bool:
+    """这段右式**可证非指针**？—— 这里只认**整数字面量**（`-1` 这种带号的也算）。
+
+    名字、表达式、调用、转型**一律**算"可能是指针"。**宁严勿宽**：多算一个槽只是少了一格
+    精度，漏算一个槽就是**把活着的指针当成垃圾**。
+
+    **为什么连名字都不认**：认名字要一层"这个名字的每一次赋值都是字面量"的不动点
+    （与 `compute_safe` 同形），而它要在自举侧再养一张名字表 —— 为那几个字省下的精度
+    不值那张表的钱。**这一条写明了**：`store8(p, 8, x)` 无论 `x` 是什么，第 1 个字都是槽。
+    """
+    if e - s == 1:
+        return toks[s].kind == "number"
+    return (e - s == 2 and toks[s].kind != "string" and toks[s].val == "-"
+            and toks[e - 1].kind == "number")
 
 
 def _l0_promotable(f: Func, toks: list,
@@ -6607,6 +6822,10 @@ class _Ir:
         #: **L0 提升表**（`docs/210` §2，只在 `gc_auto_alpha` 下非空）：`{局部名: 字节数}`。
         #: 其余档**一行都不动** —— 默认档不许改变任何现有程序的产物（`docs/175` §3.4 五条之一）。
         self.l0: dict[str, int] = f.l0 if gc_alpha else {}
+        #: **块内槽掩码**（`docs/210` §2.9，同样只在 alpha 档非空）：`{局部名: 掩码}`。
+        #: 命中就在那条 `alloc` 之后把块头的借出标记改写成 `-(mask + 2)` —— 收集器因此
+        #: 知道**这一块哪几个字要扫**。保守站点一个字节都不变（标记还是那个 `-1`）。
+        self.slots: dict[str, int] = getattr(f, "slots", {}) if gc_alpha else {}
         #: **`gc_auto`**（`docs/210` §2.1 的"自动"那一档）：本帧要不要 push 根表、多少格。
         #: 与 `gc_alpha` **互斥**（两档不同时成立），所以下面那些挂点不会互相打架。
         self.gc_auto = gc_auto
@@ -7498,6 +7717,27 @@ class _Ir:
                 return
             _, v = self.expr(s.expr, s.type)
             self.w(f"store {self.ll(s.type)} {v}, ptr {self.vars[s.name][1]}")
+            mask = self.slots.get(s.name)
+            if mask is not None:
+                # **块内精确**（`docs/210` §2.9）：把块头的借出标记从 `-1` 改成
+                # `-(mask + 2)`，收集器于是只扫掩码里置了位的那些字（`-1` = 保守）。
+                # 进得了这张表的，右式一定是那条 `let NAME: ptr = alloc(...)`
+                # （`_slot_plan` 只收这个形状），所以 `%v` 就是块载荷首地址。
+                #
+                # **头在 `%v - 4`，但这里不走 `getelementptr ... i32 -4`** —— 包内镜像
+                # 链接器把 `i32` 立即数**零扩展**进 64 位再相加（`lomelf` 的 `Emitter.get`
+                # 发的是 32 位 `mov`），于是 `-4` 变成 **+4294967292**，产物直接段错误
+                # （实测：不带 `--link` 的 `clang` 路没事，正是这条差别暴露了它）。
+                # 那一道"指令子集"是**硬约束**（`docs/210` §8 —— L2 那条"体内不许 `free`"
+                # 就是被它逼出来的），所以这里**绕开负立即数**：指针减 4 用 `ptrtoint` /
+                # `sub i64` / `inttoptr` 三步走。链接器那一侧的缺陷另开 issue，不在这里顺手修。
+                h32 = self.t()
+                self.w(f"{h32} = ptrtoint ptr {v} to i64")
+                hs = self.t()
+                self.w(f"{hs} = sub i64 {h32}, 4")
+                h = self.t()
+                self.w(f"{h} = inttoptr i64 {hs} to ptr")
+                self.w(f"store i32 {-(mask + 2)}, ptr {h}")
             return
         if isinstance(s, Assign):
             if not isinstance(s.target, Ident):
