@@ -326,6 +326,14 @@ _CASES: list[tuple[str, str]] = [
     ("thread-arg-type",
      "module m\n\nfn worker(a: u64) -> u32 {\n    return 0;\n}\n\n"
      "fn f() -> i64 {\n    return thread_spawn(\"worker\", true, 1, 2);\n}\n"),
+    # ---- 语句起点的"这不是表达式" (issue #49) ---------------------------------
+    # `@` 在**词法上是合法 punct**（L0 的布局语法用它），L1 里却不是任何表达式的开头。
+    # 参考实现自 2026-09-09 起就报 E019；自举侧原先**一条都不报** —— 编译通过、退出码 0、
+    # 什么都不说（实测 0.1.4.5 发布版同）。两侧在这条上一直分叉，补一条探针钉住它。
+    ("stmt-not-expression",
+     "module m\n\nfn f() -> i64 {\n    @;\n    return 0;\n}\n"),
+    ("expr-not-expression",
+     "module m\n\nfn f() -> u32 {\n    let v: u32 = @ 1;\n    return v;\n}\n"),
 ]
 
 
@@ -333,7 +341,14 @@ def _report(rid: str, src: str, exe: Path, td: str) -> tuple[str, str, list[int]
     """跑一条案例, 返回 (status, 明细, py 码, loment 码)。"""
     f = Path(td) / f"case_{rid}.lomt"
     f.write_text(src, encoding="utf-8", newline="\n")
-    py_msgs = lomentc.check(lomentc.load(f))
+    try:
+        py_msgs = lomentc.check(lomentc.load(f))
+    except lomentc.LomError as e:
+        # **解析期**的错误是**抛**出来的，不是回一张消息表 —— 原先这里只接了后者，于是任何
+        # 在 `load()` 就失败的探针会把整套判据崩掉，而不是记一条结果。E019 这一族恰恰全在
+        # 解析期，所以此前一条探针都没有（`stmt-not-expression` 是第一条）。
+        # `str(LomError)` 就是分类器吃的 `行:列: 文本`（`lomc.LomError.__init__`）。
+        py_msgs = [str(e)]
     py = H._classify_codes(py_msgs)
     lo, detail = H._loment_codes(exe, f)
     if not py:
