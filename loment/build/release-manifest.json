@@ -975,7 +975,7 @@
   },
   {
    "path": "tools/loment_multisyntax_test.py",
-   "sha256": "8ecdf94f5ae491d5c6b7d3a22900fa332d57076201b4a2dfa96bc3e64e98d714"
+   "sha256": "622cc3d13d336afd67eb5cd9b73c23d58b98bd0949c1682c481e9100569d78d2"
   },
   {
    "path": "tools/loment_multisyntax_projects_test.py",
@@ -2519,7 +2519,7 @@
   },
   {
    "path": "tools/loment_ffi_test.py",
-   "sha256": "af40d2e4563699c0fb99239ca4f4d99f39093350d4c6106a758fc678fa92d82d"
+   "sha256": "2097f6bc386c764355e043acf4d59608d60c34799884fd46c6d85a5b091a4416"
   },
   {
    "path": "tools/loment_hosted_test.py",
