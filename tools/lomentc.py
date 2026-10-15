@@ -4599,7 +4599,14 @@ def _expr_rs(e) -> str:
         if e.name == "alloc":  # M15
             return f"__loment_alloc({a[0]})"
         if e.name == "free":
-            return "{ let _ = " + a[0] + "; 0u32 }"
+            # Rust 后端**兑现不了** `free`：那边的运行期（`_RUST_RUNTIME`）只有一个 bump
+            # 分配器，**没有空闲链表** —— 原生/IR 后端有 `@__loment_free`（bump + 地址序
+            # 空闲链表 + 拆分 + 前沿回退），这里没有对应物。原先这句降级成
+            # `{ let _ = p; 0u32 }`，于是**同一份源**在原生后端真回收、在 Rust 后端
+            # **静默泄漏**（issue #165）。承诺落空比拒绝更坏，所以在这里点名拒。
+            raise LomError(getattr(e, "line", 1), 1,
+                           "rust 后端不支持 `free`：那边的运行期只有一个 bump 分配器，"
+                           "`free` 在那里什么都不会释放。要真回收就用原生/IR 后端")
         if e.name == "load8":
             return f"(__loment_load8({a[0]}, {a[1]}) as u32)"
         if e.name == "store8":
