@@ -955,7 +955,7 @@
   },
   {
    "path": "tools/lvm.py",
-   "sha256": "dc4bd03ce5e30224dadd0b30df9c838a29a9de26613c6397d3eae9c86b54abe3"
+   "sha256": "a1b0c04d8498ffd967599e82f4c361317ed92e83ff24de469e15ae38a2079fd7"
   },
   {
    "path": "tools/lvm_test.py",
@@ -2347,7 +2347,7 @@
   },
   {
    "path": "docs/246-lvm-t1-profile.md",
-   "sha256": "97f3d620205bc2ccef3e4da4408b606a9c5b6b378a13e6a2ab2c0921e7f1b4e9"
+   "sha256": "f72f70ef817863d8da75fe2022729fba3656a5d28d6d128165941cc21457d8a6"
   },
   {
    "path": "docs/manual/index.md",
