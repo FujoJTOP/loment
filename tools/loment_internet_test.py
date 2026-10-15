@@ -596,8 +596,9 @@ fn _start() {{
         w("REQ-FAIL\\n");
         syscall4(60, 1, 0, 0);
     }}
-    let snt: i64 = tcp_send_all(fd, rq, rn as u64);
-    if snt < 0 {{
+    let serr: ptr = alloc(4);
+    let snt: i64 = tcp_send_all(fd, rq, rn as u64, serr);
+    if snt != (rn as i64) {{
         w("SEND-FAIL\\n");
         syscall4(60, 1, 0, 0);
     }}
@@ -755,6 +756,16 @@ fn putl(p: ptr, o: u32, s: str) -> u32 {
     let i: u32 = 0;
     while i < str_len(s) { store8(p, o + i, str_byte(s, i) as u8); i = i + 1; }
     return o + str_len(s);
+}
+
+fn rd32(p: ptr) -> u32 {
+    return load8(p, 0) | (load8(p, 1) << 8) | (load8(p, 2) << 16) | (load8(p, 3) << 24);
+}
+
+fn crlf(p: ptr, o: u32) -> u32 {
+    store8(p, o, 13 as u8);
+    store8(p, o + 1, 10 as u8);
+    return o + 2;
 }
 """
 
@@ -983,6 +994,168 @@ def test_uri_parser_hardening():
     diff = _first_diff(got, want)
     assert not diff, f"uri 防守用例不一致 @ {diff}"
     print("      uri: 越界的分量选择子已拒绝 (不再读记录之外的槽位)")
+
+
+# ---------------------------------------------------------------- 第二轮审计的回归
+#
+# 对着 #295 / #296 / #298 / #299。口径同上: 探针编原生跑, 期望值是**缺陷的反面**。
+
+def _dns_resp_probe() -> str:
+    return _hard_head("use dns") + """
+fn mk(msg: ptr, id: u32, rcode: u32, owner: u32) -> u32 {
+    let z: u32 = 0;
+    while z < 40 { store8(msg, z, 0 as u8); z = z + 1; }
+    store8(msg, 0, ((id >> 8) & 255) as u8);
+    store8(msg, 1, (id & 255) as u8);
+    store8(msg, 2, 128 as u8);                       // QR = 1
+    store8(msg, 3, rcode as u8);
+    store8(msg, 5, 1 as u8);                         // QDCOUNT = 1
+    store8(msg, 7, 1 as u8);                         // ANCOUNT = 1
+    store8(msg, 12, 1 as u8);                        // 问题名 "a"
+    store8(msg, 13, 97 as u8);
+    store8(msg, 14, 0 as u8);
+    store8(msg, 16, 1 as u8);                        // QTYPE = A
+    store8(msg, 18, 1 as u8);                        // QCLASS = IN
+    store8(msg, 19, 192 as u8);                      // 属主: 指针
+    store8(msg, 20, owner as u8);
+    store8(msg, 22, 1 as u8);                        // TYPE = A
+    store8(msg, 24, 1 as u8);                        // CLASS = IN
+    store8(msg, 30, 4 as u8);                        // RDLENGTH = 4
+    store8(msg, 31, 1 as u8);
+    store8(msg, 32, 2 as u8);
+    store8(msg, 33, 3 as u8);
+    store8(msg, 34, 4 as u8);
+    return 35;
+}
+
+fn _start() {
+    let m: ptr = alloc(64);
+    let sc: ptr = alloc(256);
+    let out: ptr = alloc(16);
+    w("MATCH_OK|");   wd(dns_resp_matches(m, mk(m, 4660, 0, 12), 4660, "a", sc, 256)); w("\\n");
+    w("BAD_ID|");     wd(dns_resp_matches(m, 35, 4661, "a", sc, 256)); w("\\n");
+    w("BAD_RCODE|");  wd(dns_resp_matches(m, mk(m, 4660, 3, 12), 4660, "a", sc, 256)); w("\\n");
+    w("BAD_QNAME|");  wd(dns_resp_matches(m, 35, 4660, "b", sc, 256)); w("\\n");
+    mk(m, 4660, 0, 12);
+    w("FIND_OK|");    wd(dns_resp_find(m, 35, "a", DNS_A, out, 16, sc, 256)); w("\\n");
+    w("FIND_OTHER|"); wd(dns_resp_find(m, 35, "b", DNS_A, out, 16, sc, 256)); w("\\n");
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+def _http_framing_probe() -> str:
+    return _hard_head("use http") + """
+fn _start() {
+    let oo: ptr = alloc(4);
+    let ol: ptr = alloc(4);
+    let c: ptr = alloc(4);
+    let sc: ptr = alloc(4);
+    let b: ptr = alloc(128);
+    let n1: u32 = putl(b, 0, "Content-Length: 5");
+    let n2: u32 = crlf(b, n1);
+    let n3: u32 = putl(b, n2, "Content-Length: 9");
+    let n4: u32 = crlf(b, n3);
+    w("DUP_COUNT|"); http_hdr_count(b, 0, n4, "Content-Length", c); wd(rd32(c)); w("\\n");
+    w("DUP_CL|");    wd(http_content_length(b, 0, n4, oo, ol, sc)); w("\\n");
+    let g: ptr = alloc(64);
+    let g1: u32 = putl(g, 0, "Content-Length: 42");
+    let g2: u32 = crlf(g, g1);
+    w("ONE_COUNT|"); http_hdr_count(g, 0, g2, "content-length", c); wd(rd32(c)); w("\\n");
+    w("ONE_CL|");    wd(http_content_length(g, 0, g2, oo, ol, sc)); w("\\n");
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+def _ip_cap_probe() -> str:
+    return _hard_head("use ip") + """
+fn _start() {
+    let a: ptr = alloc(16);
+    let i: u32 = 0;
+    while i < 16 { store8(a, i, 171 as u8); i = i + 1; }   // 每组 0xABAB -> 4 位十六进制
+    let out: ptr = alloc(64);
+    let n: u32 = ip_v6_fmt(out, 0, a);
+    w("V6_MAX|"); wd(IP_V6_FMT_MAX); w("\\n");
+    w("V6_LEN|"); wd(n); w("\\n");
+    let v: ptr = alloc(32);
+    let m: u32 = ip_v4_fmt(v, 0, 4294967295);
+    w("V4_MAX|"); wd(IP_V4_FMT_MAX); w("\\n");
+    w("V4_LEN|"); wd(m); w("\\n");
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+def _tcp_errno_probe() -> str:
+    return _hard_head("use tcp") + """
+fn _start() {
+    let buf: ptr = alloc(16);
+    let e: ptr = alloc(4);
+    // 无效 fd: 这次发送必然失败。修之前 errno 是从**返回值**里读的 (负数),
+    // 现在走 out_err, 返回值恒为"发出去了几个"。
+    let r: i64 = tcp_send_all(-1, buf, 4, e);
+    w("RET|"); wd(r as u32); w("\\n");
+    w("ERR|"); wd(rd32(e)); w("\\n");
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+@test
+def test_dns_resp_validation():
+    """审计回归 #296: 应答要先证明"是**我问的那条**的应答" —— ID、rcode、问题段名字。"""
+    with tempfile.TemporaryDirectory() as tds:
+        got = _run(_compile(_dns_resp_probe(), "hard_dnsresp", Path(tds)))
+    want = "\n".join([
+        "MATCH_OK|1",
+        "BAD_ID|0",                       # 端口猜对、ID 不对 -> 拒 (off-path 欺骗)
+        "BAD_RCODE|0",                    # NXDOMAIN -> 拒
+        "BAD_QNAME|0",                    # 不是问的那个名字 -> 拒
+        "FIND_OK|4",
+        "FIND_OTHER|4294967295",          # 属主名不符的记录 -> 不收 (缓存投毒)
+    ])
+    diff = _first_diff(got, want)
+    assert not diff, f"dns 应答校验不一致 @ {diff}"
+    print("      dns: 应答的 ID / rcode / 问题段名字 / 记录属主名 四样都比过了")
+
+
+@test
+def test_http_framing_headers_reject_duplicates():
+    """审计回归 #298: 帧头要能**数出有几条**, 两条 Content-Length 一律拒 (RFC 9112 §6.3)。"""
+    with tempfile.TemporaryDirectory() as tds:
+        got = _run(_compile(_http_framing_probe(), "hard_framing", Path(tds)))
+    want = "\n".join([
+        "DUP_COUNT|2",
+        "DUP_CL|4294967295",              # 两条 -> 拒, 不是"挑第一个"
+        "ONE_COUNT|1",                    # 名字比较大小写不敏感
+        "ONE_CL|42",
+    ])
+    diff = _first_diff(got, want)
+    assert not diff, f"帧头重复检测不一致 @ {diff}"
+    print("      http: 重复的 Content-Length 被拒 (并且数得出来几条)")
+
+
+@test
+def test_ip_fmt_capacity_constants_are_the_real_maximum():
+    """审计回归 #295: 没有 cap 形参的那几个格式化函数, 容量常量必须就是真实上界。"""
+    with tempfile.TemporaryDirectory() as tds:
+        got = _run(_compile(_ip_cap_probe(), "hard_ipcap", Path(tds)))
+    want = "\n".join(["V6_MAX|39", "V6_LEN|39", "V4_MAX|15", "V4_LEN|15"])
+    diff = _first_diff(got, want)
+    assert not diff, f"ip 容量常量与真实最长输出不符 @ {diff}"
+    print("      ip: IP_V6_FMT_MAX / IP_V4_FMT_MAX 就是真实最长输出 (39 / 15)")
+
+
+@test
+def test_tcp_send_all_reports_the_errno_out_of_band():
+    """审计回归 #299: `tcp_send_all` 的返回值恒为"发出去几个", errno 走 out_err。"""
+    with tempfile.TemporaryDirectory() as tds:
+        got = _run(_compile(_tcp_errno_probe(), "hard_tcperr", Path(tds)))
+    g = _kv(got)
+    assert g.get("RET") == "0", f"失败时返回值不是'发出去了 0 个': {g.get('RET')!r}"
+    assert g.get("ERR") not in (None, "0"), f"errno 没有走出来: {g.get('ERR')!r}"
+    print(f"      tcp: 失败时 ret=0 且 errno 走 out_err (errno={g['ERR']})")
 
 
 # ---------------------------------------------------------------- 入口

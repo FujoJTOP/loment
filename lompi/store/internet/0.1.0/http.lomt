@@ -216,6 +216,71 @@ pub fn http_hdr_dec(d: ptr, ho: u32, hn: u32, name: str,
     return v;
 }
 
+/// 数一个头在 [ho, ho+hn) 里出现了几次, 次数写进 out_n (4 字节)。返回 1 (总是成功)。
+/// 名字比较同 `http_hdr_find`: 大小写不敏感, 取冒号前那一整段。
+///
+/// 为什么要它: `http_hdr_find` 的规矩是"同名取**第一个**", 于是调用方拿得到值, 却**看不出
+/// 还有第二条** —— 对大多数头无所谓, 对帧头正是 RFC 9112 §6.3 明令要拒的形状 (issue #298)。
+pub fn http_hdr_count(d: ptr, ho: u32, hn: u32, name: str, out_n: ptr) -> u32 {
+    let ln: u32 = str_len(name);
+    let c: u32 = 0;
+    let i: u32 = 0;
+    while i < hn {
+        let ls: u32 = i;
+        while i < hn && load8(d, ho + i) != HTTPP_CR && load8(d, ho + i) != HTTPP_LF {
+            i = i + 1;
+        }
+        let le: u32 = i;
+        while i < hn && (load8(d, ho + i) == HTTPP_CR || load8(d, ho + i) == HTTPP_LF) {
+            i = i + 1;
+        }
+        let colon: u32 = HTTP_NO;
+        let k: u32 = ls;
+        while k < le {
+            if load8(d, ho + k) == 58 {
+                colon = k;
+                k = le;
+            } else {
+                k = k + 1;
+            }
+        }
+        if colon != HTTP_NO && colon - ls == ln {
+            let ok: u32 = 1;
+            let j: u32 = 0;
+            while j < ln {
+                if httpp_lower(load8(d, ho + ls + j)) != httpp_lower(str_byte(name, j)) {
+                    ok = 0;
+                }
+                j = j + 1;
+            }
+            if ok == 1 {
+                c = c + 1;
+            }
+        }
+    }
+    store8(out_n, 0, c as u8);
+    store8(out_n, 1, (c >> 8) as u8);
+    store8(out_n, 2, (c >> 16) as u8);
+    store8(out_n, 3, (c >> 24) as u8);
+    return 1;
+}
+
+/// `Content-Length` —— **只认恰好一条**。零条或两条以上一律 `HTTP_NO` (RFC 9112 §6.3:
+/// 取值不同的两条必须整条报文作废, 不是"挑一个")。`scratch` 是调用方给的 4 字节。
+///
+/// 帧头请走这条, 别直接 `http_hdr_dec`: 那个只取第一个, 拿到的值与"实际有几条"无关
+/// (issue #298)。
+pub fn http_content_length(d: ptr, ho: u32, hn: u32,
+                           out_off: ptr, out_len: ptr, scratch: ptr) -> u32 {
+    http_hdr_count(d, ho, hn, "Content-Length", scratch);
+    let c: u32 = load8(scratch, 0) | (load8(scratch, 1) << 8)
+               | (load8(scratch, 2) << 16) | (load8(scratch, 3) << 24);
+    if c != 1 {
+        return HTTP_NO;
+    }
+    return http_hdr_dec(d, ho, hn, "Content-Length", out_off, out_len);
+}
+
 // ---------------------------------------------------------------- 构建请求
 
 /// 拼一条请求到 out (上限 cap), 返回长度; 放不下返回 HTTP_NO。

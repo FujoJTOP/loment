@@ -633,6 +633,244 @@ def test_fetch_refuses_a_traversing_index():
 
 
 @test
+def test_fetch_pins_the_index_hash_out_of_band():
+    """审计回归 #306: `--registry-sha256` 是**带外**的信任根。
+
+    没有它时, 索引与索引里那些 sha256 走同一条明文通道 —— 那条逐个比只能查"路上坏了",
+    挡不住"两样一起换"。钉住之后, 索引对不上就拒; 钉的形状不对也要当场拒 (别让它变成一个
+    永远比不上的钉子, 看起来却像"已经验过来源")。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    f1 = b"module mathutil\npub fn twice(x: u64) -> u64 { return x * 2; }\n"
+    h1 = hashlib.sha256(f1).hexdigest()
+    index = f"mathutil 0.1.0 mathutil/0.1.0/mathutil.lomt {h1}\n"
+    pin = hashlib.sha256(index.encode()).hexdigest()
+    with tempfile.TemporaryDirectory(prefix="pin-") as td:
+        reg = Path(td)
+        httpd, port = _serve_registry(reg, index, {"mathutil/0.1.0/mathutil.lomt": f1})
+        url = f"http://127.0.0.1:{port}"
+        try:
+            _prime_cache(url)
+            _rc, ok = _run(["fetch", "--registry", url, "--registry-sha256", pin])
+            assert "index matches the pinned sha256" in ok, f"钉子对上了却没说: {ok[:300]!r}"
+            assert "fetched" in ok, f"钉住之后反而取不动了: {ok[:300]!r}"
+            # 钉错一个字节
+            _rc, bad = _run(["fetch", "--registry", url, "--registry-sha256", "0" * 64])
+            assert "does not match --registry-sha256" in bad, f"钉子对不上却没拒: {bad[:300]!r}"
+            # 形状不对 (不是 64 个十六进制)
+            _rc, short = _run(["fetch", "--registry", url, "--registry-sha256", "abc"])
+            assert "--registry-sha256 wants 64 hex" in short, f"形状不对没当场拒: {short[:300]!r}"
+            # 没钉的时候要把话说出来
+            _rc, plain = _run(["fetch", "--registry", url])
+            assert "not pinned" in plain, f"没钉住时没说明通道同源: {plain[:300]!r}"
+        finally:
+            httpd.shutdown()
+    print("      索引哈希可按 --registry-sha256 带外钉住; 没钉时会把'同通道'说出来")
+
+
+@test
+def test_fetch_marks_a_complete_cache_only_when_it_is():
+    """审计回归 #308: 取齐了才落 `lompi-fetch-complete`; 半途失败的那份没有标记。
+
+    PE 运行时没有 unlink (见 `lpi_sys` 头), 半片**删不掉** —— 消费方能依靠的只有标记。
+    """
+    import hashlib
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    f1 = b"module mathutil\npub fn twice(x: u64) -> u64 { return x * 2; }\n"
+    good = f"mathutil 0.1.0 mathutil/0.1.0/mathutil.lomt " \
+           f"{hashlib.sha256(f1).hexdigest()}\n"
+    # 摘要对不上 -> 中途失败。端口不同 => slug 不同 => 一份**全新**的缓存目录。
+    bad = f"mathutil 0.1.0 mathutil/0.1.0/mathutil.lomt {'0' * 64}\n"
+    with tempfile.TemporaryDirectory(prefix="mark-") as td:
+        reg = Path(td)
+        httpd, port = _serve_registry(reg, good, {"mathutil/0.1.0/mathutil.lomt": f1})
+        url = f"http://127.0.0.1:{port}"
+        try:
+            _prime_cache(url)
+            _rc, out = _run(["fetch", "--registry", url])
+            dest = None
+            for line in out.splitlines():
+                if line.startswith("lompi: registry fetched into "):
+                    dest = Path(line.split("into ", 1)[1].strip())
+            assert dest and (dest / "lompi-fetch-complete").is_file(), \
+                f"取齐了却没有完成标记: {sorted(p.name for p in dest.iterdir()) if dest else out[:200]!r}"
+        finally:
+            httpd.shutdown()
+        httpd2, port2 = _serve_registry(reg, bad, {"mathutil/0.1.0/mathutil.lomt": f1})
+        try:
+            url2 = f"http://127.0.0.1:{port2}"
+            _prime_cache(url2)
+            _rc, out2 = _run(["fetch", "--registry", url2])
+            assert "sha256 mismatch" in out2, f"这一次该失败: {out2[:300]!r}"
+            dest2 = None
+            for line in out2.splitlines():
+                if line.startswith("lompi: make it first:"):
+                    dest2 = Path(line.split("mkdir -p ", 1)[1].strip()).parent
+            if dest2 and dest2.is_dir():
+                assert not (dest2 / "lompi-fetch-complete").exists(), \
+                    f"半途失败的缓存却带着完成标记: {dest2}"
+        finally:
+            httpd2.shutdown()
+    print("      完成标记只在取齐时落下; 半途失败的那份没有")
+
+
+#: 一份**共享语料** —— 两个实现的 `net_hdr_end` / `http_hdr_end` 必须在它上面给出一模一样的
+#: 答案。CRLF 与 LF 两种收尾、body 里带不带 `CRLF CRLF`、干脆没有终止符, 都放进来。
+_TWIN_CORPUS = [
+    b"X: 1\r\n\r\nbody",
+    b"X: 1\n\nbody",
+    b"HTTP/1.0 200 OK\r\nX: 1\r\n\r\nBODY\r\n\r\nTAIL",
+    b"HTTP/1.0 200 OK\nX: 1\n\nBODY\r\n\r\nTAIL",
+    b"A\r\n\r\n",
+    b"no terminator here",
+    b"\r\n\r\n",
+    b"\n\n",
+    b"X: 1\r\nY: 2\n\nZ\r\n\r\n",
+    b"",
+]
+
+_TWIN_PRELUDE = """
+fn w(s: str) -> u32 {
+    return syscall4(1, 1, str_ptr(s) as u64, str_len(s) as u64) as u32;
+}
+
+fn wd(v: u32) -> u32 {
+    let b: ptr = alloc(16);
+    let n: u32 = 0;
+    let x: u32 = v;
+    if x == 0 { store8(b, 0, 48 as u8); n = 1; }
+    while x > 0 {
+        store8(b, n, (48 + x % 10) as u8);
+        x = x / 10;
+        n = n + 1;
+    }
+    let i: u32 = 0;
+    while i < n / 2 {
+        let lo: u8 = load8(b, i) as u8;
+        store8(b, i, load8(b, n - 1 - i) as u8);
+        store8(b, n - 1 - i, lo);
+        i = i + 1;
+    }
+    return syscall4(1, 1, b as u64, n as u64) as u32;
+}
+
+fn hx(s: str, out: ptr) -> u32 {
+    let tbl: str = "0123456789abcdef";
+    let n: u32 = str_len(s) / 2;
+    let i: u32 = 0;
+    while i < n {
+        let hi: u32 = hv(str_byte(s, i * 2));
+        let lo: u32 = hv(str_byte(s, i * 2 + 1));
+        store8(out, i, ((hi * 16 + lo) & 255) as u8);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn hv(c: u32) -> u32 {
+    let i: u32 = 0;
+    let tbl: str = "0123456789abcdef";
+    while i < 16 {
+        if str_byte(tbl, i) == c { return i; }
+        i = i + 1;
+    }
+    return 0;
+}
+"""
+
+
+def _twin_probe(use: str, call: str, sentinel: str) -> str:
+    """同一条语料在两份实现上跑一遍, 每次打 `H|<i>|<下标或 N>`。"""
+    head = "\n".join(["module twin_probe", "choose runtime", use, _TWIN_PRELUDE, "fn _start() {"])
+    body = []
+    for i, blob in enumerate(_TWIN_CORPUS):
+        body.append(f"    let b{i}: ptr = alloc(256);")
+        body.append(f'    let n{i}: u32 = hx("{blob.hex()}", b{i});')
+        body.append(f"    let r{i}: u32 = {call.format(i=i)};")
+        body.append(f'    w("H|{i}|");')
+        body.append(f'    if r{i} == {sentinel} {{ w("N\\n"); }} else {{ wd(r{i}); w("\\n"); }}')
+    body.append("    syscall4(60, 0, 0, 0);")
+    body.append("}")
+    return head + "\n" + "\n".join(body) + "\n"
+
+
+def _twin_lompi_out(td: Path) -> str:
+    """把探针放进**临时目录**、CWD 设成 `lompi/` 让 `use "lpi_cli.lomt"` 解析得到。
+
+    为什么不写进 `lompi/`: 那是 `GLOBS` 覆盖的目录, 临时文件落进去会被发布清单收走。
+    为什么走 **stage1 (自举镜)** 而不是参考实现: 参考实现给这个模块发的 IR 里有个 `lomelf`
+    的 PE 后端认不出的 `icmp` 形式 (`_icmp` 的正则没命中, 抛出来的是一句
+    `AttributeError: 'NoneType' object has no attribute 'group'`, 不是诊断) —— 这一条另案。
+    stage1 那条路同时也是本包**发行时真正走的路**, 与 `_build_entry` 一致。
+    """
+    src = _twin_probe('use "lpi_cli.lomt"', "net_hdr_end(b{i}, n{i})", "DIR_ERR")
+    probe = td / "twin_lpi.lomt"
+    probe.write_text(src, encoding="utf-8", newline="\n")
+    import loment_dist  # noqa: PLC0415
+    stage1 = loment_dist.build_stage1()
+    r = subprocess.run([str(stage1), str(probe)], cwd=str(SRC_DIR), capture_output=True,
+                       timeout=300)
+    assert r.returncode == 0 and r.stdout, f"stage1 编孪生探针(lpi 侧)失败: {r.stderr[-200:]!r}"
+    ll = r.stdout.decode("utf-8", "replace").replace(chr(13) + chr(10), chr(10))
+    raw = (lomelf.compile_pe if IS_WIN else lomelf.compile_ll)(ll)[0]
+    exe = td / ("twin_lpi" + (".exe" if IS_WIN else ".elf"))
+    exe.write_bytes(raw)
+    exe.chmod(0o755)
+    return subprocess.run([str(exe)], capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", shell=False, timeout=120).stdout
+
+
+@test
+def test_hdr_end_twins_agree_on_a_shared_corpus():
+    """审计回归 #309: `lpi_cli::net_hdr_end` 与 `internet::http_hdr_end` 是**两份实现**。
+
+    同一族逻辑抄成两份, 修一份忘另一份是这一轮审计里真发生过的事 (#292 修了包里的,
+    公网那一份一直带着同一个缺陷)。这条把**同一份语料**喂给两边, 逐字节比它们给的答案 ——
+    谁漂了当场红。
+
+    做不到的那半（合成就一份）在 issue 里写清了: 那是要把 `lpi_cli` 的 HTTP 层整个搬到
+    `internet` 上, 而 `lpi_cli` 的依赖链本来就是顶着嵌套上限排的 (见它文件头)。这条判据
+    治的是"漂了没人知道", 不是"不该有两份"。
+    """
+    if _build() is None:
+        print(f"      SKIP: {_skip}")
+        return
+    with tempfile.TemporaryDirectory(prefix="twin-") as td:
+        tdp = Path(td)
+        lpi_out = _twin_lompi_out(tdp)
+        pkg_src = _twin_probe("use http", "http_hdr_end(b{i}, 0, n{i})", "HTTP_NO")
+        probe = tdp / "twin_pkg.lomt"
+        probe.write_text(pkg_src, encoding="utf-8", newline="\n")
+        mod = lomentc.load(probe)
+        deps = lomentc.resolve_deps(mod, ROOT, tdp, entry=probe)
+        errs = lomentc.check(mod, deps=deps, _dep_pass=True)
+        assert not errs, f"孪生探针 (包侧) 检查不过: {errs[:3]}"
+        ll = lomentc.emit_llvm(mod, ROOT, deps)
+        raw = (lomelf.compile_pe if IS_WIN else lomelf.compile_ll)(ll)[0]
+        pkg_exe = tdp / ("twin_pkg" + (".exe" if IS_WIN else ".elf"))
+        pkg_exe.write_bytes(raw)
+        pkg_exe.chmod(0o755)
+        pkg_out = subprocess.run([str(pkg_exe)], capture_output=True, text=True,
+                                 encoding="utf-8", errors="replace", shell=False,
+                                 timeout=120).stdout
+    if not lpi_out.strip():
+        print(f"      SKIP: lpi 侧探针没输出 (lpi_cli 编不出来?)")
+        return
+    assert lpi_out == pkg_out, (
+        "两份头结束实现漂了:\n"
+        + "\n".join(f"  语料[{i}] lpi={a!r} pkg={b!r}"
+                    for i, (a, b) in enumerate(zip(lpi_out.splitlines(), pkg_out.splitlines()))
+                    if a != b)
+    )
+    print(f"      两份 net_hdr_end / http_hdr_end 在 {len(_TWIN_CORPUS)} 条共享语料上答案一致")
+
+
+@test
 def test_paths_use_the_platform_separator():
     """路径必须是**平台原生**形状（`docs/236` §6）：PE 上全 `\\`，POSIX 上全 `/`。
 

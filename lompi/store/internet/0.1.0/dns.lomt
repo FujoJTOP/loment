@@ -248,9 +248,78 @@ fn dnsp_skip_name(msg: ptr, msg_n: u32, off: u32) -> u32 {
     return DNS_NO;
 }
 
-/// 在应答里找第一条 `qtype` 记录, 把 RDATA 拷进 out (上限 cap), 返回字节数。
-/// 找不到 / 报文截断返回 DNS_NO。CNAME 的 RDATA 是域名 —— **解成点分文本**再给出去。
-pub fn dns_resp_find(msg: ptr, n: u32, qtype: u32, out: ptr, cap: u32) -> u32 {
+/// 大小写折叠 (DNS 名字大小写不敏感)。
+fn dnsp_fold(c: u32) -> u32 {
+    if c >= 65 && c <= 90 {
+        return c + 32;
+    }
+    return c;
+}
+
+/// `buf[0, n)` 与 `s` 大小写不敏感地相等吗。两边都得是**已经解开的点分文本**。
+fn dnsp_text_eq(buf: ptr, n: u32, s: str) -> u32 {
+    if n != str_len(s) {
+        return 0;
+    }
+    let i: u32 = 0;
+    while i < n {
+        if dnsp_fold(load8(buf, i)) != dnsp_fold(str_byte(s, i)) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+
+/// 报文 `off` 处的域名解开后是不是 `want`; `scratch` 是调用方给的暂存 (名字最长 255)。
+fn dnsp_name_eq(msg: ptr, n: u32, off: u32, want: str, scratch: ptr, cap: u32) -> u32 {
+    let got: u32 = dns_name_decode(msg, n, off, scratch, cap);
+    if got == DNS_NO || got == 0 {
+        return 0;
+    }
+    return dnsp_text_eq(scratch, got, want);
+}
+
+/// **这条应答真的是我问的那条的应答吗。** 是返回 1。
+///
+/// 四条一起对: ①`QR` 位说明它是应答; ②事务 ID 等于我们发出去的那个; ③`rcode == 0`
+/// (NOERROR); ④问题段里那个名字就是问的那个 (大小写不敏感)。
+///
+/// 为什么必须有它: 这一层原来**裸着** —— 解码器只认字节, "是不是我问的"没有任何入口。
+/// 没有它, 一个端口猜对而 ID 不对的应答照收 (off-path 欺骗); 一条 NXDOMAIN 的应答里
+/// 只要带个同类型记录也照收。这三样都不是解码器能替调用方判断的 —— 得把"问的什么"
+/// 传进来 (issue #296)。
+pub fn dns_resp_matches(msg: ptr, n: u32, want_id: u32, want_name: str,
+                        scratch: ptr, cap: u32) -> u32 {
+    if n < 12 {
+        return 0;
+    }
+    if !dns_is_response(msg) {
+        return 0;
+    }
+    if dns_hdr_id(msg) != want_id {
+        return 0;
+    }
+    if dns_hdr_rcode(msg) != 0 {
+        return 0;
+    }
+    if dns_hdr_count(msg, 0) == 0 {
+        return 0;
+    }
+    return dnsp_name_eq(msg, n, 12, want_name, scratch, cap);
+}
+
+/// 在应答里找一条 `qtype` 记录 —— **属主名必须就是 `want_name`** (大小写不敏感), 把
+/// RDATA 拷进 out (上限 cap), 返回字节数。找不到 / 报文截断返回 DNS_NO。
+/// CNAME 的 RDATA 是域名 —— **解成点分文本**再给出去。`scratch` 给属主名解码用。
+///
+/// 为什么属主名也要比: 一条应答里可以塞**好几条**记录, 其中为客户端没问过的名字准备地址 ——
+/// 只按类型取第一条就是缓存投毒的入口 (issue #296)。调用方**仍应先过 `dns_resp_matches`**
+/// (ID / rcode / 问题段), 那三样这里看不到。
+///
+/// 形参 8 个 —— 自举那边形参上限是 10 (第 11 个直接 SIGILL, 而且无声)。
+pub fn dns_resp_find(msg: ptr, n: u32, want_name: str, qtype: u32,
+                     out: ptr, cap: u32, scratch: ptr, scratchcap: u32) -> u32 {
     if n < 12 {
         return DNS_NO;
     }
@@ -278,7 +347,8 @@ pub fn dns_resp_find(msg: ptr, n: u32, qtype: u32, out: ptr, cap: u32) -> u32 {
         if rdo + rdlen > n {
             return DNS_NO;
         }
-        if rtype == qtype {
+        let mine: u32 = dnsp_name_eq(msg, n, p, want_name, scratch, scratchcap);
+        if mine == 1 && rtype == qtype {
             if qtype == DNS_CNAME || qtype == DNS_NS {
                 return dns_name_decode(msg, n, rdo, out, cap);
             }
@@ -388,6 +458,76 @@ fn test_dns_parse_a_record() -> bool {
     store8(m, 33, 3 as u8);
     store8(m, 34, 4 as u8);
     let out: ptr = alloc(16);
-    let got: u32 = dns_resp_find(m, 35, DNS_A, out, 16);
+    let sc: ptr = alloc(256);
+    let got: u32 = dns_resp_find(m, 35, "a", DNS_A, out, 16, sc, 256);
     return got == 4 && load8(out, 0) == 1 && load8(out, 3) == 4;
+}
+
+/// 自检用: 搭一条最小 A 应答 (与 `test_dns_parse_a_record` 同一个布局, 35 字节)。
+/// `id` / `rcode` / `owner` (属主指针指回哪儿) 由调用方给 —— 校验那一层靠这三样分辨。
+fn dnsp_min_a(msg: ptr, id: u32, rcode: u32, owner: u32) -> u32 {
+    let z: u32 = 0;
+    while z < 40 {
+        store8(msg, z, 0 as u8);
+        z = z + 1;
+    }
+    dnsp_set16(msg, 0, id);
+    dnsp_set16(msg, 2, 32768 + rcode);          // QR = 1; rcode 在低 4 位
+    store8(msg, 5, 1 as u8);                    // QDCOUNT = 1
+    store8(msg, 7, 1 as u8);                    // ANCOUNT = 1
+    store8(msg, 12, 1 as u8);                   // 问题名 "a"
+    store8(msg, 13, 97 as u8);
+    store8(msg, 14, 0 as u8);
+    store8(msg, 16, 1 as u8);                   // QTYPE = A
+    store8(msg, 18, 1 as u8);                   // QCLASS = IN
+    store8(msg, 19, 192 as u8);                 // 属主: 压缩指针
+    store8(msg, 20, owner as u8);
+    store8(msg, 22, 1 as u8);                   // TYPE = A
+    store8(msg, 24, 1 as u8);                   // CLASS = IN
+    store8(msg, 30, 4 as u8);                   // RDLENGTH = 4
+    store8(msg, 31, 1 as u8);
+    store8(msg, 32, 2 as u8);
+    store8(msg, 33, 3 as u8);
+    store8(msg, 34, 4 as u8);
+    return 35;
+}
+
+fn test_dns_resp_matches_ok() -> bool {
+    let m: ptr = alloc(64);
+    let sc: ptr = alloc(256);
+    let n: u32 = dnsp_min_a(m, 4660, 0, 12);
+    return dns_resp_matches(m, n, 4660, "a", sc, 256) == 1;
+}
+
+fn test_dns_resp_rejects_wrong_id() -> bool {
+    let m: ptr = alloc(64);
+    let sc: ptr = alloc(256);
+    let n: u32 = dnsp_min_a(m, 4660, 0, 12);
+    return dns_resp_matches(m, n, 4661, "a", sc, 256) == 0;
+}
+
+fn test_dns_resp_rejects_error_rcode() -> bool {
+    let m: ptr = alloc(64);
+    let sc: ptr = alloc(256);
+    let n: u32 = dnsp_min_a(m, 4660, 3, 12);           // NXDOMAIN
+    return dns_resp_matches(m, n, 4660, "a", sc, 256) == 0;
+}
+
+fn test_dns_resp_rejects_other_qname() -> bool {
+    let m: ptr = alloc(64);
+    let sc: ptr = alloc(256);
+    let n: u32 = dnsp_min_a(m, 4660, 0, 12);
+    return dns_resp_matches(m, n, 4660, "b", sc, 256) == 0;
+}
+
+/// #296 的另一半: 记录**属主名**不是问的那个名字时不许收。
+fn test_dns_resp_find_skips_other_owner() -> bool {
+    let m: ptr = alloc(64);
+    let sc: ptr = alloc(256);
+    let out: ptr = alloc(16);
+    let n: u32 = dnsp_min_a(m, 4660, 0, 12);           // 属主 -> 12, 解出来是 "a"
+    if dns_resp_find(m, n, "a", DNS_A, out, 16, sc, 256) != 4 {
+        return false;
+    }
+    return dns_resp_find(m, n, "b", DNS_A, out, 16, sc, 256) == DNS_NO;
 }

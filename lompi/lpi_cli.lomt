@@ -1645,6 +1645,10 @@ const NETREQ_IDX: u32 = 64;         // ptr: 索引缓冲
 const NETREQ_IDXCAP: u32 = 72;      // u32
 const NETREQ_BODY: u32 = 80;        // ptr: 单文件响应缓冲
 const NETREQ_BODYCAP: u32 = 88;     // u32
+//: ptr: **带外**钉住的索引 sha256 (64 个十六进制字节的 C 串), 或 0 = 没钉。
+//: 有它才算信任根 —— 索引与它里面的那些哈希是走**同一条明文通道**来的, 所以那条逐个比
+//: sha256 只能查出"路上坏了", 挡不住"有人把索引和载荷一起换掉" (issue #306)。
+const NETREQ_PIN: u32 = 96;
 const NETREQ_SIZE: u32 = 128;
 
 /// 从 p 的 [off, n) 取一个空白分隔的字段写进 out (cap)。
@@ -1752,6 +1756,22 @@ fn net_fetch_registry(req: ptr, dst: ptr) -> u32 {
     let st: ptr = sys_alloc(sha_state_size() as u64);
     let dig: ptr = sys_alloc(64);
     let hex: ptr = sys_alloc(128);
+    // 带外钉住的索引哈希。有它, 信任根就在通道之外; 没有它, 下面那条逐个比只能是完整性
+    // 检查 (issue #306) —— 这一点**说出来**, 别让"校验过 sha256"读成"验过来源"。
+    let pin: ptr = txt_load64(req, NETREQ_PIN) as ptr;
+    if pin != (0 as ptr) {
+        sha_init(st);
+        sha_update(st, idx, ilen as u32);
+        sha_final(st, dig);
+        sha_hex(dig, hex);
+        if !txt_eq(hex, 0, 64, pin, 0, 64) {
+            sys_write_str(2, "lompi: index does not match --registry-sha256 -- refused\n");
+            return 0;
+        }
+        sys_write_str(1, "lompi: index matches the pinned sha256\n");
+    } else {
+        sys_write_str(1, "lompi: (not pinned; hashes arrived over the same channel)\n");
+    }
     let off: u32 = 0;
     let files: u32 = 0;
     let seen: u32 = 0;
@@ -1852,6 +1872,19 @@ fn net_fetch_registry(req: ptr, dst: ptr) -> u32 {
         sys_write_str(2, "lompi: the index has no entries\n");
         return 0;
     }
+    // 全部下完且逐个校验过 -> 落一个**完成标记**。为什么不是回滚: PE 运行时里没有
+    // unlink (见 `lpi_sys` 头), 中途失败留下的那半份**删不掉**; 所以让消费方认这个标记
+    // 来分辨"整份取齐了"与"取到一半断了" (issue #308)。
+    let mark: ptr = sys_alloc(1200);
+    let ml: u32 = txt_len_cstr(dst);
+    sys_copy(mark, 0, dst, 0, ml);
+    let mo: u32 = sys_append_lit(mark, ml, "/lompi-fetch-complete");
+    store8(mark, mo, 0 as u8);
+    // 写 0 字节 = 建个空文件。空缓冲用 `sys_alloc(1)` 而不是 `0 as ptr`: **参考实现不许
+    // 整型字面量直接当 ptr 实参**(自举那边放行) —— 两实现不一致的地方,
+    // `test_reference_implementation_accepts_lompi` 就是钉这个的。
+    let nul: ptr = sys_alloc(1);
+    sys_write_file(mark, nul, 0);
     return 1;
 }
 
@@ -1881,6 +1914,19 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
         cli_die("no registry configured: pass --registry <url> or put a lompi.conf next to lompi.exe");
         return 1;
     }
+    // 带外的索引哈希 (issue #306)。只收 64 个字符 —— 形状不对就当场拒, 别让它变成一个
+    // 永远比不上的钉子, 看起来却像"已经在验来源"。
+    // `cfg_flag_arg` 给的是 argv 句柄不是指针: 取值要走 `sys_arg_len` / `sys_arg_off`。
+    let pinav: u64 = cfg_flag_arg(buf, m, "--registry-sha256");
+    let pin: ptr = 0 as ptr;
+    if pinav != 0 {
+        if sys_arg_len(pinav) != 64 {
+            return cli_die("--registry-sha256 wants 64 hex characters");
+        }
+        pin = sys_alloc(72);
+        sys_copy(pin, 0, buf, sys_arg_off(pinav), 64);
+        store8(pin, 64, 0 as u8);
+    }
     cfg_root(exed, scr, root, 1024);
     cfg_join(root, "cache", cache, 1024);
     cfg_slug(reg, n, slug, 256);
@@ -1904,6 +1950,7 @@ fn cmd_fetch(ws: ptr, buf: ptr, m: u32) -> u32 {
         txt_store64(req, NETREQ_SCR, scr as u64);
         txt_store64(req, NETREQ_HEAD, head as u64);
         txt_store64(req, NETREQ_BASE, base as u64);
+        txt_store64(req, NETREQ_PIN, pin as u64);
         txt_store32(req, NETREQ_A, txt_load32(ipa, 0));
         txt_store32(req, NETREQ_B, txt_load32(ipb, 0));
         txt_store32(req, NETREQ_C, txt_load32(ipc, 0));
