@@ -959,7 +959,7 @@
   },
   {
    "path": "tools/lvm_test.py",
-   "sha256": "519470bce42cbfe4a9f4ce68f2551369f703cf8f22b4c4abf21a6f9f0147b02f"
+   "sha256": "91eeaf5f5215e38b91f62e363431be6eb1c8a27a64f0f040564ca50c5190f8d0"
   },
   {
    "path": "tools/lvm_twin_test.py",
@@ -2295,7 +2295,7 @@
   },
   {
    "path": "docs/232-loment-vm.md",
-   "sha256": "6b6648e1fe4c2674c21817b53421fae1864421c5e304f438358541c14a76862a"
+   "sha256": "2a9a71f13f0521e0dae3b7e54573730270a0297d65f1836dc4a4297fd7dc8397"
   },
   {
    "path": "docs/234-loment-net-complete.md",
