@@ -176,6 +176,18 @@ fn chk_ty_is_int(v: u32) -> u32 {
 // "未知就报"又会让任何我算不出类型的数组变成假阳性。见 docs/150 下一段那节。
 const TY_ARRAY: u32 = 3;
 const TY_SLICE: u32 = 4;
+// ---- 函数指针（M85, `docs/246`）。一格只有两个分量，所以实参表编成**链**：
+//   TY_FN  一格 = (返回类型, 实参链)      —— 链头 0 = 没有实参
+//   TY_ARGS 一格 = (这一个实参的类型, 尾巴) —— 尾巴 0 = 到头了
+// `chk_ty_eq` 递归着比就够 —— 与参考实现比"归一化过的类型串"等价（那边
+// `_fn_ty_make` 用 `,` 连接、不留空格，所以两边都**对空格不敏感**）。
+const TY_FN: u32 = 5;
+const TY_ARGS: u32 = 6;
+
+//: 实参链是**从左往右"往头上挂"**建的：算到第 k 个就把第 k 个挂到链头。于是链里的
+//: 顺序是**倒的**，而**这不影响相等** —— 两边都倒，倒过来比仍然逐位对应，`fn(A,B)` 与
+//: `fn(B,A)` 照样不等。好处是**不需要临时数组**：嵌套 `fn(fn(u64)->u64)->u64` 那种
+//: 也不会踩到谁（临时数组会被内层那一趟覆盖）。
 
 fn chk_ty_new(t: ptr, kind: u32, a: u32, b: u32) -> u32 {
     let n: u32 = load32(t, 0);
@@ -238,7 +250,63 @@ fn chk_ty_eq(t: ptr, a: u32, b: u32) -> u32 {
         }
         return chk_ty_eq(t, chk_ty_a(t, a), chk_ty_a(t, b));
     }
+    if k == TY_FN {
+        // 返回类型相同, 且实参链相同 (链尾 0 与 0 相等, 所以 "都没有实参" 也对得上)。
+        if chk_ty_eq(t, chk_ty_a(t, a), chk_ty_a(t, b)) == 0 {
+            return 0;
+        }
+        return chk_ty_eq(t, chk_ty_b(t, a), chk_ty_b(t, b));
+    }
+    if k == TY_ARGS {
+        if chk_ty_eq(t, chk_ty_a(t, a), chk_ty_a(t, b)) == 0 {
+            return 0;
+        }
+        return chk_ty_eq(t, chk_ty_b(t, a), chk_ty_b(t, b));
+    }
     return 0;   // 基类型/具名类型的编码本身就是身份, 到不了这里
+}
+
+/// 实参链的长度。
+fn chk_chain_len(tyt: ptr, head: u32) -> u32 {
+    let k: u32 = 0;
+    let cur: u32 = head;
+    while cur != 0 {
+        k = k + 1;
+        cur = chk_ty_b(tyt, cur);
+    }
+    return k;
+}
+
+/// 一个**字面量**指的函数的 `fn(...)` 类型（M85, `docs/246`）。
+/// 参考实现读 `funcs[name].params`；这里**按需重扫** —— 符号表的 `aux`（+16）就是形参表
+/// 那个 `(`，返回类型在 +12（aux 的语义按 kind 走，那一格上面的注释写着）。查不到 -> 0。
+fn chk_fn_ty_of_lit(src: ptr, t: ptr, syms: ptr, n: u32, tyt: ptr, lit_tok: u32) -> u32 {
+    let slot: u32 = chk_lookup_lit_name(src, t, syms, n, lit_tok);
+    if slot == 0 {
+        return 0;
+    }
+    let s0: u32 = slot - 1;
+    let lp: u32 = load32(syms, s0 * 20 + 16);
+    return chk_ty_new(tyt, TY_FN, load32(syms, s0 * 20 + 12),
+                      chk_arg_chain(src, t, syms, n, tyt, lp));
+}
+
+/// 形参表 -> 实参类型**链**（M85, `docs/246`）。`lp` 指向 `(`。
+/// 没有形参 -> 0（链头 0 就是"到头了"，与尾巴同一个记号）。
+fn chk_arg_chain(src: ptr, t: ptr, s: ptr, n: u32, tyt: ptr, lp: u32) -> u32 {
+    let rp: u32 = chk_match_paren(src, t, lp);
+    if rp <= lp {
+        return 0;
+    }
+    let head: u32 = 0;
+    let i: u32 = lp + 1;
+    while i < rp {
+        let e: u32 = chk_find_at(src, t, i, rp, ",");        // 深度 0 的下一个逗号
+        let ty: u32 = chk_ty_range(src, t, s, n, tyt, i, e);
+        head = chk_ty_new(tyt, TY_ARGS, ty, head);           // 往链头挂 (见上面那段说明)
+        i = e + 1;
+    }
+    return head;
 }
 
 /// 从**类型 token 区间**建类型 (声明处/`as` 目标/字段/形参都用它)。
@@ -253,6 +321,17 @@ fn chk_ty_range(src: ptr, t: ptr, s: ptr, n: u32, tyt: ptr, lo: u32, hi: u32) ->
     if chk_tok_is(src, t, i, "mut") {
         mut = 1;
         i = i + 1;
+    }
+    // 函数指针 `fn(A, B) -> C`（M85, `docs/246`）。**只看 `fn` 后面是不是 `(`** ——
+    // 函数定义是 `fn 名字(`，类型位置上的 `fn` 只可能是这一种。
+    if mut == 0 && chk_tok_is(src, t, i, "fn") && chk_tok_is(src, t, i + 1, "(") {
+        let rp: u32 = chk_match_paren(src, t, i + 1);
+        if rp + 3 > hi || !chk_tok_is(src, t, rp + 1, "-") || !chk_tok_is(src, t, rp + 2, ">") {
+            return 0;                        // 形状不对: 记未知 (与 `Name<...>` 同一条路)
+        }
+        let ret: u32 = chk_ty_range(src, t, s, n, tyt, rp + 3, hi);
+        let args: u32 = chk_arg_chain(src, t, s, n, tyt, i + 1);
+        return chk_ty_new(tyt, TY_FN, ret, args);
     }
     if chk_tok_is(src, t, i, "[") {
         let close: u32 = chk_match_bracket(src, t, i);
@@ -286,7 +365,13 @@ fn chk_ty_range_is_int(src: ptr, t: ptr, s: ptr, n: u32, tyt: ptr, lo: u32, hi: 
 
 /// 内建函数的返回类型编码 (镜像 lomentc.BUILTINS 的第二项); 非内建 -> 0。
 /// 表写错 = 语料上立刻出假阳性 (这是拿语料测试当护栏的地方之一)。
+///
+/// **`fn_addr` 不在这张表里** —— 它的返回类型**随实参而变**（就是被指名那个函数的
+/// `fn(...)` 类型，`docs/246`），所以记 0 = 未知，由调用点 (`chk_tex_atom_call`) 算。
 fn chk_builtin_ret(src: ptr, t: ptr, i: u32) -> u32 {
+    if chk_tok_is(src, t, i, "fn_addr") {
+        return 0;
+    }
     if chk_tok_is(src, t, i, "str_eq") {
         return (1 << TY_KIND_SHIFT) + 9;          // bool
     }
@@ -517,7 +602,7 @@ fn is_base_type(src: ptr, t: ptr, i: u32) -> bool {
 
 fn is_builtin(src: ptr, t: ptr, i: u32) -> bool {
     let k: u32 = 0;
-    let names: str = "str_len str_eq str_concat str_byte slice_len panic alloc free load8 store8 atomic_add inb outb get_bits set_bits str_ptr ptr_add ptr_sub syscall4 syscall6 syscall7 thread_spawn";
+    let names: str = "str_len str_eq str_concat str_byte slice_len panic alloc free load8 store8 atomic_add inb outb get_bits set_bits str_ptr ptr_add ptr_sub syscall4 syscall6 syscall7 thread_spawn fn_addr";
     // 逐词比较 (内建名用空格分隔的常量表); 新增内建要同步这里, 否则调用点报假 E-UNKNOWN-FN
     let off: u32 = 0;
     while off < str_len(names) {
@@ -1053,6 +1138,9 @@ fn chk_builtin_arity(src: ptr, t: ptr, i: u32) -> u32 {
     }
     if chk_tok_is(src, t, i, "thread_spawn") {
         return 4;                                 // M84: 入口名、栈顶、实参、完成通知地址
+    }
+    if chk_tok_is(src, t, i, "fn_addr") {
+        return 1;                                 // M85: 只要那个名字 (docs/246)
     }
     return 999999;
 }
@@ -1794,7 +1882,58 @@ fn chk_tex_atom_call(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 }
             }
         }
+        // M85 (docs/246): `fn_addr("add")` —— 两条检查（是字面量、名字合法且**本单元里
+        // 写着实现**），返回类型**算出来**（就是被指名那个函数的 `fn(...)`）。
+        if chk_tok_is(src, t, lo, "fn_addr") {
+            if got < 1 {
+                return 0;                                     // 元数不对, 上面已经报过
+            }
+            let er4: u64 = chk_arr_elem(src, t, lo + 1, 0);
+            let t4: u32 = (er4 / 4294967296) as u32;
+            if er4 == 0 {
+                return 0;
+            }
+            if chk_tok_kind(t, t4) != 2 {
+                chk_pub(src, t, oc, p, E_TMISMATCH, lo);       // 不是字符串字面量
+                return 0;
+            }
+            let ty4: u32 = chk_fn_ty_of_lit(src, t, syms, n, tyt, t4);
+            if ty4 == 0 {
+                chk_pub(src, t, oc, p, E_FN, lo);              // 未定义的函数
+            }
+            return ty4;
+        }
         return chk_builtin_ret(src, t, lo);
+    }
+    // 间接调用 `p(a, b)`（M85, docs/246）: callee 是一个 `fn(...)` 类型的**变量**。
+    // 分派排在"符号表里找函数"**之前** —— 一个 `fn(...)` 类型的变量不会是顶层函数名
+    // (类型不同名), 而反过来, 顶层函数名不会同时是一个局部变量。
+    let cty: u32 = chk_tex(src, t, syms, n, env, envc,
+                           chk_lh(lo, lo + 1), tyt, p, oc);
+    if cty != 0 && chk_ty_kind(cty) == TY_FN {
+        let fag: u32 = chk_ty_b(tyt, cty);                    // 实参链
+        let cnt: u32 = chk_chain_len(tyt, fag);
+        if cnt != got {
+            chk_pub(src, t, oc, p, E_ARITY, lo);
+        } else {
+            let k4: u32 = 0;
+            let cur: u32 = fag;
+            while k4 < got && cur != 0 {
+                let er5: u64 = chk_arr_elem(src, t, lo + 1, k4);
+                let at5: u32 = chk_tex(src, t, syms, n, env, envc, er5, tyt, p, oc);
+                let wt5: u32 = chk_ty_a(tyt, cur);
+                if at5 == 0 {
+                    if chk_ty_is_int(wt5) == 0 {
+                        chk_pub(src, t, oc, p, E_TMISMATCH, lo);
+                    }
+                } else if chk_ty_eq(tyt, at5, wt5) == 0 {
+                    chk_pub(src, t, oc, p, E_TMISMATCH, lo);
+                }
+                cur = chk_ty_b(tyt, cur);
+                k4 = k4 + 1;
+            }
+        }
+        return chk_ty_a(tyt, cty);                            // 返回类型
     }
     let slot: u32 = chk_lookup_slot(src, t, syms, n, lo);
     if slot == 0 {
@@ -2171,7 +2310,7 @@ fn chk_builtin_arg(src: ptr, t: ptr, i: u32, k: u32) -> u32 {
     if k == 0 {
         if chk_tok_is(src, t, i, "str_len") || chk_tok_is(src, t, i, "str_eq")
                 || chk_tok_is(src, t, i, "str_concat") || chk_tok_is(src, t, i, "str_byte")
-                || chk_tok_is(src, t, i, "str_ptr")
+                || chk_tok_is(src, t, i, "str_ptr") || chk_tok_is(src, t, i, "fn_addr")
                 || chk_tok_is(src, t, i, "thread_spawn") {
             return (1 << TY_KIND_SHIFT) + 10;          // str
         }
