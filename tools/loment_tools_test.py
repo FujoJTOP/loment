@@ -1250,6 +1250,141 @@ def test_every_criterion_is_registered():
     print("      每个 def test_* 都有人跑（进了 TESTS 或挂 @test）")
 
 
+# ------------------------------------------------- 门禁 workflow 自己的形状（`#371`）
+
+def _gate_workflow() -> str:
+    return (ROOT / ".github" / "workflows" / "gate.yml").read_text(encoding="utf-8")
+
+
+def _job_block(wf: str, job: str) -> str:
+    """取 `jobs:` 下面那个 job 的整段（到下一个同缩进的 job 名为止）。
+
+    **为什么不用 YAML 解析**：`gate.yml` 是这个仓唯一需要被读的 YAML，而 PyYAML
+    不在 CI 镜像的包名单里 —— 引一个依赖只为读一个文件不值当（`ci-image.yml` 的
+    包名单有"不加"的纪律）。这里的形状是**固定**的（job 名两格缩进，键四格），
+    正则足够且看得见自己在断言什么。
+    """
+    m = re.search(rf"^  {re.escape(job)}:\n(.*?)(?=^  \S|\Z)", wf, re.M | re.S)
+    assert m, f"gate.yml 里找不到 job `{job}`"
+    return m.group(0)
+
+
+@test
+def test_gate_workflow_shard_shape_matches_ci():
+    """分片那个数**写在三处**：`GATE_SHARDS`、矩阵每条的 `total`、`ci.py` 现算的片数。
+
+    文件头写着"改分片形状要同时改 `ci.py` 和这里" —— 而此前**没有任何东西**钉住它。
+    这个数一偏，分片划分就变、并集不再是 `STATIC_CHECKS`，`static` 那步的条数校验
+    会红 —— 但那是**跑完之后**才发现。三处对齐让它当场红。
+
+    片 1 归 `static-exclusive`（独占那一片串在其余片前面），所以矩阵该是 `2..N`；
+    这里连"少一片"也一起钉 —— 少的那一片就是**从此不跑**的那几条判据。
+    """
+    import ci
+
+    wf = _gate_workflow()
+    m = re.search(r'^  GATE_SHARDS: "(\d+)"', wf, re.M)
+    assert m, "gate.yml 里找不到 `GATE_SHARDS`"
+    n = int(m.group(1))
+
+    trips = re.findall(r"-\s*\{\s*shard:\s*(\d+),\s*total:\s*(\d+)\s*\}", wf)
+    assert trips, "矩阵 `include:` 一条都没有 —— 分片那几条判据从此不跑"
+    totals = {int(t) for _, t in trips}
+    assert totals == {n}, f"矩阵里的 total {sorted(totals)} 与 GATE_SHARDS={n} 不一致"
+    ids = sorted(int(s) for s, _ in trips)
+    assert ids == list(range(2, n + 1)), (
+        f"矩阵该是 2..{n}（片 1 归 static-exclusive），实际 {ids}")
+
+    excl = _job_block(wf, "static-exclusive")
+    assert '--shard "1/$GATE_SHARDS"' in excl, "`static-exclusive` 没在跑片 1"
+
+    plan = ci.shards(n)
+    assert len(plan) == n, f"`ci.shards({n})` 切出 {len(plan)} 片，与 GATE_SHARDS={n} 不符"
+    flat = [x for s in plan for x in s]
+    assert sorted(flat) == sorted(ci.STATIC_CHECKS), "分片不是 STATIC_CHECKS 的一个划分"
+    print(f"      分片形状三处一致: GATE_SHARDS={n}, 矩阵 2..{n}, ci.shards({n}) 切出 {n} 片")
+
+
+@test
+def test_gate_workflow_keeps_the_required_check_name():
+    """`static` 那个 job 的 `name:` **就是**保护规则里挂着的必需检查名。
+
+    文件头第三条边界：名字一没，保护规则就永远等不到它，PR 会**全部**卡住
+    （不是松开）。这条钉两件事：它还是那个名字，而且**只有一个** job 叫这个名字
+    —— 两个同名 job 会让"必需检查"的归属变成看谁先报。
+
+    `static-manual` 特意起了别的名字（它是手工诊断，不该顶替 PR 上那道门），
+    这里把那条也钉住。
+    """
+    wf = _gate_workflow()
+    req = "ci.py --static-only"
+    names = re.findall(r"^    name: (.+)$", wf, re.M)
+    assert names.count(req) == 1, (
+        f"`{req}` 在 job 名里出现 {names.count(req)} 次（应为 1 次）—— {names}")
+    assert f"    name: {req}" in _job_block(wf, "static"), (
+        f"job `static` 的 name 不再是 `{req}`：保护规则等的就是这个字符串")
+    print(f"      必需检查名 `{req}` 仍由唯一一个 job 扛着")
+
+
+@test
+def test_gate_workflow_aggregation_fails_closed():
+    """聚合那两步里各有一条"不许静默变绿"，以及两处"基线不见了就判失败"。
+
+    堵的是两个**静默通过**的形状：
+
+    * 少一片就少几条判据，而门禁照样绿 —— 所以聚合要**数**条数并对不上就红；
+    * `needs` 的默认行为是"依赖失败就**跳过**"，而跳过不算失败 —— 保护规则会一直
+      等下去。所以那里必须显式看 `needs.*.result`。
+
+    以及基线文件**不见了**时不能当成"没有基线"放行：两个跑片的 job 各有一处守卫。
+    """
+    wf = _gate_workflow()
+    agg = _job_block(wf, "static")
+    assert "len(ci.STATIC_CHECKS)" in agg, "聚合那步没拿 STATIC_CHECKS 的条数当基准"
+    assert 'if [ "$got" != "$want" ]' in agg, "聚合那步没在条数对不上时判失败"
+    assert "needs.static-exclusive.result != 'success'" in agg, (
+        "少了分片红就是红那一步 —— 依赖失败会跳过，而跳过不算失败，"
+        "保护规则会一直等")
+    assert "needs.static-shard.result != 'success'" in agg, "同上（另一片）"
+
+    guard = wf.count("基线文件 .github/gate-baseline.txt 不见了")
+    assert guard == 2, (
+        f"基线缺失的守卫有 {guard} 处，应为 2（独占片 / 分片各一处）—— "
+        f"少了就是那一类 job 会把'基线没了'当成'没有基线'放行")
+
+    # 基线棘轮（**只许变短**）本身也要有人钉 —— 否则它自己会被悄悄删掉
+    assert "基线只许变短" in agg, (
+        "少了基线棘轮那一步 —— 往基线里**加**一条就没人拦了，"
+        "而那条路等于把一条新红登记成合法")
+    assert "取对照面失败" in agg and "读不到 .github/gate-baseline.txt" in agg, (
+        "基线棘轮取不到对照面时必须**判失败**（fail closed）—— 静默跳过的棘轮"
+        "会变成一句永远不生效的谎话")
+    assert "comm -13 old.txt new.txt" in agg, "棘轮没在算'新增'（comm -13 那一列）"
+    print("      聚合的两条防静默 + 两处基线缺失守卫 + 基线棘轮都在")
+
+
+@test
+def test_gate_container_image_tag_matches_the_recipe():
+    """镜像 tag 写在两处：`gate.yml` 各 job 的 `container.image` 与 `ci-image.yml` 的 `TAG`。
+
+    文件头第四条边界："改镜像要同时抬这两处 —— 抬 tag 是让各 job 用上新镜像的
+    **唯一**动作"。两处不一致的后果是**静默**的：构建推的是新 tag，各 job 拉的还是
+    旧镜像 —— 看起来改了，其实没改（而"看起来配上了、其实没配上"正是最费时间的一类）。
+
+    没拉镜像的那个 job（`static-exclusive`）刻意留在 runner 上，见它自己那段注释；
+    所以这里只比**出现过的** tag 集合。
+    """
+    tags = re.findall(r"image:\s*ghcr\.io/[^:\s]+:(\S+)", _gate_workflow())
+    assert tags, "gate.yml 里一个 `container.image` 都没有"
+    recipe = (ROOT / ".github" / "workflows" / "ci-image.yml").read_text(encoding="utf-8")
+    m = re.search(r'^  TAG: "([^"]+)"', recipe, re.M)
+    assert m, "ci-image.yml 里找不到 `TAG`"
+    assert set(tags) == {m.group(1)}, (
+        f"gate.yml 用 {sorted(set(tags))}，ci-image.yml 构建 {m.group(1)} —— "
+        f"镜像抬了 tag 而各 job 没跟，是静默的")
+    print(f"      镜像 tag 两处一致: {m.group(1)}")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_tools_test")
 
