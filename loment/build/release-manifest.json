@@ -843,7 +843,7 @@
   },
   {
    "path": "tools/loment_p8_test.py",
-   "sha256": "f06fa94f7ee8e2d94ad160b7e32eba99b49b63bd9d6f2ca0abacfd2f33606004"
+   "sha256": "bcc8ef5909f1b060ec3bacd9ced09fc0e20c3c5f34fe472fc707ff2068fbbb45"
   },
   {
    "path": "tools/loment_p9_test.py",

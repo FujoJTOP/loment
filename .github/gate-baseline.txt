@@ -23,6 +23,10 @@
 # 这四条判据过去**从来没在 runner 上执行过**，所以它们红不红没人知道。加进来是**一个主张**，
 # 理由逐条写在下面；其中两条的真缺陷各开了 issue（`#399` / `#400`），修完就在同一个 PR 里删掉。
 #
+# 2026-10-15 删一条（**只许变短**）：`loment_p8_test` —— `#409` 已在 `main` 上修好
+# （PR `#411`：把 `bin-literal` 登记进判据自己的 `PARSE_LEVEL`，与 `#409` 的诊断一致），
+# 合进 `main` 之后它在本机 29/29，所以那一行连同它下面的理由一起删掉。
+#
 # 格式：每行一个检查名（`:: [static] <名字> … FAIL` 里的那个名字）；`#` 起头是注释。
 fuai_contract_check          # 环境：缺 LinuxFUAI/ 姊妹检出
 lom_audit                    # 环境：同上（要读对方的 C 头）
@@ -34,6 +38,3 @@ loment_doc_test              # 仓库：#399 —— 自举 lomdoc 比参考少 5
 loment_eol_test              # 仓库：#400 —— 退出码不一致（本机 Windows 上也同样红）
 loment_cli_test              # 环境：判据在 /tmp 造一个"python 侧安装"再跑它，runner 上那份没造出来
 loment_genesis_test          # 环境：那条判据有意把 PATH 削到 /usr/bin:/bin，前提是树里有 genesis 工件；runner 上没有
-loment_p8_test               # 仓库：#409 —— `bin-literal` 规则负例被自举驱动放行（那条判据门在
-                             #   `_wsl() and _clang()` 上，于是它在 runner 上从来没跑过；本机 Windows
-                             #   上也红）。`#371` 把这一族翻成原生跑之后它现形
