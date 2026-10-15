@@ -27,7 +27,7 @@
 module surface_data
 choose runtime
 
-pub fn n_codes() -> u32 { return 27; }
+pub fn n_codes() -> u32 { return 29; }
 
 /// 报错器自己的版本（`lomenterr version` 打的就是它）。真源：`tools/loment_release.py`。
 pub fn lomenterr_version() -> str { return "0.1.2"; }
@@ -88,6 +88,8 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 53 { return "命令体与声明对不上"; }
     if k == 54 { return "control flow: this function may fall off the end of its body"; }
     if k == 55 { return "控制流：可能从末尾掉出去"; }
+    if k == 57 { return "越界：字面量下标越过定长数组的界"; }
+    if k == 59 { return "用完再放：这块内存已经被 `free`，不能再用"; }
     return "";
 }
 
@@ -598,6 +600,8 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 25 { return 3; }
     if c == 26 { return 4; }
     if c == 27 { return 3; }
+    if c == 28 { return 0; }
+    if c == 29 { return 0; }
     return 0;
 }
 
