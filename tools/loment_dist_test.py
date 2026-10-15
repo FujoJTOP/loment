@@ -44,6 +44,13 @@ import lomentc  # noqa: E402
 _T = f"/tmp/loment-{os.getpid()}-"
 
 ROOT = loment_dist.ROOT
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 OUT = loment_dist.OUT
 IT_OUT = loment_dist.STAGE / "it-out"   # 测试专用产物目录 (不碰 loment/dist)
 VER = loment_dist.VER
@@ -65,7 +72,7 @@ def wsl(*args: str, timeout: int = 300) -> subprocess.CompletedProcess:
     `install.sh 端到端` 那条）。所以这里按平台分流，**不是跳过** —— 换到 Linux 之后这些
     判据反而跑的是原生那条路（在 Linux 上验 `install.sh` 正是该做的事）。
     """
-    argv = list(args) if sys.platform != "win32" else ["wsl", "-e", *args]
+    argv = list(args) if sys.platform != "win32" else [*_WSLCMD, *args]
     return subprocess.run(argv, capture_output=True, text=True,
                           shell=False, encoding="utf-8", errors="replace", timeout=timeout)
 
