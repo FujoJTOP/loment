@@ -787,7 +787,7 @@
   },
   {
    "path": "tools/loment_publish.py",
-   "sha256": "71b2a22a21081bd7314eb0877bd734816cc4108645dc9124be665280e83ca16b"
+   "sha256": "438926202bfeb76a07121fda59178b5bbe9dd4c93bd91999e964f10a15cbe6b2"
   },
   {
    "path": "tools/lompicheck_test.py",
@@ -875,7 +875,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "90bacbdf3ecf877bfb2a16ca545acaf9c91d5b3b6a9f2c303dcddac313610c1a"
+   "sha256": "b342f7b5822bf8136324dbca377fcab8c271f574b41116657c041ed905e47cb3"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -955,7 +955,7 @@
   },
   {
    "path": "tools/lvm.py",
-   "sha256": "459d5a3e4f44e03c3ed09b9bcc23e2caa8da0c993ba87a716196e2d44daa3b57"
+   "sha256": "dc4bd03ce5e30224dadd0b30df9c838a29a9de26613c6397d3eae9c86b54abe3"
   },
   {
    "path": "tools/lvm_test.py",
@@ -964,6 +964,10 @@
   {
    "path": "tools/lvm_twin_test.py",
    "sha256": "d03327dedf966996d79c740411fb8c6d95d7bdf0e1eb615ad76ee38561b026c2"
+  },
+  {
+   "path": "tools/lvm_profile_test.py",
+   "sha256": "fed15079a983ee968697e493fada2d59847ed77c4b77dcabbf6e9f514aae9bbe"
   },
   {
    "path": "tools/loment_net_test.py",
@@ -1303,7 +1307,7 @@
   },
   {
    "path": "loment/tools/lomrel.lomt",
-   "sha256": "758bbcd3cc1028fcb7a87e718f1b151c528a22c94ac224e945f6188a7aa25967"
+   "sha256": "4db9bf6d8b917fe0e53ceaa76dcb1ed65f2c260e56bf0dc823b80963c7096bd6"
   },
   {
    "path": "loment/tools/lomstatus.lomt",
@@ -2342,6 +2346,10 @@
    "sha256": "52fb88d1a8c23a99fff44846b68ef73ecbd71ffe378277c99c2743bbc3e11ff4"
   },
   {
+   "path": "docs/246-lvm-t1-profile.md",
+   "sha256": "97f3d620205bc2ccef3e4da4408b606a9c5b6b378a13e6a2ab2c0921e7f1b4e9"
+  },
+  {
    "path": "docs/manual/index.md",
    "sha256": "6729c70e735da1b51fb628fc9ccd33de3fc9b7eafd2c65ff8540ce3a837da0e0"
   },
@@ -2567,7 +2575,7 @@
   },
   {
    "path": "tools/loment_release.py",
-   "sha256": "bd6a1af38f63a71ec789de55dfa13c1166e614fb071cbd3576b991f91d7eb513"
+   "sha256": "aea395cbaaad2ad8eb72575802b74431fb15ddb9f3aba54ef331646bc7647f11"
   },
   {
    "path": "tools/loment_status.py",
