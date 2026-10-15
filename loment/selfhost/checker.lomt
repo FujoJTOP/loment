@@ -69,6 +69,12 @@ const E_DANGLE: u32 = 12;  // E012 悬垂借用 (返回局部变量的借用)
 const E_MODE: u32 = 22;    // E022 项目模式 `choose` 用法不对 (docs/143 §3.2)
 const E_PARSE: u32 = 19;   // E019 期望表达式 —— 参考实现 `parse_primary` 的口径 (issue #49)
 const E_DEEP: u32 = 23;    // E023 源码太深 —— 嵌套超过 64 层 (issue #44)
+
+/// 拖运行期的构造**有几个** —— 检查器数好放这儿，驱动取来拼报文的"另有 N 处"那半句
+/// （与参考实现 `_runtime_sites` 的 `len(_sites) - 1` 同口径）。见 issue #321。
+/// 槽位在 tyt 块的**最后一个 16 字节**里：`[4096..4100)` 是诊断偏移格（`chk_pub` 专用），
+/// `[4100..4112)` 空着 —— `chk_arena_tyt() = 95856`、下一块 99968，合计 4112 字节。
+pub const RT_N_SITES: u32 = 4100;
 // E005 = 使用了 excluded 的空间。**与 E_CAP(4) 分开**：参考实现的 `loment_diag` 按消息
 // 分码 —— "能力…域/重复" 归 E004、"使用了 excluded 的空间" 归 E005。原先那两条分支
 // 都发 E_CAP，而参考侧同一条消息归类成 5，码集对不上（`loment_rule_parity` 里没有探针，
@@ -3423,17 +3429,20 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     if eff_rt == 2 {
         let jr: u32 = 0;
         let hit: u32 = 4294967295;
-        let found: u32 = 0;
+        let nsites: u32 = 0;
         while chk_tok_kind(t, jr) != 4 {
-            if found == 0 {
-                if chk_rt_site(src, t, jr) == 1 {
+            if chk_rt_site(src, t, jr) == 1 {
+                if nsites == 0 {
                     hit = jr;
-                    found = 1;
                 }
+                nsites = nsites + 1;
             }
             jr = jr + 1;
         }
-        if found == 1 {
+        // 报的还是**第一个**站点（与参考取首项 `_sites[0]` 同判），但**总数**要交给驱动 ——
+        // 报文的"这一类构造本单元另有 N 处"用它（issue #321）。
+        store32(tyt, RT_N_SITES, nsites);
+        if nsites > 0 {
             o = sym_pub(src, t, out, o, E_MODE, hit);
         }
     }
