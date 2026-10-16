@@ -111,6 +111,8 @@ GLOBS = [
     # 对照物三把不同的尺子 —— L0 字节 / 独立推出的布局 / FreeType。
     "tools/loment_lumtui_test.py",
     "tools/loment_cli_test.py",
+    # 固定容量盘点 (docs/345 那件事的"数"): 自举侧有多少个固定容量、几个越界时说不出话
+    "tools/loment_caps.py", "tools/loment_caps_test.py",
     # 报错器 (docs/182 §6/§8)。**位置与自举那份 `lomrel.lomt` 对齐** —— 两处的条目顺序
     # 就是清单的顺序, 插在不同位置会给出同集合不同顺序的两份清单 (见下面那段注解)。
     "tools/loment_err_test.py",
