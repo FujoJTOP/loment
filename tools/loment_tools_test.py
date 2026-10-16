@@ -1499,6 +1499,36 @@ def test_gate_makes_an_unnamed_skip_loud():
     print("      跳过没名字 = 判失败；有名字且登记过 = 放过")
 
 
+@test
+def test_gate_only_reports_a_stale_skip_for_a_suite_it_ran():
+    """「登记了却没跳」的 notice **只能对"这一趟跑过的套件"打**。
+
+    分片跑的时候 `results` 只是这一片的套件。若直接拿 `skips - seen` 去滤，表里所有
+    **不在这一片**的条目都会被点成"这次没跳" —— 于是那句"照 notice 把表削短"会变成
+    **把整张表删光**。实测过：合并 `#382` 之后那一轮（run 38817007229），六个分片的
+    notice 合起来正好覆盖整张 140 条的表；按它削，表会被清空而不是变短。
+
+    这里直接跑 `check_budget`：一个"这一趟没跑的套件"的条目**不许**出现在 notice 里。
+    """
+    import contextlib
+    import io
+
+    import ci
+
+    ran = ci.Result("probe_ran", True, "probe: 1/1 通过", 0.1, 0, ("p",), (), 1, False)
+    skips = {("probe_ran", "test_never_runs"),        # 这一趟跑了 → 该点它
+             ("probe_absent", "test_other")}          # 这一趟没跑 → 不许点它
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        ci.check_budget([ran], {"probe_ran": 1}, skips, in_ci=True)
+    text = out.getvalue()
+    assert "probe_ran test_never_runs" in text, (
+        f"这一趟跑过、而它没跳的条目没被点名（削表就少了依据）：{text!r}")
+    assert "probe_absent" not in text, (
+        "把**这一趟没跑**的套件的条目也点成没跳 —— 照它削表会把整张表删光")
+    print("      只点「跑了却没跳」的条目（没跑的套件不点）")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_tools_test")
 

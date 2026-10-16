@@ -467,7 +467,16 @@ def check_budget(results, floors, skips, *, in_ci: bool) -> list[str]:
                 bad.append(f"{r.name} 的 {crit}: 跳过了而没登记 —— 要么让它跑起来，要么补一行 "
                            f"`{r.name} {crit}  # 环境/仓库: 为什么它在这台机器上跑不了`")
     if in_ci:
+        # **只对"这一趟真的跑了那个套件、而它没跳"的条目打 notice。** 原先这里是
+        # `skips - seen` 直接滤，而 `seen` 只装**这一趟的结果**里的跳过 —— 分片跑的时候，
+        # 表里所有**不在这一片**的条目都会被点成"这次没跳"。后果不是噪音而是**反的**：
+        # 那句"照 notice 把表削短"会变成"把整张表删光"（实测：合并 `#382` 之后那一轮，
+        # 六个分片的 notice 合起来正好覆盖整张 140 条的表）。一条会教人做错事的提示，
+        # 与判据说谎是同一类问题。
+        ran = {r.name for r in results}
         for suite, crit in sorted(skips - seen):
+            if suite not in ran:
+                continue          # 这一片根本没跑那个套件 —— 不是"它没跳"
             print(f"::notice::{ROOT_SKIPS} 里的 {suite} {crit} 这次**没跳** —— 修好了就删掉它")
     return bad
 
