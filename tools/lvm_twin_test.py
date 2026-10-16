@@ -34,6 +34,13 @@ import loment_elf_test as ELF  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
+
 #: 语料**复用 `loment_elf_test.CORPUS`，不另抄一份** —— 抄了必然漂。
 #: 其中 `tools/lvm.py` 自己跑不了的那几份（`lvm.LVM_KNOWN_GAPS`：要 257/63/39 号
 #: 系统调用）在这里**自动出局** —— 参考都跑不了，就没有"两边一致"可谈。
@@ -88,7 +95,7 @@ def _mirror() -> Path:
         binn = f"/tmp/lvm_s1_{os.getpid()}.bin"
         # 二进制先拷进 WSL 自己的文件系统：`/mnt/d` 上就地覆盖后 WSL 会**拿旧的**，
         # 症状是"改了源码但跑的是上一版"，而且不报任何错。
-        rr = _build(["wsl", "-e", "bash", "-lc",
+        rr = _build([*_WSLCMD, "bash", "-lc",
                      f"rm -f {binn}; cp {ELF._wsl_path(s1)} {binn}; chmod +x {binn}; "
                      f"cd {ELF._wsl_path(ROOT)} && timeout 900 {binn} loment/tools/lvm.lomt"])
     else:
@@ -107,31 +114,60 @@ def _mirror() -> Path:
     return mir
 
 
-def _run_mirror(mir: Path, ll: Path, timeout: int = 180) -> tuple[int, bytes]:
-    """跑镜像。**Linux 上直接跑；Windows 上借 WSL**（交叉编出来的 ELF 本机跑不了）。
+def _mirror_input_path(ll: Path) -> str:
+    """镜像**看到的**输入路径 —— 与 `_run_mirror` 给它的那个实参**必须是同一个字符串**。
+
+    这不是照抄一遍：`docs/243` §3.4 之下，这个字符串就是**被解释程序的 argv[0]**
+    （镜像把它当"程序自己的名字"合成进 `/proc/self/cmdline`）。所以参考那侧也得**用
+    这个名字**跑 —— 否则两边量到的根本不是同一个输入。
+    """
+    if sys.platform != "win32":
+        return str(ll)
+    return f"/tmp/lvm_twin_{os.getpid()}.ll"
+
+
+def _run_mirror(mir: Path, ll: Path, prof: Path | None = None,
+                timeout: int = 180) -> tuple[int, bytes, bytes]:
+    """跑镜像 -> `(退出码, stdout 字节, 剖面字节)`。**Linux 上直接跑；Windows 上借 WSL**。
+
+    给了 `prof` 就把它作为第二个实参传进去（T1，`docs/247`），并把**剖面**也要回来 ——
+    判据 E 比的就是那一段字节。
 
     ⚠ 两边都先把**二进制与输入**拷进自己的临时区：`/mnt/d` 上就地覆盖后 WSL 会**拿旧的**
     （drvfs 有缓存），症状是"改了源码但跑的是上一版"，而且**不报任何错**。
+
+    ⚠ 递给镜像的那个输入路径**就是被解释程序的 argv[0]**（`docs/243` §3.4），所以它与
+    `_mirror_input_path` **必须一致** —— 改了这里那句 `{tag}.ll` 就要改那边。
     """
     if sys.platform != "win32":
-        r = subprocess.run([str(mir), str(ll)], capture_output=True, timeout=timeout, shell=False)
-        return r.returncode, r.stdout
+        args = [str(mir), str(ll)] + ([str(prof)] if prof is not None else [])
+        r = subprocess.run(args, capture_output=True, timeout=timeout, shell=False)
+        p = prof.read_bytes() if prof is not None and prof.exists() else b""
+        return r.returncode, r.stdout, p
     tag = f"/tmp/lvm_twin_{os.getpid()}"
     outp = Path(tempfile.gettempdir()) / "lvm_twin_out.bin"
-    script = (f"rm -f {tag}.bin {tag}.ll {tag}.out; "
+    pout = Path(tempfile.gettempdir()) / "lvm_twin_prof.bin"
+    arg2 = f"{tag}.prof" if prof is not None else ""
+    script = (f"rm -f {tag}.bin {tag}.ll {tag}.out {tag}.prof; "
               f"cp {ELF._wsl_path(mir)} {tag}.bin && cp {ELF._wsl_path(ll)} {tag}.ll && "
               f"chmod +x {tag}.bin && cd /tmp && "
-              f"timeout {timeout} {tag}.bin {tag}.ll > {tag}.out 2>/dev/null; echo -n $?")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+              f"timeout {timeout} {tag}.bin {tag}.ll {arg2} > {tag}.out 2>/dev/null; echo -n $?")
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                        capture_output=True, timeout=timeout + 180, shell=False)
-    got = _build(["wsl", "-e", "bash", "-lc", f"base64 -w0 {tag}.out"])
+    got = _build([*_WSLCMD, "bash", "-lc", f"base64 -w0 {tag}.out"])
     import base64  # noqa: PLC0415
     outp.write_bytes(base64.b64decode(got.stdout))
+    p = b""
+    if prof is not None:
+        g2 = _build([*_WSLCMD, "bash", "-lc", f"base64 -w0 {tag}.prof 2>/dev/null || true"])
+        if g2.stdout.strip():
+            p = base64.b64decode(g2.stdout)
+            pout.write_bytes(p)
     try:
         rc = int(r.stdout.decode().strip())
     except ValueError:
         rc = -1
-    return rc, outp.read_bytes()
+    return rc, outp.read_bytes(), p
 
 
 def _ref_ir(src: Path, td: Path) -> Path:
@@ -160,16 +196,28 @@ def test_twin_matches_reference() -> None:
             src = ROOT / rel
             ll = _ref_ir(src, td)
             buf = io.BytesIO()
+            prof = lvm.Profile()
             try:
-                ref = (lvm.run_ir(ll.read_text(encoding="utf-8"), buf), buf.getvalue())
+                ref = (lvm.run_ir(ll.read_text(encoding="utf-8"), buf, prof,
+                                  [_mirror_input_path(ll)]), buf.getvalue())
             except Exception as e:  # noqa: BLE001
                 # 参考自己跑不了 —— 出局，不是缺口（`lvm_test.py` 那张棘轮管它）。
                 out_of_reach.append((src.stem, str(e)[:56]))
                 continue
-            got = _run_mirror(mir, ll)
-            if ref != got:
+            pfile = td / f"{src.stem}.prof"
+            rc, out, pmir = _run_mirror(mir, ll, pfile)
+            if (ref[0], ref[1]) != (rc, out):
                 gap.append((src.stem, f"两边对不上: 参考 rc={ref[0]} {ref[1][:40]!r} / "
-                                      f"镜像 rc={got[0]} {got[1][:40]!r}"))
+                                      f"镜像 rc={rc} {out[:40]!r}"))
+                continue
+            # **判 E（T1）**：剖面逐字节。这是 VM 第一件**两边能直接比字节**的产物 ——
+            # 在此之前，孪生只能比行为（两边跑的是同一份 IR，中间产物没有可比性）。
+            pref = prof.text().encode("utf-8")
+            if pref != pmir:
+                a = pref.decode().split("\n")
+                b = pmir.decode("utf-8", "replace").split("\n")
+                k = next((i for i in range(max(len(a), len(b))) if a[i:i + 1] != b[i:i + 1]), -1)
+                gap.append((src.stem, f"剖面不同 @第 {k} 行: 参考 {a[k:k + 1]} / 镜像 {b[k:k + 1]}"))
                 continue
             ran.append(src.stem)
     # **棘轮**（两个方向都判）：没登记的分歧 ⇒ 红；登记了却**跑通了** ⇒ 也红。
@@ -179,7 +227,8 @@ def test_twin_matches_reference() -> None:
     for stem, why in TWIN_GAPS.items():
         assert any(s == stem for s, _ in gap), (
             f"{stem}: 登记在 TWIN_GAPS 里，但它**已经对上了** —— 请删掉那条登记（{why[:60]}…）")
-    print(f"      两边逐字节相同: {len(ran)}/{len(ran)}（{', '.join(ran)}）")
+    print(f"      两边逐字节相同（stdout + rc + **剖面**）: {len(ran)}/{len(ran)}"
+          f"（{', '.join(ran)}）")
     if gap:
         print(f"      已知缺口（棘轮，只许变短）: {', '.join(s for s, _ in gap)}")
     if out_of_reach:
@@ -206,13 +255,13 @@ def test_usage_is_refused() -> None:
         tag = f"/tmp/lvm_use_{os.getpid()}"
         script = (f"rm -f {tag}.bin; cp {ELF._wsl_path(mir)} {tag}.bin && chmod +x {tag}.bin && "
                   f"cd /tmp && ./{os.path.basename(tag)}.bin > /dev/null 2>&1; echo -n $?")
-        r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                            capture_output=True, timeout=180, shell=False)
         assert r.stdout.decode().strip() == "2", r.stdout
     with tempfile.TemporaryDirectory() as tds:
         missing = Path(tds) / "nope.ll"
         missing.write_text("", encoding="utf-8")
-        rc, _ = _run_mirror(mir, missing, timeout=60)
+        rc, _o, _p = _run_mirror(mir, missing, timeout=60)
         assert rc == 2, f"空输入应当 rc=2，得到 {rc}"
     print("      没有实参 / 读不了输入 ⇒ 都是 rc=2")
 

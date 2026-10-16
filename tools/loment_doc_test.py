@@ -43,11 +43,18 @@ def _clang() -> str | None:
     return fallback if Path(fallback).exists() else None
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -55,6 +62,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -102,7 +111,7 @@ def _run(elf: Path, td: Path, entry: Path, name: str) -> tuple[str, str]:
               f"chmod +x {_T}{name}.bin && "
               f"cd {_wsl_path(ROOT)} && {_T}{name}.bin {entry.relative_to(ROOT).as_posix()} "
               f"> {_wsl_path(got)} 2> {_wsl_path(err)}; echo -n $?")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", script],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", script],
                        capture_output=True, text=True, timeout=300, shell=False)
     out = got.read_text(encoding="utf-8") if got.exists() else ""
     etext = err.read_text(encoding="utf-8", errors="replace") if err.exists() else ""
@@ -190,12 +199,21 @@ fn max_of<T>(a: T, b: T) -> T {
 fn no_doc() {
     let x: u32 = 1;
 }
+
+/// 命令 (形态 A): 块那层壳对按深度走的读者是可见的, 块里的函数仍是顶层函数 (#399)
+register edgecmd {
+    /// 块里的那个函数
+    pub fn command_main(argv: ptr, argc: u32) -> u32 {
+        return argc;
+    }
+}
 '''
 
 
 @test
 def test_loment_lomdoc_edge_cases():
-    """语料里没出现的段: excluded / 十六进制常量 / 多行 doc / 双方法 trait / 空 doc。"""
+    """语料里没出现的段: excluded / 十六进制常量 / 多行 doc / 双方法 trait / 空 doc /
+    register 块里的函数 (含它自己的 doc 行 —— 语料那份块里没有 `///`)。"""
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
@@ -221,7 +239,7 @@ def test_loment_lomdoc_edge_cases():
                     f"  got : {got[max(0,k-70):k+50]!r}")
     finally:
         probe.unlink(missing_ok=True)
-    print("      边界用例 (excluded/hex/多行 doc/双方法 trait/泛型/空 doc) 一致")
+    print("      边界用例 (excluded/hex/多行 doc/双方法 trait/泛型/空 doc/register 块) 一致")
 
 
 #: 别的写法的样本：`choose write grammar c` 打头，第二行就是函数声明。

@@ -75,11 +75,18 @@ def test(fn):
     return fn
 
 
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 def _wsl() -> bool:
+    if sys.platform.startswith("linux"):
+        return True
     if not shutil.which("wsl"):
         return False
     try:
-        return subprocess.run(["wsl", "-e", "true"], capture_output=True,
+        return subprocess.run([*_WSLCMD, "true"], capture_output=True,
                               text=True, timeout=60, shell=False).returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -87,6 +94,8 @@ def _wsl() -> bool:
 
 def _wsl_path(p: Path) -> str:
     s = str(p.resolve()).replace("\\", "/")
+    if sys.platform.startswith("linux"):
+        return s
     return "/mnt/" + s[0].lower() + s[2:]
 
 
@@ -94,7 +103,7 @@ def _have_gpp() -> bool:
     if not _wsl():
         return False
     try:
-        r = subprocess.run(["wsl", "-e", "bash", "-lc", "command -v g++"],
+        r = subprocess.run([*_WSLCMD, "bash", "-lc", "command -v g++"],
                            capture_output=True, text=True, timeout=120)
         return r.returncode == 0
     except Exception:  # noqa: BLE001
@@ -103,7 +112,7 @@ def _have_gpp() -> bool:
 
 def _run(exe: Path) -> int:
     r = subprocess.run(
-        ["wsl", "-e", "bash", "-lc", f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
+        [*_WSLCMD, "bash", "-lc", f"chmod +x {_wsl_path(exe)} && {_wsl_path(exe)}; echo -n $?"],
         capture_output=True, text=True, timeout=300, shell=False)
     return int(r.stdout.strip() or -1)
 
@@ -134,7 +143,7 @@ def _build_cpp(td: Path, src: str) -> Path:
     (td / "cpp_side.cpp").write_text(src + _CPP_ENTRY, encoding="utf-8", newline="\n")
     exe = td / "cpp_side.bin"
     cmd = ("g++ " + " ".join(_FLAGS) + f" -o {_wsl_path(exe)} {_wsl_path(td / 'cpp_side.cpp')}")
-    r = subprocess.run(["wsl", "-e", "bash", "-lc", cmd],
+    r = subprocess.run([*_WSLCMD, "bash", "-lc", cmd],
                        capture_output=True, text=True, timeout=600, shell=False)
     assert r.returncode == 0, f"C++ 编译失败: {(r.stdout + r.stderr)[-500:]}"
     return exe
