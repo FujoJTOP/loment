@@ -154,6 +154,9 @@ GLOBS = [
     # 它，它是"这一笔改了什么"的**可核对**记录 —— 套用器分得清"待套用"与"已套用"，
     # 判据（`loment_tools_test::test_lomf_patches_in_the_tree_are_applied`）钉两者一致。
     "tools/lomf.py",
+    # `#343` 那一类的计量器（`#369`）：两条不变量（非零退出要带诊断、不许被信号打死）
+    # 过一层语料，缺口的**账**在判据里，只许变短。
+    "tools/loment_invariant_test.py",
     "tools/vscode_ext.py", "tools/vscode_ext_test.py",
     # 调试器 (docs/190): DAP 适配器 + ptrace 后端, 及其无头判据。
     # **位置与自举那份 `lomrel.lomt` 对齐** —— 见下面那条注释。
@@ -291,6 +294,9 @@ GLOBS = [
     # 落档（运行时 IR 嵌在字符串常量里，自举镜像那边还有一份），于是每一笔都留得下
     # "改的是哪一段、期望它出现几次"。**与自举那份 `lomrel.lomt` 插入同一位置。**
     "loment/patches/*.lomf",
+    # `#343` 那一类（"编译器不作声地死掉"）的**最小见证**（`#369`）：`#343` 表里每一格
+    # 各一只，是这一类**仅有的**目击者 —— 边界走查在判据里现生成，见证只能是文件。
+    "loment/invariants/*.lomt",
     "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
     "lom/*.lom",
     # 设计文档: 这份清单是 **Loment 线**的, 而本仓就是 Loment 的开发口 —— `docs/` 里
