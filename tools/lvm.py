@@ -14,8 +14,10 @@ phi 的两趟模型。
 
 from __future__ import annotations
 
+import os
 import re
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -30,6 +32,22 @@ FRAME_SIZE = 4096
 
 #: 每个标量占 8 字节（与 `lomelf` 的栈槽模型同口径，`SCALAR_SIZE`）。
 SLOT = 8
+
+#: **合成文件**的 fd 从这儿起（`docs/243` §3.4）。解释器没有真的文件描述符，
+#: 所以真 fd 与合成 fd 不会撞；这个数两边实现**必须一样**（自举镜像里也写 1000）。
+VFD_BASE = 1000
+
+#: `/proc/self/cmdline` 的字段分隔符（也是内核给的那个字节）。
+B_NUL = bytes([0])
+
+
+def _cmdline(argv: list[str]) -> bytes:
+    """内核给 `/proc/self/cmdline` 的形状：**每个字段后面跟一个 NUL**。
+
+    抄这个形状是有意的 —— 被解释程序照着"数 NUL"来算 argc（`docs/223` 生成的入口
+    就是那么干的），形状不对它数出来的就是另一个数。
+    """
+    return b"".join(s.encode("utf-8", "surrogateescape") + B_NUL for s in argv)
 
 
 class LvmError(Exception):
@@ -137,6 +155,15 @@ class Mem:
             raise LvmError(f"读越界: {addr} + {n}")
         return bytes(self.buf[addr:addr + n])
 
+    def cstr(self, addr: int, limit: int = 4096) -> bytes:
+        """读一个 NUL 结尾的字符串（被解释程序里的字面量路径）。上限是"不许挂死"。"""
+        if addr < 0 or addr >= MEM_SIZE:
+            raise LvmError(f"读越界: {addr}")
+        n = 0
+        while n < limit and addr + n < MEM_SIZE and self.buf[addr + n] != 0:
+            n += 1
+        return bytes(self.buf[addr:addr + n])
+
     def alloc(self, n: int, align: int = 8) -> int:
         self.heap = (self.heap + align - 1) // align * align
         a = self.heap
@@ -162,14 +189,94 @@ class Frame:
         return a
 
 
+class Profile:
+    """T1 的剖面（`docs/247`）—— 三样**静态读不出来**的东西：块的次数、边的次数、调用点。
+
+    ⚠ **不记类型**。这份 IR 是静态类型的：`add i32 %a, %b` 里的 `i32` 写在指令上，
+    同一条加法每一次执行只能是 i32 —— "观察到 i32"不是新信息。V8 反馈向量最重要那一项
+    是给它吃的 **JavaScript**（没有类型）准备的，照抄过来是空的（`docs/247` §1）。
+
+    站点标识 = (函数名, 块标签, 块内指令下标)。**输出按 IR 的解析顺序**，不是按名字排序 ——
+    自举那一侧没有排序（固定表、按解析顺序摆），而两边要逐字节比同一份剖面。
+    解析顺序对同一份 IR 是确定的，所以"确定性"这条判据照样成立（`docs/247` §4）。
+    """
+
+    def __init__(self) -> None:
+        self.blocks: dict[tuple[str, str], int] = {}
+        self.edges: dict[tuple[str, str, int, int], int] = {}
+        self.calls: dict[tuple[str, str, int, str], int] = {}
+        #: 解析出来的函数表（`lomelf.parse_ll` 的那一份，**顺序就是 IR 里的顺序**）。
+        #: `text()` 靠它遍历 —— 见上面那段"为什么按解析顺序"。
+        self.funcs: list = []
+
+    @staticmethod
+    def _bump(d: dict, k) -> None:
+        d[k] = d.get(k, 0) + 1
+
+    def block(self, fn: str, blk: str) -> None:
+        self._bump(self.blocks, (fn, blk))
+
+    def edge(self, fn: str, blk: str, idx: int, e: int) -> None:
+        self._bump(self.edges, (fn, blk, idx, e))
+
+    def call_site(self, site: tuple[str, str, int], callee: str) -> None:
+        fn, blk, idx = site
+        self._bump(self.calls, (fn, blk, idx, callee))
+
+    def bind(self, funcs: list) -> None:
+        """接上解析出来的函数表 —— `run_ir` 解析完就调它。"""
+        self.funcs = funcs
+
+    def text(self) -> str:
+        """剖面文本。**第三方可读是构造出来的**：一张按 TAB 分列的表。
+
+        ⚠ **遍历顺序 = IR 的解析顺序**（函数 → 块 → 指令），不是按名字排序：自举那一侧的
+        固定表就是按解析顺序摆的，两边要比逐字节（`docs/247` §4 记了这条取舍）。
+        """
+        blocks: list[str] = []
+        edges: list[str] = []
+        calls: list[str] = []
+        for fn in self.funcs:
+            for blk in fn.blocks:
+                n = self.blocks.get((fn.name, blk.label))
+                if n:
+                    blocks.append(f"{fn.name}\t{blk.label}\t{n}")
+                for idx in range(len(blk.instrs)):
+                    site = (fn.name, blk.label, idx)
+                    # ⚠ **按边号升序**，不是"第一次被走到的次序"：自举那侧沿边表走，天然升序；
+                    # 这里跟着字典插入顺序走，就会在"第一次取假边"的站点上和它分叉。
+                    for kk in sorted(k for k in self.edges if k[:3] == site):
+                        edges.append(f"{kk[0]}\t{kk[1]}\t{kk[2]}\t{kk[3]}\t{self.edges[kk]}")
+                    for kk in sorted(k for k in self.calls if k[:3] == site):
+                        calls.append(f"{kk[0]}\t{kk[1]}\t{kk[2]}\t{kk[3]}\t{self.calls[kk]}")
+        out = ["# lvm profile v1",
+               "# site = (function, block, instruction-index-in-block); a block is (function, block)",
+               "# order = IR parse order (function -> block -> instruction), not sorted by name",
+               "[blocks]"] + blocks + ["[edges]"] + edges + ["[calls]"] + calls
+        return "\n".join(out) + "\n"
+
+
 class Vm:
-    def __init__(self, globals_: list, funcs: list, externs: list, out) -> None:
+    def __init__(self, globals_: list, funcs: list, externs: list, out,
+                 profile: Profile | None = None, argv: list[str] | None = None) -> None:
         self.mem = Mem()
         self.globals = {g.name: g for g in globals_}
         self.funcs = {f.name: f for f in funcs}
         self.externs = set(externs)
         self.out = out
         self.depth = 0
+        #: T1（`docs/247`）。`None` = 这一趟不记账 —— **关掉时一个字节都不写**，
+        #: 而且下面每一处记账都写成 `if self.profile is not None:`，所以关掉时**没有代价**
+        #: （判据 D 要的正是"记录不许改变被记录的行为"）。
+        self.profile = profile
+        self.site: tuple[str, str, int] | None = None
+        #: **被解释程序自己的**命令行（`docs/243` §3.4）。它读 `/proc/self/cmdline`
+        #: 想知道"我叫什么" —— 那个文件属于**进程**，而进程是解释器。所以这一处必须
+        #: **合成**，否则程序会以为自己是 `lvm`。给的就是"VM 被指到的那个输入路径"。
+        self.argv = list(argv) if argv is not None else ["<ir>"]
+        #: 合成文件的 fd —— 解释器**没有真的文件描述符**，只认识这一张表里的。
+        self.vfds: dict[int, list] = {}
+        self.next_vfd = VFD_BASE
         self._place_globals()
 
     def _place_globals(self) -> None:
@@ -228,6 +335,16 @@ class Executor(Vm):
     # ------------------------------------------------------------ 系统调用
     def syscall(self, nr: int, a: list[int]) -> int:
         """**唯一**的对外通道（`docs/243` §3.4）。表里没有的就点名拒。"""
+        if nr == 0:                                    # read(fd, buf, count)
+            # 解释器没有真的文件描述符 —— 只认识 257 开的那个合成文件。
+            v = self.vfds.get(a[0])
+            if v is None:
+                raise LvmError(f"read: fd {a[0]} 不是 VM 合成的那一个"
+                               "（`docs/243` §3.4）")
+            data = v[0][v[1]:v[1] + a[2]]
+            v[1] += len(data)
+            self.mem.put(a[1], data)
+            return len(data)
         if nr == 1:                                    # write(fd, buf, count)
             fd, buf, n = a[0], a[1], a[2]
             data = self.mem.get(buf, n)
@@ -235,6 +352,11 @@ class Executor(Vm):
                 self.out.write(data)
                 self.out.flush()
             return n
+        if nr == 3:                                    # close(fd)
+            if self.vfds.pop(a[0], None) is None:
+                raise LvmError(f"close: fd {a[0]} 不是 VM 合成的那一个"
+                               "（`docs/243` §3.4）")
+            return 0
         if nr == 12:                                   # brk(addr)
             # `_IR_HEAP` 的分配器用它向 OS 要页。解释器的堆本来就在地址空间里，
             # 所以这里只需把"当前可信的堆底"如实回一个数：给了就认，没给就报现值。
@@ -244,6 +366,35 @@ class Executor(Vm):
                     self.mem.heap = want
                 return self.mem.heap
             return self.mem.heap
+        if nr == 39:                                   # getpid
+            # 如实转出去：这是**这台机器的事实**，被解释程序问的就是"我"是谁。
+            return os.getpid()
+        if nr == 63:                                   # uname(struct utsname *p)
+            # ⚠ **合成，不转宿主** —— 它描述的是**目标平台**，不是解释器跑在哪台机器上。
+            # 判据 A 比的是"这份产物在目标平台上会打印什么"，所以这里必须给 Linux：
+            # 宿主是 Windows 也照样给 Linux（`docs/243` §3.4 那条规矩）。
+            fields = [b"Linux", b"loment", b"0.1.5", b"#1 LVM T0", b"x86_64", b"(none)"]
+            self.mem.put(a[0], b"".join(f[:64].ljust(65, b"\0") for f in fields))
+            return 0
+        if nr == 201:                                  # time(NULL)
+            return int(time.time())
+        # ⚠ **317 不是 getrandom** —— 我一开始照 `selfcheck` 的名字猜它是，写了个
+        # `os.urandom` 分支。**判据 A 当场把这个臆造纠了出来**：原生产物在 Linux 上拿到
+        # 317 = `seccomp`，返回 -1，于是 `selfcheck` 自己报 FAIL；而我的 VM "通过"了。
+        # 两边一致才是对的 —— 所以这个分支**删掉**，VM 点名拒（`docs/243` §3.4 的规矩：
+        # 表里没有的不装作有）。`selfcheck` 因此留在棘轮里，理由换成了真的那个。
+        if nr == 257:                                  # openat(dirfd, path, flags)
+            # **只认识 `/proc/self/cmdline`**，而且给它的是**被解释程序自己的**命令行，
+            # 不是解释器的（下一段那个 `argv`）。别的路径点名拒 —— VM 里没有文件系统，
+            # 装作有就是给错答案（`docs/243` §3.4）。
+            path = self.mem.cstr(a[1])
+            if path != b"/proc/self/cmdline":
+                raise LvmError(f"openat: 只认识 /proc/self/cmdline（被解释程序自己的"
+                               f"命令行），不认识 {path!r}（`docs/243` §3.4）")
+            fd = self.next_vfd
+            self.next_vfd += 1
+            self.vfds[fd] = [_cmdline(self.argv), 0]
+            return fd
         if nr == 60:                                   # exit(code)
             raise _Exit(a[0] & 0xFF)
         raise LvmError(f"系统调用表里没有 {nr}（`docs/243` §3.4）")
@@ -278,6 +429,8 @@ class Executor(Vm):
         fn = self.funcs.get(name)
         if fn is None:
             raise LvmError(f"没有这个函数: {name}")
+        if self.profile is not None and self.site is not None:
+            self.profile.call_site(self.site, name)
         return self.run(fn, args, fr)
 
     # ------------------------------------------------------------ 执行
@@ -313,17 +466,25 @@ class Executor(Vm):
             blk = next((b for b in fn.blocks if b.label == label), None)
             if blk is None:
                 raise LvmError(f"{fn.name}: 没有块 {label}")
-            for ins in blk.instrs:
+            if self.profile is not None:
+                self.profile.block(fn.name, blk.label)
+            for idx, ins in enumerate(blk.instrs):
+                if self.profile is not None:
+                    self.site = (fn.name, blk.label, idx)
                 if ins.text.startswith("phi "):
                     if ins.dest:
                         fr.vals[ins.dest] = self._phi(fr, ins.text, prev)
                     continue
                 if ins.text.startswith("br "):
-                    label, _pred = self._br(fr, ins.text, blk.label)
+                    label, _pred, edge = self._br(fr, ins.text, blk.label)
+                    if self.profile is not None:
+                        self.profile.edge(fn.name, blk.label, idx, edge)
                     prev = blk.label
                     break
                 if ins.text.startswith("switch "):
-                    label = self._switch(fr, ins.text)
+                    label, edge = self._switch(fr, ins.text)
+                    if self.profile is not None:
+                        self.profile.edge(fn.name, blk.label, idx, edge)
                     prev = blk.label
                     break
                 if ins.text.startswith("ret"):
@@ -509,26 +670,29 @@ class Executor(Vm):
                 return v
         raise LvmError(f"phi 没有来自 {prev} 的入边: {text!r}")
 
-    def _br(self, fr: Frame, text: str, cur: str) -> tuple[str, str]:
+    def _br(self, fr: Frame, text: str, cur: str) -> tuple[str, str, int]:
+        """返回 `(目标块, 前驱, 边的编号)`。**边号**是 T1 记账要的（`docs/247` §4）：
+        无条件分支只有一条边（0）；条件分支 0 = 真、1 = 假。"""
         m = re.match(r"br label %([\w.]+)$", text)
         if m:
-            return m.group(1), cur
+            return m.group(1), cur, 0
         m = lomelf.BR_COND_RE.search(text)
         if not m:
             raise LvmError(f"br 解析不了: {text!r}")
         _t, cond = self.operand(fr, "i1 " + m.group(1))
-        return (m.group(2) if cond else m.group(3)), cur
+        return (m.group(2) if cond else m.group(3)), cur, (0 if cond else 1)
 
-    def _switch(self, fr: Frame, text: str) -> str:
+    def _switch(self, fr: Frame, text: str) -> tuple[str, int]:
+        """返回 `(目标块, 边的编号)`：case 按出现次序 0..n-1，default 是 n。"""
         m = lomelf.SWITCH_RE.match(text)
         if not m:
             raise LvmError(f"switch 解析不了: {text!r}")
         ty, val_s, default, body = m.groups()
         _t, v = self.operand(fr, ty + " " + val_s)
-        for cty, cval, label in lomelf.CASE_RE.findall(body):
+        for k, (cty, cval, label) in enumerate(lomelf.CASE_RE.findall(body)):
             if mask(v, cty) == int(cval):
-                return label
-        return default
+                return label, k
+        return default, len(lomelf.CASE_RE.findall(body))
 
     def _ret(self, fr: Frame, text: str):
         rest = text[len("ret"):].strip()
@@ -541,10 +705,22 @@ class Executor(Vm):
 
 # ---------------------------------------------------------------- 前门
 
-def run_ir(text: str, out) -> int:
-    """IR 文本 -> 跑完 -> 进程该退的码。**入口就是 `_start`**（`docs/243` §3.5）。"""
+def run_ir(text: str, out, profile: Profile | None = None,
+           argv: list[str] | None = None) -> int:
+    """IR 文本 -> 跑完 -> 进程该退的码。**入口就是 `_start`**（`docs/243` §3.5）。
+
+    `profile` 传一个 `Profile` 就记账（T1，`docs/247`）；传 `None`（默认）不记 ——
+    **关掉时不写任何字节**，而且被记录程序的行为逐字节不变（判据 D）。
+
+    `argv` 是**被解释程序自己的**命令行（`docs/243` §3.4）：它读 `/proc/self/cmdline`
+    时看到的就是这个。默认 `["<ir>"]` —— 进程内调用手里没有"那个程序叫什么"，
+    就不编一个像路径的东西出来；要真名字的调用方自己传（`lvm_test` 传的就是它
+    喂给原生产物的同一个名字，好让两边逐字节可比）。
+    """
     globals_, funcs, externs = lomelf.parse_ll(text)
-    vm = Executor(globals_, funcs, externs, out)
+    if profile is not None:
+        profile.bind(funcs)
+    vm = Executor(globals_, funcs, externs, out, profile, argv)
     start = next((f for f in funcs if f.name == "_start"), None)
     if start is None:
         raise LvmError("这份 IR 里没有 `_start`")
@@ -555,8 +731,11 @@ def run_ir(text: str, out) -> int:
     return 0
 
 
-def run_source(src: Path, root: Path, out=None) -> int:
+def run_source(src: Path, root: Path, out=None, profile: Profile | None = None,
+               argv: list[str] | None = None) -> int:
     """与 `lomelf` 同一条前门：`.lomt` -> IR -> 跑。"""
+    if argv is None:
+        argv = [str(src)]
     import lomentc  # noqa: PLC0415
 
     mod = lomentc.load(src)
@@ -564,7 +743,8 @@ def run_source(src: Path, root: Path, out=None) -> int:
     errs = lomentc.check(mod, deps=deps)
     if errs:
         raise LvmError(f"检查不过: {errs[:2]}")
-    return run_ir(lomentc.emit_llvm(mod, root, deps), out if out is not None else sys.stdout)
+    return run_ir(lomentc.emit_llvm(mod, root, deps),
+                  out if out is not None else sys.stdout, profile, argv)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -575,19 +755,28 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("entry", help=".lomt 入口，或 --ir 时是 .ll")
     ap.add_argument("--ir", action="store_true", help="直接吃 IR 文本（跳过前端）")
     ap.add_argument("--root", default=".", help="解析 use 的根（默认当前目录）")
+    ap.add_argument("--profile-out", metavar="PATH", default=None,
+                    help="T1：把反馈剖面写到 PATH（`docs/247`）。不写就不记，一个字节都不写")
     a = ap.parse_args(argv)
     root = Path(a.root).resolve()
     buf = io.BytesIO()
+    prof = Profile() if a.profile_out else None
     try:
+        # `--entry` 那段文本**原样**当被解释程序的 argv[0] —— 与自举镜像同一处规矩：
+        # "VM 被指到的那个输入路径"（`docs/243` §3.4）。
         if a.ir:
-            rc = run_ir(Path(a.entry).read_text(encoding="utf-8"), buf)
+            rc = run_ir(Path(a.entry).read_text(encoding="utf-8"), buf, prof, [a.entry])
         else:
-            rc = run_source(Path(a.entry).resolve(), root, buf)
+            rc = run_source(Path(a.entry).resolve(), root, buf, prof, [a.entry])
     except (LvmError, lomelf.ElfError, lomelf.Unsupported) as e:
         sys.stdout.buffer.write(buf.getvalue())
         print(f"lvm: {e}", file=sys.stderr)
         return 2
     sys.stdout.buffer.write(buf.getvalue())
+    if prof is not None:
+        # `newline="\n"`：本机 `write_text` 会写成 CRLF，而剖面要跨平台逐字节可比。
+        with Path(a.profile_out).open("w", encoding="utf-8", newline="\n") as f:
+            f.write(prof.text())
     return rc
 
 

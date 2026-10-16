@@ -178,7 +178,7 @@ python tools/lomf.py --apply loment/patches/0001-alloc-slack.lomf   # 套用（�
 4. **编译器不认这个后缀**（`.lomf` 不在任何档的编译面上），所以它不会碰孪生一致那套 ——
    但**改 `lomentc.py` 与 `codegen.lomt` 的补丁照样要重算种子**（上一节那条不变）。
 
-格式与两条规矩的来路见 `docs/247`。
+格式与两条规矩的来路见 `docs/251`。
 
 ## 写 Loment 程序之前，先读那份 agent 指南
 
