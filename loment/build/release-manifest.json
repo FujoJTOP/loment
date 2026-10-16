@@ -2394,10 +2394,6 @@
    "sha256": "563df8c1432758fd180f3c1866177393a63d6c609262409af26964c7252b2e79"
   },
   {
-   "path": "docs/247-loment-memory-safety.md",
-   "sha256": "b80b725b604c64e18f6da4da01ea211a660bae67b8b2e20a4a55fc7a6645994f"
-  },
-  {
    "path": "docs/247-lvm-t1-profile.md",
    "sha256": "8c44279e7503a2544ddf0a6110a7ec237903dd7713b6994011d7951eb60368da"
   },
@@ -2416,6 +2412,10 @@
   {
    "path": "docs/251-capacities.md",
    "sha256": "9a58aa203ec0740fb43c05f694c004151b1bcb18dd2ba0b8d5679c64cc6308e6"
+  },
+  {
+   "path": "docs/252-loment-memory-safety.md",
+   "sha256": "c76b255df07c531b7e6ebbb42c8597015cc59b9aa1ac826a2a117ece03459278"
   },
   {
    "path": "docs/manual/index.md",
