@@ -777,6 +777,124 @@ def test_multi_object_cross_reference():
         print("      多目标文件 (a.o 调 b.o, 跨对象重定位) -> 退出码 22")
 
 
+#: **两个成员各有同名局部符号**。`static` 的东西在目标文件里是 `bind=0` 的**局部**符号，
+#: 名字就是程序员写的那个（`slot`）—— 两个文件里都叫 `slot`。zlib 那边是编译器生成的
+#: `.LC0` / `.my_version` 一类，同一回事。
+C_LOCAL_A = """
+static int slot = 11;
+int get_a(void) { slot = slot + 1; return slot; }
+"""
+C_LOCAL_B = """
+static int slot = 21;
+int get_b(void) { slot = slot + 1; return slot; }
+"""
+
+LOMENT_LOCAL_COLLIDE = """module collide
+choose runtime
+
+extern fn get_a() -> i32;
+extern fn get_b() -> i32;
+
+fn _start() {
+    // 各自 ++ 自己的 slot：12 与 22。**两个都对**才退 7 —— 串了的话第二个会读到
+    // 第一个的槽（老病"先来的为准"），于是要么 3、要么 4。
+    if get_a() != 12 { syscall4(60, 3, 0, 0); }
+    if get_b() != 22 { syscall4(60, 4, 0, 0); }
+    syscall4(60, 7, 0, 0);
+}
+"""
+
+
+@test
+def test_local_symbols_do_not_collide_across_members():
+    """**局部符号必须按对象区分**（2026-10-15，`FujoJTOP/loment#359`）。
+
+    标签表是**按名字**查的、而且"先来的为准" —— 而 `.LC0` / `.L.str` 这种**局部**名字
+    每个成员里都有。不分对象的话，第二个成员的 `.LC0` 会解析到**第一个成员的** `.LC0` 上：
+    **静默指错地址**，不报任何错。修法是给局部符号加对象前缀（`docs/219` §8b 记了很久的
+    "某个成员的数据/重定位还有残留缺陷"，真凶就是这个 —— 与 S1f 修过的**节符号**同一类，
+    只是当时没顺手修普通局部符号）。
+
+    `b.o` **放在前面**：那正是触发顺序（先来的定义赢）。夹具刻意让两个字符串长度相同、
+    内容不同 —— 撞上时读到的是**另一个成员**的字节，于是能分辨"指错"与"没读"。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "a.c").write_text(C_LOCAL_A, encoding="utf-8", newline="\n")
+        (td / "b.c").write_text(C_LOCAL_B, encoding="utf-8", newline="\n")
+        # `-O0`：`-O1` 会把那个 `static` 直接折成常量，于是**根本不留具名局部符号** ——
+        # 那样这条判据就是空的（实测：第一版夹具正是这样，关掉修也绿）。
+        assert compile_c(clang, td / "a.c", td / "a.o", ("-O0",)) == 0, "C 编译失败"
+        assert compile_c(clang, td / "b.c", td / "b.o", ("-O0",)) == 0, "C 编译失败"
+        # **先确认这两个成员真的有同名局部符号** —— 否则这条判据测的是别的东西。
+        # 比的是**去掉按对象前缀之后**的名字：修好之后登记的名字长成 `$<对象>$<原名>`，
+        # 取最后一个 `$` 之后那段就是原名的样子（没修时整串就是原名，所以这条检查两边都成立）。
+        fa = lomelf.ForeignObject(td / "a.o")
+        fb = lomelf.ForeignObject(td / "b.o")
+        raw = lambda s: {n.rsplit("$", 1)[-1] for n in s}      # noqa: E731
+        shared = raw(fa.dsyms) & raw(fb.dsyms)
+        assert shared, f"两个成员没有同名局部符号，这条判据空跑了: {sorted(fa.dsyms)[:4]}"
+        # 名字级：**标签表里不许再同名**（同名 ⇒ 后登记的那个会被"先来的为准"挡掉）。
+        assert not (set(fa.dsyms) & set(fb.dsyms)), (
+            f"两个成员的局部符号在标签表里还是同名: {sorted(set(fa.dsyms) & set(fb.dsyms))[:4]}")
+        (td / "m.lomt").write_text(LOMENT_LOCAL_COLLIDE, encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [td / "b.o", td / "a.o"], 7)
+        assert rc == 7, (f"两个成员的局部常量串了（**先来的为准**那条老病）：rc={rc}，"
+                         f"期望 7（3 = 第一个成员读错，4 = 第二个读错）{err[-200:]!r}")
+        print(f"      两个成员的同名局部符号（{sorted(shared)[:2]}…）各自解对 -> 退出码 7")
+
+
+#: **进入 C 函数时 `rsp % 16` 必须是 8**（SysV：`call` 那一刻 rsp ≡ 0，`call` 压入返回地址
+#: 之后就是 8）。我们自己的调用约定实参走栈、帧不对齐，所以调用点必须**显式对齐**。
+C_ALIGN = """
+unsigned long entry_align(void) {
+    unsigned long sp;
+    __asm__ volatile("mov %%rsp, %0" : "=r"(sp));
+    return sp % 16;
+}
+"""
+
+LOMENT_ALIGN = """module align
+choose runtime
+
+extern fn entry_align() -> u64;
+
+fn _start() {
+    syscall4(60, entry_align(), 0, 0);
+}
+"""
+
+
+@test
+def test_extern_call_sites_are_sixteen_byte_aligned():
+    """**调 C 之前 `rsp` 要按 SysV 对齐**（2026-10-15，`FujoJTOP/loment#359`）。
+
+    不修的话，**任何用到 16 字节 SSE 存的 C 函数当场 `#GP`**（`si_code=SI_KERNEL`、
+    `si_addr=NULL` —— 那不是段越界，是**对不齐**）。实测：zlib 的 `compress` 就死在
+    `movaps %xmm0,-0x70(%rbp)` 上；`deflateInit` 那条路偏偏又是好的，所以症状看起来
+    "时好时坏"。**判据直接量那个不变量**：让 C 侧把进入时的 `rsp % 16` 报出来，
+    它必须是 **8**（= 退出码 8）。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        (td / "al.c").write_text(C_ALIGN, encoding="utf-8", newline="\n")
+        assert compile_c(clang, td / "al.c", td / "al.o") == 0, "C 编译失败"
+        (td / "m.lomt").write_text(LOMENT_ALIGN, encoding="utf-8", newline="\n")
+        rc, err = build_and_run(td, td / "m.lomt", [td / "al.o"], 8)
+        assert rc == 8, (f"C 侧看到的栈对齐是 {rc}（mod 16），SysV 要求 **8** —— "
+                         f"调用点没对齐，任何 `movaps` 到栈的库函数都会 #GP "
+                         f"{err[-200:]!r}")
+        print("      C 侧报进入时 rsp % 16 == 8（SysV 要的那个数）-> 退出码 8")
+
+
 @test
 def test_archive_selects_only_needed_members():
     """**静态库 `.a`**: 只挑定义"当前需要的符号"的成员, **不整包收**。
@@ -1250,6 +1368,171 @@ def test_program_without_extern_is_unchanged():
         assert info["linked"] == [] and info["objects"] == [], info
         assert len(blob) > 0
         print("      无 extern 的程序: 路径照旧")
+
+
+# ---------------------------------------------------------------- 真静态库 (V1)
+
+#: `docs/183` §4 **V1**（静态 libc）的验收格：真 **`libz.a`** 经**我们自己的链接器**进来，
+#: `compress → uncompress → 原文` 逐字节对。
+#:
+#: 逻辑与 `loment_hosted_test.HOSTED_SRC` 是**同一份**（那一份走 `choose hosted` + 系统
+#: `libz.so`、由 C 工具链链；这一份走 `sealed` + `libz.a`、由 `lomelf` 链），失败码也对齐：
+#: 10 compress / 20 uncompress / 30 解压后的长度 / 40 内容 / 50 "压缩居然没变小"。
+#: 唯一的结构差别是入口（那份是 hosted 的 `main`，这份是我们自己链接器的 `_start`）——
+#: **两条判据合起来才是那句话**："能调真库"在**两个方向**上都成立。
+ZLIB_STATIC_SRC = """\
+module zlibstatic
+choose runtime
+
+extern fn compress(dst: ptr, dstlen: ptr, src: ptr, srclen: u64) -> i32;
+extern fn uncompress(dst: ptr, dstlen: ptr, src: ptr, srclen: u64) -> i32;
+
+const NSRC: u32 = 64;
+
+fn store32(p: ptr, off: u32, v: u32) {
+    store8(p, off, v as u8);
+    store8(p, off + 1, ((v / 256) % 256) as u8);
+    store8(p, off + 2, ((v / 65536) % 256) as u8);
+    store8(p, off + 3, ((v / 16777216) % 256) as u8);
+}
+
+fn load32(p: ptr, off: u32) -> u32 {
+    return load8(p, off)
+        + load8(p, off + 1) * 256
+        + load8(p, off + 2) * 65536
+        + load8(p, off + 3) * 16777216;
+}
+
+fn _start() {
+    let src: ptr = alloc(256);
+    let clen: ptr = alloc(16);
+    let comp: ptr = alloc(1024);
+    let olen: ptr = alloc(16);
+    let out: ptr = alloc(256);
+    let i: u32 = 0;
+    while i < NSRC {
+        store8(src, i, ((i % 8) + 65) as u8);
+        i = i + 1;
+    }
+    store32(clen, 0, 1024);
+    if compress(comp, clen, src, NSRC as u64) != 0 { syscall4(60, 10, 0, 0); }
+    let ncomp: u32 = load32(clen, 0);
+    store32(olen, 0, 256);
+    if uncompress(out, olen, comp, ncomp as u64) != 0 { syscall4(60, 20, 0, 0); }
+    if load32(olen, 0) != NSRC { syscall4(60, 30, 0, 0); }
+    let j: u32 = 0;
+    while j < NSRC {
+        if load8(out, j) != load8(src, j) { syscall4(60, 40, 0, 0); }
+        j = j + 1;
+    }
+    if ncomp >= NSRC { syscall4(60, 50, 0, 0); }
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+#: **证伪用的那一份**：只把逐字节比对的方向写错（拿 `out[j]` 与 `src[j] + 1` 比）。
+#: 若上面那条判据真的在测"算对了"，这一份就**必须**报 40；它要是也 rc=0，说明那条判据测的
+#: 是"能跑"而不是"算对"（`loment_hosted_test` 那一份的证伪是同一条道理）。
+ZLIB_STATIC_FALSIFIER_SRC = ZLIB_STATIC_SRC.replace(
+    "if load8(out, j) != load8(src, j) { syscall4(60, 40, 0, 0); }",
+    "if load8(out, j) != ((load8(src, j) + 1) % 256) { syscall4(60, 40, 0, 0); }")
+assert ZLIB_STATIC_FALSIFIER_SRC != ZLIB_STATIC_SRC, "证伪件没改到东西"
+
+#: 系统静态 zlib 的几个常见落点（发行版布局不同）。**没有就 SKIP** —— 这不是"判据放宽"：
+#: 缺 `libz.a` 的机器上这一格**测不了**，而"测不了"与"过了"必须分开说。
+LIBZ_CANDIDATES = ("/usr/lib/x86_64-linux-gnu/libz.a", "/usr/lib64/libz.a",
+                   "/usr/lib/libz.a", "/usr/lib/x86_64-linux-gnu/libz.a.orig")
+
+
+def _system_libz(dst: Path) -> Path | None:
+    """把系统那份 `libz.a` 取到**仓库里**一份（两侧按**同一条相对路径**读它），取不到返回 None。
+
+    **取法分两条腿** —— `#371` 起这一族判据在 Linux 上是**原生**跑的（`_WSLCMD` 为空、
+    `_wsl_path` 不加 `/mnt/` 前缀），而 runner 上**没有 `wsl` 这个命令**：
+
+      * **这一侧读得到**（Linux：`/usr/lib/...` 就在本机）⇒ **直接读**。对这一侧来说"拷贝"
+        是多余的一步，而多余的那一步正是会坏的那一步 —— 实测：写死 `subprocess.run(["wsl", …])`
+        在 runner 上直接 `FileNotFoundError`，判据红得**像回归**，其实只是没走平台那两条腿；
+      * **读不到**（Windows：它在 WSL 里）⇒ 从另一侧 `cat` 回来，**不是 `cp`** ——
+        WSL 往 `/mnt/*` 写、这一侧立刻读会读到**空的**（9p 的可见性延迟，`docs/` 里记过）。
+
+    取回来**校验魔数**（`!<arch>\\n`），不是只看长度：半个归档会让判据在错的东西上跑，
+    而它红起来长得和"真缺陷"一模一样。
+    """
+    data: bytes | None = None
+    for cand in LIBZ_CANDIDATES:
+        try:
+            p = Path(cand)
+            if p.is_file():
+                b = p.read_bytes()
+                if b[:8] == b"!<arch>\n":
+                    data = b
+                    break
+        except OSError:
+            pass
+    if data is None:
+        for cand in LIBZ_CANDIDATES:
+            try:
+                r = subprocess.run([*_WSLCMD, "bash", "-lc", f"cat {cand}"],
+                                   capture_output=True, timeout=300, shell=False)
+            except OSError:            # 另一条腿不存在（没装 WSL）：**取不到**，不是挂掉
+                return None
+            if r.returncode == 0 and r.stdout[:8] == b"!<arch>\n":
+                data = r.stdout
+                break
+    if data is None:
+        return None
+    dst.write_bytes(data)
+    return dst if dst.read_bytes()[:8] == b"!<arch>\n" else None
+
+
+@test
+def test_a_real_static_library_round_trips():
+    """真 `libz.a` 经**我们自己的链接器**：`compress → uncompress → 原文`。
+
+    **Why**：这是 `docs/183` §4 的 **V1** 验收格，也是 `docs/219` §8b 那条线一直盯着的
+    "第一个真库"。它与 `loment_hosted_test` 那条**看着像**，其实是**另一个方向**：那条走
+    `choose hosted`（产物由 C 工具链链、库是 `.so`、堆问宿主要），这条走 `sealed`（产物由
+    `lomelf` 自己链、库是 `.a`、堆**封在产物里**）。两条都绿才叫"能调真库在两个方向上都成立"。
+
+    **它测的是插件面之外的东西**：真库是个 **`ar` 归档**（16 个成员，成员之间互相引用），
+    所以这条判据同时钉住**固定点成员选择**（不整包收 —— 整包收会把 `gz*` 那些成员的
+    `fopen`/`printf` 一起拖进来，整个库就被端口门拒了）与 arena 够不够大（`deflateInit`
+    要 256–512 KiB，见 `lomentc.FFI_ARENA_BYTES`）。
+
+    **证伪**：见 `ZLIB_STATIC_FALSIFIER_SRC` —— 比对方向写反的那一份必须报 40。
+    """
+    clang = _clang()
+    if not clang or not _wsl():
+        print("      SKIP: 需要 clang + WSL")
+        return
+    with tempfile.TemporaryDirectory() as t:
+        td = Path(t)
+        ark = _system_libz(ROOT / "loment" / "build" / "_libz_probe.a")
+        if ark is None:
+            print("      SKIP: 这台机器上没有 libz.a（要 zlib1g-dev）—— 这一格测不了")
+            return
+        try:
+            # 先量"这条判据真的踩在归档上" —— 不然它测的是别的什么
+            fo = lomelf.load_foreign(ark)
+            n_mem = len(fo.members)
+            assert n_mem >= 8, f"libz.a 只有 {n_mem} 个成员？这不是真库"
+            for tag, src, want in (("roundtrip", ZLIB_STATIC_SRC, 0),
+                                   ("falsifier", ZLIB_STATIC_FALSIFIER_SRC, 40)):
+                (td / f"{tag}.lomt").write_text(src, encoding="utf-8", newline="\n")
+                rc, err = build_and_run(td, td / f"{tag}.lomt", [ark], want)
+                assert rc == want, (
+                    f"[{tag}] rc={rc}（期望 {want}）err={err[-300:]!r}")
+            # 选出来的是**该要的那几个成员**，不是整包（整包会被端口门拒 —— 那正是
+            # "不整包收"存在的理由）
+            picked = lomelf.Archive(ark).select({"compress", "uncompress"})
+            names = [o.name for o in picked]
+            assert len(picked) < n_mem, f"把整个归档都收进来了: {n_mem} 个成员"
+            assert any("compress" in n or "deflate" in n for n in names), names
+            print(f"      真 libz.a（{n_mem} 个成员）→ 挑出 {len(picked)} 个 → "
+                  f"compress/uncompress 逐字节回原文 (rc=0)；证伪件报 40")
+        finally:
+            ark.unlink(missing_ok=True)
 
 
 def main() -> int:

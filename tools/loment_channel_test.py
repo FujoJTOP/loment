@@ -36,7 +36,7 @@ PROBE_VM = "module probe_vm\n\nchoose vm\n\nfn f() -> u32 {\n    return 1;\n}\n"
 #: 对照组：同样一份、**不声明** `choose vm` —— 两个驱动器都必须收。
 PROBE_PLAIN = "module probe_plain\n\nfn f() -> u32 {\n    return 1;\n}\n"
 #: 探针：`choose hosted`（`docs/222` §4）。**发行版里同样非法** —— 那扇门要的是真 libc /
-#: 真共享库，而那条路还没完工（`docs/219` §8b 的 S2 还差三件）。2026-10-12 用户定：
+#: 真共享库，而那条路还没完工（`docs/219` §8b 的 S2；动态那一半是 `#360`）。2026-10-12 用户定：
 #: 0.1.4.5 里 libc 不可调用。与 `vm` 那条同一个闸、同一个理由。
 #: 入口写 `fn main`（`docs/222` §4.3：hosted 产物由 C 运行期起）—— 这一条只看驱动器收不收。
 PROBE_HOSTED = "module probe_hosted\n\nchoose hosted\n\nfn main() -> u32 {\n    return 1;\n}\n"

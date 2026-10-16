@@ -954,7 +954,8 @@ def test_m82_hosted_arena_is_byte_identical():
                     f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
             # 两边一致还不够 —— 一致地**没做**那件事也是"一致"。这一段把"做了什么"钉住，
             # 免得两个实现一起退回静态 arena 而这条判据照样绿（`docs/219` §7 那条口径）。
-            assert "@__loment_heap = internal global ptr null" in want, "hosted 的 arena 不是宿主来的"
+            assert f"@__loment_heap = {lomentc_test.HEAP_PTR_INIT}" in want, \
+                "hosted 的 arena 不是宿主来的"
             assert "declare ptr @malloc(i64)" in want, "没向宿主声明分配器"
     # 收集器那一份还得**真的带着收集器**：表按 arena 换过（位图：1 MiB / 64）、且走基址指针
     assert "@__loment_mark = internal global [16384 x i8]" in want

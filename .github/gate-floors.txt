@@ -9,10 +9,10 @@
 #
 # 重新量：`python tools/ci.py --static-only`，每行 `:: [static] <套件> … <p>/<n> 通过` 里的 n。
 # 13 个 driver 脚本（`lom_audit` / `lompi_sync` / `loment_publish` …）没有 `TESTS`，不在这里。
-# 合计 884 条判据 / 71 个套件。
+# 合计 895 条判据 / 72 个套件。
 
 lomc_test 24
-lomentc_test 147
+lomentc_test 148
 potato_test 11
 loment_ct_test 2
 loment_comefor_test 12
@@ -43,14 +43,14 @@ loment_json_test 4
 loment_pkg_test 3
 loment_lomc_test 4
 loment_lsp_test 8
-loment_elf_test 34
+loment_elf_test 35
 loment_pe_test 16
 loment_genesis_test 4
 loment_status_test 4
-lvm_test 2
+lvm_test 4
 lvm_twin_test 3
 loment_net_test 3
-loment_ffi_test 26
+loment_ffi_test 29
 loment_ports_test 9
 loment_hosted_test 14
 loment_rel_test 8
@@ -82,3 +82,4 @@ loment_multisyntax_test 73
 loment_multisyntax_projects_test 3
 loment_megaproject_test 8
 loment_state_test 8
+lvm_profile_test 4
