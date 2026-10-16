@@ -98,15 +98,17 @@ NOT_RUN: dict[str, tuple[str, str]] = {
 #: 这不是"放宽判据": `test_lomelf_selfhost_matches_reference` 会拿这条表**反向核**一遍 ——
 #: 表里每一份都必须**仍然链不过**。哪天它链过了, 判据红, 逼你把它挪回语料。
 #: 表只许变短。
-MIRROR_GAP: dict[str, tuple[str, str]] = {
-    "tour": ("SIGILL (rc=132)",
-             "镜像在**模块级 `i64` 全局**上崩掉（元素类型 64 位 + 初值不是 zeroinitializer）——"
-             "`@__loment_caps` 正是那个形状。参考实现链得过, 所以这是镜像的缺口, 不是 IR 的问题。"
-             "见 **issue #102**"),
-    "native_match_full": ("回填表满了 (rc=1)",
-                          "镜像的回填表容量上限 (TB_FIX_MAX=32768)。它是**点名拒**的, "
-                          "参考实现没有这个上限 —— 属容量, 不属缺陷"),
-}
+#:
+#: **2026-10-16 起是空的**。原先那两份是同一件事的两张脸, 成因各在 `lomelf.lomt` 的一处:
+#:   * `tour` —— `one_global` 用 u32 的 `pow256` 做除法, 元素宽度 ≥ 5 时 `256^b` 回绕成 0,
+#:     `v / 0` 当场 SIGILL; 而且它根本不认聚合初值。`@__loment_caps` 正是那个形状,
+#:     所以**凡是用能力域的程序都链不出来**（issue #102）。
+#:   * `native_match_full` —— `do_switch` 的 case 表跨行时 `q` 停在换行上, `next_label`
+#:     找不到 `label` 退回 `(0,0)`, 于是 `q` 被赋成 **0**: 从头重来, 每绕一圈发一条回填,
+#:     32768 圈后报"回填表满了"。**空 case 表也复现**, 所以那不是容量问题, 是死循环
+#:     （issue #2 / #10 —— 原先把这条记成"属容量, 不属缺陷", 是错的）。
+#: 两个形状各有一条点名判据: `test_mirror_links_the_shapes_that_used_to_take_it_down`。
+MIRROR_GAP: dict[str, tuple[str, str]] = {}
 
 TESTS: list[tuple[str, object]] = []
 
@@ -1749,10 +1751,10 @@ def test_lomelf_selfhost_matches_reference():
     这格的规格书, 能替用户干活的是自举侧那份。链条里 clang 只出现在"种子 -> stage1"
     一步 (genesis, docs/167 §5 记账)。
 
-    语料是 `CORPUS` 减去 `MIRROR_GAP`（镜像还链不了的那两份, 各带理由）。
-    把语料从 4 份放宽到"能跑的每一份"时, 这条**立刻抓到两个缺口** —— 一个是容量上限
-    （点名拒的）, 一个是崩（issue #102）。`MIRROR_GAP` 的执行方式是**只许变短**:
-    表里每一份每轮都要**真的再链一次**, 链过了就红。
+    语料是 `CORPUS` 减去 `MIRROR_GAP`（镜像还链不了的那几份, 各带理由; 2026-10-16 起为空）。
+    把语料从 4 份放宽到"能跑的每一份"时, 这条**立刻抓到两个缺口** —— 一个是崩
+    （issue #102）, 一个是回填表满（当时记成容量, 实为 `do_switch` 的死循环）。
+    `MIRROR_GAP` 的执行方式是**只许变短**: 表里每一份每轮都要**真的再链一次**, 链过了就红。
     """
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
@@ -1806,6 +1808,94 @@ def test_lomelf_selfhost_matches_reference():
                           + " / ".join(gone))
     print(f"      {total} 个程序: 自举镜像与参考逐字节相同; "
           f"另有 {len(MIRROR_GAP)} 份记在 MIRROR_GAP 里, 已反向核实仍然链不过")
+
+
+#: 手写 IR 夹具: **两个各自独立把镜像打下来过**的形状（issue #1 的两个真成因）。
+#: 这是**形状**不是程序 —— 哪一条回退, 判据直接点名, 不用再把 `tour` 二分一遍。
+#: 参考实现两条都编得过, 所以期望值是 `lomelf.compile_ll` 现算的。
+_MIRROR_SHAPE_IR: dict[str, tuple[str, str]] = {
+    "i64_global": (
+        "64 位全局 + 非零初值（含聚合）。旧 `one_global` 用 u32 的 `pow256` 做除法: "
+        "b=4 时 `256^b` 回绕成 0, 除零当场 SIGILL。`@__loment_caps` 就是这形状, "
+        "所以能力域程序全都链不出来（issue #102）。",
+        """@scalar = internal global i64 7
+@big = internal global i64 4294967296
+@neg = internal global i64 -1
+@arr = internal global [2 x i64] [i64 1, i64 2]
+@i32s = internal global i32 8
+@caps = internal constant [1 x { i64, i64, i64, i64 }] [{ i64, i64, i64, i64 } { i64 1163935908, i64 0, i64 4, i64 1 }]
+@blob = private unnamed_addr constant [4 x i8] c"ab\\00c"
+
+define void @_start() {
+  ret void
+}
+"""),
+    "multiline_switch": (
+        "case 表跨行的 `switch`（自举 codegen 发出来的就是这种）。旧 `do_switch` 的 `q` 停在"
+        "换行上, `next_label` 找不到 `label` 退回 `(0,0)`, 于是 `q` 被赋成 0 —— 从头重来, "
+        "每绕一圈发一条回填, 32768 圈后报\"回填表满了\"。第二个函数是**空 case 表**（只把 `]` "
+        "写到下一行）, 一条回填都不需要, 照样打满 —— 这就是它不是容量问题的证据"
+        "（issue #2 / #10）。",
+        """define i32 @f(i32 %x) {
+entry:
+  switch i32 %x, label %e [
+      i32 0, label %a
+      i32 1, label %b
+    ]
+a:
+  ret i32 1
+b:
+  ret i32 2
+e:
+  ret i32 3
+}
+define i32 @g(i32 %x) {
+entry:
+  switch i32 %x, label %z [
+    ]
+z:
+  ret i32 0
+}
+define void @_start() {
+  ret void
+}
+"""),
+}
+
+
+@test
+def test_mirror_links_the_shapes_that_used_to_take_it_down():
+    """镜像对这两个形状的产物与参考**逐字节相同**。
+
+    **Why**: issue #1 说的是"自带的 `tour` 示例编不出来, 而且一声不吭"。它有两个**互相
+    独立**的成因, 都在 `loment/tools/lomelf.lomt` 里, 而**语料一份都没覆盖它们** ——
+    `loment/examples/switch.lomt` 名字叫 switch, 里面**一条 `switch` 都没有**。
+    修完把形状单独钉住: 回退时这条点名, 而不是只剩 `tour` 那条泛泛地红。
+
+    **未修时的实测**（2026-10-16）: `i64_global` → SIGILL (rc=132);
+    `multiline_switch` → `lomelf: 回填表满了 … (TB_FIX_MAX)` (rc=1)。
+    """
+    if not (_clang() and _wsl()):
+        print("      SKIP: 无 clang/WSL")
+        return
+    mir = _mirror()
+    done = []
+    for name, (why, text) in sorted(_MIRROR_SHAPE_IR.items()):
+        want, _info = lomelf.compile_ll(text)
+        llrepo = ROOT / "loment" / "build" / f"_shape_{name}.ll"
+        elfrepo = ROOT / "loment" / "build" / f"_shape_{name}.elf"
+        try:
+            llrepo.write_text(text, encoding="utf-8", newline="\n")
+            rc, err = _mirror_run(mir, f"loment/build/_shape_{name}.ll",
+                                  f"loment/build/_shape_{name}.elf")
+            assert rc == 0, f"[{name}] 镜像退出 {rc}: {err[-200:]} —— {why}"
+            got = elfrepo.read_bytes()
+        finally:
+            llrepo.unlink(missing_ok=True)
+            elfrepo.unlink(missing_ok=True)
+        assert got == want, (f"[{name}] 镜像与参考不同 ({len(got)}B vs {len(want)}B) —— {why}")
+        done.append(name)
+    print(f"      {len(done)} 个形状: 镜像与参考逐字节相同 ({', '.join(done)})")
 
 
 @test
