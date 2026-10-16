@@ -88,7 +88,9 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 53 { return "命令体与声明对不上"; }
     if k == 54 { return "control flow: this function may fall off the end of its body"; }
     if k == 55 { return "控制流：可能从末尾掉出去"; }
+    if k == 56 { return "index past the end of a fixed-size array"; }
     if k == 57 { return "越界：字面量下标越过定长数组的界"; }
+    if k == 58 { return "use after free"; }
     if k == 59 { return "用完再放：这块内存已经被 `free`，不能再用"; }
     return "";
 }
@@ -149,6 +151,10 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 53 { return "命令声明与 `command_main` 对不上：少了一个，或者签名不是入口要求的那个。"; }
     if k == 54 { return "A function that **declares a return type** has a path that reaches the end of its body without a `return`."; }
     if k == 55 { return "一个**声明了返回值**的函数，存在一条路径走到末尾却没 `return`。"; }
+    if k == 56 { return "A literal index runs past the end of a **fixed-size array** (declared `[u32; 4]`, written `a[10]`)."; }
+    if k == 57 { return "一个字面量下标越过了**定长数组**的界（声明是 `[u32; 4]`，却写了 `a[10]`）。"; }
+    if k == 58 { return "A variable points at a block that **was already passed to `free`**, and is used again afterwards."; }
+    if k == 59 { return "一个变量指向的块**已经被 `free`**，之后又用到了它。"; }
     return "";
 }
 
@@ -208,6 +214,10 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 53 { return "`command_main` **不是**被谁直接调用的普通函数 —— 它是工具链生成的那个 `_start` 要去调用的目标，而「生成」这件事只由**命令声明**触发。两半必须成对：没有声明时它是一个**没人调用的函数**（编得过、静默无效）；只有声明而没有它，生成的入口就没有东西可调 —— 那要等到**链接**才炸，所以在检查这一步就拒；签名不对则生成的入口传不进去参数。入口的签名是固定的：`fn command_main(argv: ptr, argc: u32) -> u32`，`argv` 就是 `/proc/self/cmdline` 那一整块，`argv[0]` 是命令自己的路径（`docs/223` §3.2）。"; }
     if k == 54 { return "After codegen that path becomes an **illegal instruction** (`SIGILL`), and it only fires when the path is actually taken - so it is the kind of bug that ships and then blows up when a new input reaches an error branch nobody exercised. \"check passes\" is supposed to mean \"this program will not trap\"; this rule is what makes that true, because a static check is the only place that can say it before the fact."; }
     if k == 55 { return "这类函数发射之后，末尾会落成一条**非法指令**（SIGILL）—— 而它只在**真的走到那一支**时才发生，所以是那种「上线很久、错误分支被新输入踩到」才炸的问题。`check` 通过本该等于「这份程序不会 trap」，这一条就是把那句话兑现：静态检查是唯一能在事前说出口的地方（原先它只是一条写作纪律，见 SKILL.md §6.14）。"; }
+    if k == 56 { return "Both numbers here are **known at compile time**, so this is not \"one possible runtime outcome\" - it is **a compile-time fact** (`docs/247` section 5.1). With `lms` off it has two endings and **neither reports anything**: through clang it is UB (measured in `docs/247` section 4.4 - the IR literally grows a `getelementptr inbounds ... i32 10`), and through the in-repo `lomelf` it silently writes into the neighbouring bytes. Being able to say it here is the whole job of `lms` level 1."; }
+    if k == 57 { return "这里两边的数**都是编译期已知的** —— 所以它不是一个「运行期的一种可能」，而是**一个编译期事实**（`docs/247` §5.1）。`lms` 关着时它有两种下场，而且**都不报错**：走 clang 是 UB（`docs/247` §4.4 实测过，IR 里直接长出 `getelementptr inbounds … i32 10`），走仓内 `lomelf` 是静默踩相邻字节。能在这里说死，是 `lms` 第 1 级唯一要做的事。"; }
+    if k == 58 { return "After `free(p)` that block has gone back to the allocator, so using `p` again is a use-after-free. It **does not necessarily crash** - the block may keep its old bytes until some later `alloc` reuses it (`docs/247` section 5.1), so it is the kind of bug that ships quietly and then blows up when an allocation finally lands on it. The five checks `free` gained in `docs/210` section 2.8 cover **`free`'s own end** (is this really a block, was it already freed); they cannot cover \"used again afterwards\". Separate from E006: moving is an **ownership** matter, freeing is a **legality** one."; }
+    if k == 59 { return "`free(p)` 之后那块内存已经还回分配器，再用 `p` 就是 use-after-free。它**不一定会崩** —— 块可能还留着旧字节，一直到最后被下一次 `alloc` 复用（`docs/247` §5.1），所以症状是那种「上线很久、某次分配把它盖掉」才炸的问题。`docs/210` §2.8 给 `free` 加的那五条检查管的是 **`free` 自己那一端**（是不是真块、有没有重复释放），管不了「之后再用」。与 E006 分开：移走是**所有权**的事，释放是**合法性**的事。"; }
     return "";
 }
 
@@ -267,6 +277,10 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 53 { return "声明 + 签名一致的 `command_main`；普通程序用 `_start`"; }
     if k == 54 { return "the last statement is `return`; an `if` with an `else` where both branches return; a `match` whose every arm returns"; }
     if k == 55 { return "末尾是 `return`；末尾是带 `else` 的 `if`、两支都返回；末尾是每条臂都返回的 `match`"; }
+    if k == 56 { return "the index is a literal and is inside the bounds; the index is a variable or an expression (this rule stays silent)"; }
+    if k == 57 { return "下标是字面量、且落在界内；下标是变量或表达式（这条不发）"; }
+    if k == 58 { return "`p` is not read or written after `free(p)`; `p` is reassigned after the `free`"; }
+    if k == 59 { return "`free(p)` 之后没有再读/写 `p`；`free` 之后 `p` 被重新赋值"; }
     return "";
 }
 
@@ -326,6 +340,10 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 53 { return "只有 `command_main` 没有声明；`command_main(a: u32, b: u32)`；返回 `()`；两个参数顺序反了"; }
     if k == 54 { return "the last statement is `while` / `for` (these end normally), an expression statement, or an `if` **without** an `else`"; }
     if k == 55 { return "末尾是 `while` / `for`（会正常结束）、末尾是表达式语句、末尾是**没有** `else` 的 `if`"; }
+    if k == 56 { return "`lms` is off (nothing is reported - see `why` for the two endings)"; }
+    if k == 57 { return "`lms` 关着（那时不发 —— 下场的两种可能见 `why`）"; }
+    if k == 58 { return "use before the `free`; reassignment followed by use after the `free`"; }
+    if k == 59 { return "`free` 之前的使用；`free` 之后重新赋值再使用"; }
     return "";
 }
 
@@ -357,6 +375,8 @@ pub fn code_ascii(c: u32) -> str {
     if c == 25 { return "two process entries: `_start` and `command_main`"; }
     if c == 26 { return "a command declaration and `command_main` come in pairs (one missing, or a wrong signature)"; }
     if c == 27 { return "a non-() function may fall off the end of its body - every path must return"; }
+    if c == 28 { return "index past the end of a fixed-size array - the index is a literal and the length is known at compile time"; }
+    if c == 29 { return "use after free - this block was already passed to `free`"; }
     return "";
 }
 
@@ -567,6 +587,18 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 433 { return "让每条路径都 `return`：末尾补一个 `return`。"; }
     if k == 435 { return "收尾写成**带 `else` 的 `if`**、两支都返回；`match` 收尾时让**每条臂**都返回（穷尽性由 E008 单独管）。"; }
     if k == 437 { return "函数本来就没有返回值的话，把它声明成 `()` 并去掉 `return` 后面的值。"; }
+    if k == 448 { return "Put the index back inside `0..len-1`."; }
+    if k == 450 { return "If the array really should be longer, lengthen the **declaration** (`[u32; 16]`)."; }
+    if k == 452 { return "When the index is **computed** rather than a literal this rule cannot fire - use a fixed-size array plus an explicit `if` bound check instead."; }
+    if k == 449 { return "把下标改回 `0..len-1` 之内。"; }
+    if k == 451 { return "数组确实该更长的话，把**声明**改长（`[u32; 16]` 之类）。"; }
+    if k == 453 { return "下标是**算出来的**（不是字面量）时这条发不出来 —— 那种情况改用定长数组配一个显式的 `if` 判界。"; }
+    if k == 464 { return "Do not `free` it - let LGC own the block (under `gc_auto` / `gc_auto_alpha` the blocks `alloc` hands out are the collector's anyway)."; }
+    if k == 466 { return "If you really must release early: after `free(p)` assign `p` a new block and stop using the old value."; }
+    if k == 468 { return "Move the `free` to **after the last use** - i.e. where `p`'s lifetime actually ends."; }
+    if k == 465 { return "别 `free` —— 让 LGC 管这块（`gc_auto` / `gc_auto_alpha` 下 `alloc` 发的块本来就由回收器管）。"; }
+    if k == 467 { return "确实要提前还：`free(p)` 之后把 `p` 重新赋成新块，别再用旧值。"; }
+    if k == 469 { return "把 `free` 挪到**最后一个使用点之后** —— 也就是 `p` 的生命周期真结束的地方。"; }
     return "";
 }
 
@@ -600,8 +632,8 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 25 { return 3; }
     if c == 26 { return 4; }
     if c == 27 { return 3; }
-    if c == 28 { return 0; }
-    if c == 29 { return 0; }
+    if c == 28 { return 3; }
+    if c == 29 { return 3; }
     return 0;
 }
 
