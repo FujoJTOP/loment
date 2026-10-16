@@ -298,6 +298,85 @@ int main(void) {
         printf("sn_cap1=%d\n", n); printf("sn_cap1_b0=%d\n", (int)(unsigned char)b[0]);
     }
 
+    /* ---- stdlib: 分配（libc 名字，底下是内建堆） ---- */
+    {
+        unsigned char *a = (unsigned char *)malloc(16);
+        unsigned char *b = (unsigned char *)malloc(16);
+        unsigned char *z, *z2;
+        long k;
+        int allz;
+        printf("malloc_nonnull=%d\n", a != NULL && b != NULL);
+        printf("malloc_distinct=%d\n", a != b);
+        for (k = 0; k < 16; k++) a[k] = (unsigned char)(k + 1);
+        printf("malloc_rw=%d\n", a[0] == 1 && a[15] == 16);
+        free(a); free(b);
+        z = (unsigned char *)calloc(4, 4);
+        allz = 1; for (k = 0; k < 16; k++) if (z[k] != 0) allz = 0;
+        printf("calloc_zero=%d\n", allz);
+        /* 复用路：写脏 -> free -> 再 calloc ⇒ 又必须是 0。只走 bump 的测试会假绿。 */
+        for (k = 0; k < 16; k++) z[k] = 9;
+        free(z);
+        z2 = (unsigned char *)calloc(4, 4);
+        allz = 1; for (k = 0; k < 16; k++) if (z2[k] != 0) allz = 0;
+        printf("calloc_zero_reuse=%d\n", allz);
+        printf("malloc_zero_nonnull=%d\n", malloc(0) != NULL);
+        /* 溢出：n * sz 绕回去。libc 也在这里返回 NULL。 */
+        printf("calloc_overflow_null=%d\n", calloc((size_t)-1, 2) == NULL);
+    }
+
+    /* ---- stdio: 精度 / `*` / `%p` / `%n` ---- */
+    {
+        char b[64]; int n; int cnt = -1;
+        n = snprintf(b, 64, "[%.3s]", "abcdef");
+        printf("pr_s=%s\n", b); printf("pr_s_ret=%d\n", n);
+        n = snprintf(b, 64, "[%.5d][%.0d][%.3d]", 42, 0, -5);
+        printf("pr_d=%s\n", b); printf("pr_d_ret=%d\n", n);
+        n = snprintf(b, 64, "[%*d][%*d]", 6, 42, -6, 42);
+        printf("pr_star=%s\n", b); printf("pr_star_ret=%d\n", n);
+        n = snprintf(b, 64, "[%.*s][%.*s]", 2, "abcdef", -1, "xyz");
+        printf("pr_starp=%s\n", b); printf("pr_starp_ret=%d\n", n);
+        n = snprintf(b, 64, "[%8.3d][%-5.3d]", 42, 42);
+        printf("pr_mix=%s\n", b); printf("pr_mix_ret=%d\n", n);
+        n = snprintf(b, 64, "[%p]", (void *)0);
+        printf("pr_pnull=%s\n", b); printf("pr_pnull_ret=%d\n", n);
+        /* 拿一个**给定的整数**当指针：真地址两边不同，只有这个值两边可比。 */
+        n = snprintf(b, 64, "[%p]", (void *)0xdeadbeefUL);
+        printf("pr_pval=%s\n", b); printf("pr_pval_ret=%d\n", n);
+        n = snprintf(b, 64, "abc%ndef", &cnt);
+        printf("pr_n=%s\n", b); printf("pr_n_ret=%d\n", n);
+        printf("pr_n_cnt=%d\n", cnt);
+    }
+
+    /* ---- libl_host: 文件那一半（自己写、自己读回） ---- */
+    {
+        const char *outp = "/tmp/liblio_c.bin";
+        char seq[300], rbuf[64], line[32];
+        FILE *f;
+        long i;
+        for (i = 0; i < 300; i++) seq[i] = (char)(i % 251);
+        f = fopen(outp, "w");
+        printf("io_open_w=%d\n", f != NULL);
+        printf("io_fwrite=%d\n", (int)fwrite(seq, 1, 300, f));
+        printf("io_ftell_w=%ld\n", ftell(f));
+        printf("io_fflush=%d\n", fflush(f));
+        fclose(f);
+        f = fopen(outp, "r");
+        printf("io_open_r=%d\n", f != NULL);
+        printf("io_fread=%d\n", (int)fread(rbuf, 1, 40, f));
+        printf("io_ftell_r=%ld\n", ftell(f));
+        printf("io_seek0=%d\n", fseek(f, 0, SEEK_SET));
+        printf("io_ftell_0=%ld\n", ftell(f));
+        printf("io_fgets=%d\n", fgets(line, 16, f) != NULL);
+        printf("io_fgets_len=%ld\n", (long)strlen(line));
+        printf("io_fgets_first=%d\n", (int)(unsigned char)line[0]);
+        printf("io_ftell_gets=%ld\n", ftell(f));
+        fclose(f);
+        printf("io_missing_null=%d\n", fopen("/tmp/liblio_nope/x", "r") == NULL);
+        puts("io_puts_ok");
+        putchar(88);
+        putchar(10);
+    }
+
     return 0;
 }
 '''.replace("@@ROWS@@", rows) \
@@ -321,6 +400,7 @@ use "lompi/store/std/0.1.0/string.lomt"
 use "lompi/store/std/0.1.0/ctype.lomt"
 use "lompi/store/std/0.1.0/stdlib.lomt"
 use "lompi/store/std/0.1.0/stdio.lomt"
+use "lompi/store/host/0.1.0/libl_host.lomt"
 
 fn wr(p: ptr, n: u32) -> i64 {
     return syscall4(1, 1, p as u64, n as u64);
@@ -339,6 +419,18 @@ fn lit(s: str) -> ptr {
 
 fn nul() -> ptr {
     return 0 as ptr;
+}
+
+/// 前 n 个字节是不是全 0 —— `calloc` 那条复用路要问的问题。
+fn zero_n(p: ptr, n: u32) -> bool {
+    let i: u32 = 0;
+    while i < n {
+        if load8(p, i) != 0 {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
 }
 
 fn b2i(b: bool) -> i64 {
@@ -408,10 +500,30 @@ fn say_str(tag: str, p: ptr) -> i64 {
 /// **这一层就是"没有变参"的代价**：libc 那边直接写在调用点，这边要先摆成数组。
 /// 摆法（第 k 个实参在偏移 k*8）与 `stdio.lomt` 文件头写的是同一条。
 fn sp(buf: ptr, cap: u32, f: str, a0: u64, a1: u64, a2: u64, n: u32) -> u32 {
-    let av: ptr = alloc(24);
+    let av: ptr = alloc(48);
     mem_store64(av, 0, a0);
     mem_store64(av, 8, a1);
     mem_store64(av, 16, a2);
+    mem_store64(av, 24, 0 as u64);
+    mem_store64(av, 32, 0 as u64);
+    mem_store64(av, 40, 0 as u64);
+    let fp: ptr = alloc(str_len(f) + 1);
+    return snprintf(buf, cap, cstr_of(fp, f), av, n);
+}
+
+/// 六个实参那一版 —— `[%.*s][%.*s]` 这种要四个。
+/// **`sp` 与 `sp6` 都按 `n` 交账**：`n` 比实际装进去的多，`snprintf` 就会去读没写过的槽
+/// （实测：3 槽的版本配 4 个实参 ⇒ **段错误**，那正是"少给实参时 libc 读越界垃圾"的
+/// Loment 侧翻版）。
+fn sp6(buf: ptr, cap: u32, f: str, a0: u64, a1: u64, a2: u64,
+       a3: u64, a4: u64, a5: u64, n: u32) -> u32 {
+    let av: ptr = alloc(48);
+    mem_store64(av, 0, a0);
+    mem_store64(av, 8, a1);
+    mem_store64(av, 16, a2);
+    mem_store64(av, 24, a3);
+    mem_store64(av, 32, a4);
+    mem_store64(av, 40, a5);
     let fp: ptr = alloc(str_len(f) + 1);
     return snprintf(buf, cap, cstr_of(fp, f), av, n);
 }
@@ -696,6 +808,96 @@ fn _start() {
     say(sc, "sn_cap1", sn as i64);
     say(sc, "sn_cap1_b0", load8(ob, 0) as i64);
 
+    // ---- stdlib: 分配（libc 名字，底下是内建堆）
+    let ma: ptr = malloc(16 as u64);
+    let mb: ptr = malloc(16 as u64);
+    say(sc, "malloc_nonnull", b2i(((ma as u64) != (0 as u64)) && ((mb as u64) != (0 as u64))));
+    say(sc, "malloc_distinct", b2i((ma as u64) != (mb as u64)));
+    store8(ma, 0, 1 as u8);
+    store8(ma, 15, 16 as u8);
+    say(sc, "malloc_rw", b2i(load8(ma, 0) == 1 && load8(ma, 15) == 16));
+    let _f1: u32 = free(ma);
+    let _f2: u32 = free(mb);
+    let mz: ptr = calloc(4 as u64, 4 as u64);
+    say(sc, "calloc_zero", b2i(zero_n(mz, 16)));
+    // 复用路：写脏 -> free -> 再 calloc ⇒ 又必须是 0（只走 bump 那一支会假绿）
+    let kk: u32 = 0;
+    while kk < 16 {
+        store8(mz, kk, 9 as u8);
+        kk = kk + 1;
+    }
+    let _f3: u32 = free(mz);
+    let mz2: ptr = calloc(4 as u64, 4 as u64);
+    say(sc, "calloc_zero_reuse", b2i(zero_n(mz2, 16)));
+    say(sc, "malloc_zero_nonnull", b2i((malloc(0 as u64) as u64) != (0 as u64)));
+    say(sc, "calloc_overflow_null",
+        b2i((calloc(18446744073709551615 as u64, 2 as u64) as u64) == (0 as u64)));
+
+    // ---- stdio: 精度 / `*` / `%p` / `%n`
+    sn = sp(ob, 64, "[%.3s]", lit("abcdef") as u64, 0 as u64, 0 as u64, 1);
+    say_str("pr_s", ob);
+    say(sc, "pr_s_ret", sn as i64);
+    sn = sp(ob, 64, "[%.5d][%.0d][%.3d]", 42 as u64, 0 as u64, (0 as i64 - 5) as u64, 3);
+    say_str("pr_d", ob);
+    say(sc, "pr_d_ret", sn as i64);
+    sn = sp6(ob, 64, "[%*d][%*d]", 6 as u64, 42 as u64, (0 as i64 - 6) as u64,
+             42 as u64, 0 as u64, 0 as u64, 4);
+    say_str("pr_star", ob);
+    say(sc, "pr_star_ret", sn as i64);
+    sn = sp6(ob, 64, "[%.*s][%.*s]", 2 as u64, lit("abcdef") as u64,
+             (0 as i64 - 1) as u64, lit("xyz") as u64, 0 as u64, 0 as u64, 4);
+    say_str("pr_starp", ob);
+    say(sc, "pr_starp_ret", sn as i64);
+    sn = sp(ob, 64, "[%8.3d][%-5.3d]", 42 as u64, 42 as u64, 0 as u64, 2);
+    say_str("pr_mix", ob);
+    say(sc, "pr_mix_ret", sn as i64);
+    sn = sp(ob, 64, "[%p]", 0 as u64, 0 as u64, 0 as u64, 1);
+    say_str("pr_pnull", ob);
+    say(sc, "pr_pnull_ret", sn as i64);
+    sn = sp(ob, 64, "[%p]", 3735928559 as u64, 0 as u64, 0 as u64, 1);
+    say_str("pr_pval", ob);
+    say(sc, "pr_pval_ret", sn as i64);
+    let nslot: ptr = alloc(8);
+    mem_store32(nslot, 0, 4294967295);
+    sn = sp(ob, 64, "abc%ndef", nslot as u64, 0 as u64, 0 as u64, 1);
+    say_str("pr_n", ob);
+    say(sc, "pr_n_ret", sn as i64);
+    say(sc, "pr_n_cnt", mem_load32(nslot, 0) as i64);
+
+    // ---- libl_host: 文件那一半（自己写、自己读回）
+    let outp: ptr = lit("/tmp/liblio_l.bin");
+    let seq: ptr = alloc(300);
+    let si: u32 = 0;
+    while si < 300 {
+        store8(seq, si, (si % 251) as u8);
+        si = si + 1;
+    }
+    let wf: ptr = fopen(outp, lit("w"));
+    say(sc, "io_open_w", b2i((wf as u64) != (0 as u64)));
+    say(sc, "io_fwrite", fwrite(seq, 1, 300, wf) as i64);
+    say(sc, "io_ftell_w", ftell(wf));
+    say(sc, "io_fflush", fflush(wf) as i64);
+    let _cw: i32 = fclose(wf);
+    let rf: ptr = fopen(outp, lit("r"));
+    say(sc, "io_open_r", b2i((rf as u64) != (0 as u64)));
+    let rbuf: ptr = alloc(64);
+    say(sc, "io_fread", fread(rbuf, 1, 40, rf) as i64);
+    say(sc, "io_ftell_r", ftell(rf));
+    say(sc, "io_seek0", fseek(rf, 0 as i64, 0) as i64);
+    say(sc, "io_ftell_0", ftell(rf));
+    let line: ptr = alloc(32);
+    let gp: ptr = fgets(line, 16, rf);
+    say(sc, "io_fgets", b2i((gp as u64) != (0 as u64)));
+    say(sc, "io_fgets_len", strlen(line) as i64);
+    say(sc, "io_fgets_first", load8(line, 0) as i64);
+    say(sc, "io_ftell_gets", ftell(rf));
+    let _cr: i32 = fclose(rf);
+    say(sc, "io_missing_null",
+        b2i((fopen(lit("/tmp/liblio_nope/x"), lit("r")) as u64) == (0 as u64)));
+    let _pu: i32 = puts(lit("io_puts_ok"));
+    let _p1: i32 = putchar(88);
+    let _p2: i32 = putchar(10);
+
     syscall4(60, 0, 0, 0);
 }
 '''.replace("@@N@@", str(len(_CT_BYTES))) \
@@ -788,7 +990,22 @@ def test_libl_matches_libc():
         got = _run_loment(td)
     diff = _first_diff(got, want)
     assert not diff, f"LibL 与 glibc 不一致 @ {diff}"
-    print(f"      libc 面: {len(want.splitlines())} 项与 glibc 逐字节一致")
+    # 宿主面那一条的**第二半**：两侧各自写的文件必须逐字节相同 —— 上面比的是 stdout，
+    # 而"写出去的东西对不对"只有比文件才算数。
+    #
+    # ⚠ **前缀必须是 `_WSLCMD`，不能写死 `["wsl", "-e"]`**：#382 之后 `_wsl()` 在 Linux 上
+    # 直接返回 True，于是这条在 ubuntu runner 上是**原生跑**的 —— 写死 `wsl` 就撞
+    # `FileNotFoundError`（2026-10-15 实测：CI 上 `loment_libl_test` 1/2，而且**跳过数
+    # 从 1 掉到 0** —— 那个 0 正是"这条不再跳过、而是在 Linux 上真跑起来了"的信号）。
+    # 两个文件都落在 `/tmp` 的**绝对路径**上，所以原生与经 WSL 两种情形路径相同。
+    r = subprocess.run([*_WSLCMD, "bash", "-lc",
+                        "cmp /tmp/liblio_c.bin /tmp/liblio_l.bin && "
+                        "wc -c < /tmp/liblio_l.bin"],
+                       capture_output=True, text=True, timeout=120, shell=False)
+    assert r.returncode == 0, (
+        f"两侧写出的文件不同（`cmp` 非零）: {r.stderr.strip()[:200]}")
+    print(f"      libc 面: {len(want.splitlines())} 项与 glibc 逐字节一致"
+          f"；写出的文件也逐字节相同（{int(r.stdout.strip())} 字节）")
 
 
 @test
