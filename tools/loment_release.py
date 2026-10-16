@@ -150,6 +150,9 @@ GLOBS = [
     "tools/loment_gc_surface.py", "tools/loment_gc_surface_test.py",
     "tools/loment_gc_why.py", "tools/loment_gc_why_test.py",
     "tools/loment_syscalls.py", "tools/loment_manual.py", "tools/ci.py",
+    # `#343` 那一类的计量器（`#369`）：两条不变量（非零退出要带诊断、不许被信号打死）
+    # 过一层语料，缺口的**账**在判据里，只许变短。
+    "tools/loment_invariant_test.py",
     "tools/vscode_ext.py", "tools/vscode_ext_test.py",
     # 调试器 (docs/190): DAP 适配器 + ptrace 后端, 及其无头判据。
     # **位置与自举那份 `lomrel.lomt` 对齐** —— 见下面那条注释。
@@ -283,6 +286,9 @@ GLOBS = [
     # 自然语言写法的语料与它的**同源 Loment 孪生** (docs/197): 两份**必须是同一个
     # 程序**的两种拼法 —— 判据比的是"翻出来的 Loment 逐字节相同", 所以两份都得在。
     "loment/nltrans/*.nl", "loment/nltrans/*.lomt",
+    # `#343` 那一类（"编译器不作声地死掉"）的**最小见证**（`#369`）：`#343` 表里每一格
+    # 各一只，是这一类**仅有的**目击者 —— 边界走查在判据里现生成，见证只能是文件。
+    "loment/invariants/*.lomt",
     "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
     "lom/*.lom",
     # 设计文档: 这份清单是 **Loment 线**的, 而本仓就是 Loment 的开发口 —— `docs/` 里
