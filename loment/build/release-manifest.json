@@ -939,7 +939,7 @@
   },
   {
    "path": "tools/loment_doc_test.py",
-   "sha256": "fbd7ec61056099933e976f30aa7e46b05e1a4e7dd03bbc43c43c3f61a3710cc8"
+   "sha256": "450578e5132eebf3d300dfc510857dea746e5cac2ddb812d330d60b82c542d90"
   },
   {
    "path": "tools/loment_json_test.py",
@@ -1259,7 +1259,7 @@
   },
   {
    "path": "loment/tools/lomdoc.lomt",
-   "sha256": "f96929f4750ecdf40899dce084ba68fe91c156009cfae1e29661aa5eec782409"
+   "sha256": "b8250aeb28e25e30c04547d7021f961e4efbd92c69f8f155f594e42ba39278f0"
   },
   {
    "path": "loment/tools/lomelf.lomt",
