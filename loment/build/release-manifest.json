@@ -107,7 +107,7 @@
   },
   {
    "path": "tools/loment_caps_test.py",
-   "sha256": "83798eb5de2921f1645a1d425a5088e6093420fabd4917f51889c797357d20b3"
+   "sha256": "39501854cee5c3eb75c05f2c24b5fc0e51f07ecfa8fd70384593c5e913a8cdea"
   },
   {
    "path": "tools/loment_err_test.py",
