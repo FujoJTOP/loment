@@ -966,17 +966,28 @@ fn skip_generics(src: ptr, t: ptr, i: u32, n: u32) -> u32 {
 }
 
 /// 函数: 顶层 fn + impl 方法 (折叠名 `<类型>_<方法>`, 首参 `__self: <类型>`)。
+///
+/// `register <名字> { … }` (`docs/223` 形态 A) 里的那个函数**也是顶层函数** ——
+/// 块那层壳语义上是透明的 (参考实现按 AST 收, 根本没有这一层), 但对**按深度走**
+/// 的这里它是可见的: 不单独认出来, 块里的函数就整个看不见 (#399)。
 fn sec_funcs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
     let i: u32 = 0;
     let depth: u32 = 0;
     let cnt: u32 = 0;
     let impl_ty: u32 = 0;
     let impl_depth: u32 = 0;
+    let reg_depth: u32 = 0;            // register 块那一层的深度 (不在块里就是 0)
     while i < n && tk_kind(t, i) != 4 {
         if tk_is(src, t, i, "{") {
+            let d0: u32 = depth;
             depth = depth + 1;
             if impl_ty != 0 && impl_depth == 0 {
                 impl_depth = depth;
+            }
+            // 块 `{` 前面两格正好是 `register` `<名字>` —— 形状由 `_reg_one_fn` 钉死
+            // (块里恰好一个函数)。`fn register(…)` 那种的 `{` 前面是 `)`, 不会误认。
+            if d0 == 0 && reg_depth == 0 && i >= 2 && tk_is(src, t, i - 2, "register") {
+                reg_depth = depth;
             }
             i = i + 1;
         } else {
@@ -987,6 +998,9 @@ fn sec_funcs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
                 if impl_ty != 0 && depth < impl_depth {
                     impl_ty = 0;
                     impl_depth = 0;
+                }
+                if reg_depth != 0 && depth < reg_depth {
+                    reg_depth = 0;
                 }
                 i = i + 1;
             } else {
@@ -1021,6 +1035,9 @@ fn sec_funcs(mem: ptr, src: ptr, len: u32, t: ptr, n: u32) -> u32 {
                         }
                         let is_free: u32 = 0;
                         if depth == 0 && tk_is(src, t, i, "fn") {
+                            is_free = 1;
+                        }
+                        if reg_depth != 0 && depth == reg_depth && tk_is(src, t, i, "fn") {
                             is_free = 1;
                         }
                         if is_method == 1 || is_free == 1 {

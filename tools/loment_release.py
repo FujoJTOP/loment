@@ -111,6 +111,8 @@ GLOBS = [
     # 对照物三把不同的尺子 —— L0 字节 / 独立推出的布局 / FreeType。
     "tools/loment_lumtui_test.py",
     "tools/loment_cli_test.py",
+    # 固定容量盘点 (docs/345 那件事的"数"): 自举侧有多少个固定容量、几个越界时说不出话
+    "tools/loment_caps.py", "tools/loment_caps_test.py",
     # 报错器 (docs/182 §6/§8)。**位置与自举那份 `lomrel.lomt` 对齐** —— 两处的条目顺序
     # 就是清单的顺序, 插在不同位置会给出同集合不同顺序的两份清单 (见下面那段注解)。
     "tools/loment_err_test.py",
@@ -150,6 +152,9 @@ GLOBS = [
     "tools/loment_gc_surface.py", "tools/loment_gc_surface_test.py",
     "tools/loment_gc_why.py", "tools/loment_gc_why_test.py",
     "tools/loment_syscalls.py", "tools/loment_manual.py", "tools/ci.py",
+    # `#343` 那一类的计量器（`#369`）：两条不变量（非零退出要带诊断、不许被信号打死）
+    # 过一层语料，缺口的**账**在判据里，只许变短。
+    "tools/loment_invariant_test.py",
     "tools/vscode_ext.py", "tools/vscode_ext_test.py",
     # 调试器 (docs/190): DAP 适配器 + ptrace 后端, 及其无头判据。
     # **位置与自举那份 `lomrel.lomt` 对齐** —— 见下面那条注释。
@@ -283,6 +288,9 @@ GLOBS = [
     # 自然语言写法的语料与它的**同源 Loment 孪生** (docs/197): 两份**必须是同一个
     # 程序**的两种拼法 —— 判据比的是"翻出来的 Loment 逐字节相同", 所以两份都得在。
     "loment/nltrans/*.nl", "loment/nltrans/*.lomt",
+    # `#343` 那一类（"编译器不作声地死掉"）的**最小见证**（`#369`）：`#343` 表里每一格
+    # 各一只，是这一类**仅有的**目击者 —— 边界走查在判据里现生成，见证只能是文件。
+    "loment/invariants/*.lomt",
     "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
     "lom/*.lom",
     # 设计文档: 这份清单是 **Loment 线**的, 而本仓就是 Loment 的开发口 —— `docs/` 里
