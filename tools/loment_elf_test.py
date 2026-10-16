@@ -566,6 +566,74 @@ def test_mirror_phi_is_simultaneous():
     print("      phi 同时赋值: 参考得 2, 自举侧逐字节相同")
 
 
+#: `#313`：GEP 的下标是**符号扩展**的（LLVM LangRef）。`@g[6] - 4` 该落在 `@g[2]`；
+#: 零扩展让它落到 `@g[6] + 4294967292` —— 4 GiB 之外，读它就是 SIGSEGV（139，零输出）。
+#: 程序把 42 写在 `@g[2]`，再从那个负偏移读回来当退出码：**修好得 42，没修得 139**。
+_NEG_GEP_IR = """\
+@g = internal global [8 x i8] zeroinitializer
+
+define i32 @_start() {
+entry:
+  %g2 = getelementptr [8 x i8], ptr @g, i32 0, i32 2
+  store i8 42, ptr %g2
+  %p = getelementptr [8 x i8], ptr @g, i32 0, i32 6
+  %q = getelementptr i8, ptr %p, i32 -4
+  %v = load i8, ptr %q
+  %z = zext i8 %v to i32
+  %c = zext i32 %z to i64
+  %r = call i64 asm sideeffect "syscall", "={ax},{ax},{di},{si},{dx},~{cx},~{r11},~{memory}"(i64 60, i64 %c, i64 0, i64 0)
+  ret i32 0
+}
+"""
+
+
+@test
+def test_a_negative_gep_index_is_sign_extended():
+    """负的 `i32` 下标**不许被零扩展**（`#313`）—— 两半都要，缺哪一半都会漏一种错法。
+
+    **Why**：`Emitter.get` 的契约是"零扩展到 64 位，符号语义在用到的地方显式 `sext`"
+    （它自己的 docstring 就这么写）—— 而 GEP 的下标**恰好就是要符号的那一处**，那里却
+    调了 `get`。`-4` 于是变成 `+4294967292`：地址跑到 4 GiB 之外，撞了就是 SIGSEGV。
+    结构体那条路不受影响（`field_offset` + `alu_ri`，那条本来就符号扩展），所以这是
+    **同一个函数里两条路打架**，不是设计如此。
+
+    **How to apply**：
+      * **行为那一半**（参考实现）：编出来跑，退出码该是 **42**；没修是 **139**。
+      * **孪生那一半**（`loment/tools/lomelf.lomt`）：同一份 IR 过自举镜像，与参考
+        **逐字节相同**。少了这一半，只修 Python 那一侧也照样绿 —— 而两份实现打架正是
+        这个仓最不该出现的东西（比**文本**的那类判据抓不到它）。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    want_elf, _info = lomelf.compile_ll(_NEG_GEP_IR)
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        nat = td / "neggep.native"
+        nat.write_bytes(want_elf)
+        rc, _out = _run_bin(nat, "neggep", td, timeout=20)
+    assert rc == 42, (
+        f"负数 GEP 下标没被符号扩展：退出码 {rc}（期望 42；139 = SIGSEGV，即地址跑到 4 GiB 外）。"
+        "查 `tools/lomelf.py` 的 `_gep` 是不是还在用 `self.get` 而不是 `self.get_signed`")
+    if not _clang():
+        print("      参考侧: 负下标符号扩展 (得 42)；自举侧: 无 clang, 跳过字节比对")
+        return
+    mir = _mirror()
+    llrepo = ROOT / "loment" / "build" / "_neggep.ll"
+    elfrepo = ROOT / "loment" / "build" / "_neggep.elf"
+    try:
+        llrepo.write_text(_NEG_GEP_IR, encoding="utf-8", newline="\n")
+        rcm, err = _mirror_run(mir, "loment/build/_neggep.ll", "loment/build/_neggep.elf")
+        assert rcm == 0, f"镜像退出 {rcm}: {err[-200:]}"
+        natm = elfrepo.read_bytes()
+    finally:
+        elfrepo.unlink(missing_ok=True)
+        llrepo.unlink(missing_ok=True)
+    assert natm == want_elf, (
+        f"两份实现不同 ({len(natm)}B vs {len(want_elf)}B) —— 自举侧多半还在零扩展那个负下标")
+    print("      负 GEP 下标: 参考得 42, 自举侧逐字节相同")
+
+
 @test
 def test_gc_manual_free_list_recycles():
     """`gc_manual` 的**空闲链表真的被复用**（不只是前沿回退）—— 判据是**一对**程序。
