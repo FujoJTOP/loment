@@ -316,16 +316,21 @@ rc=132 / alpha 跑通 rc=7）+ 逐字节（`loment_p8_test` 的 m88/m89/m91 —�
 **一个踩进去的坑（值得写下来）**：最初的小回收是"只清扫年轻代、**不**重置空闲链表"。那是**坏的**：
 前沿退回去之后再长上来，同一块会被再 `free` 一次（`__loment_collect` 里那句注释警告的正是这件事），
 链表一坏，`alloc` 就可能返回一个**低地址的假大块** —— 于是判据里那个"年轻块"**一出生就算老的**，
-**判据空转**（实测：拆掉写屏障那一趟，判据照样绿）。修法是**每次重置链表、再由清扫把死块整堆重挂**。
+**判据空转**（实测：拆掉写屏障那一趟，判据照样绿）。当时的修法是**每次重置链表**。
 
-**这个坑还有下半截（2026-10-15 才补上，`FujoJTOP/loment#366`）**：上面那句"再由清扫重挂"当时
-只是一句**期望**，代码里并没有做到 —— 清扫那一格走的是 `__loment_free`，而它有一条守卫
-（**只在块头 `next == -1`（借出态）时才链接**，就是 §2.8 挡住"第二次释放"的那一条）。
-**已经空闲的块**头里存的正是链表后继 ⇒ 守卫直接返回 ⇒ 被清空的那张表**只补得回这一趟新死的块**，
-**"这趟之前就空闲"的块从此谁都找不着**：既不在链表上、也不在前沿里。arena 每收一次少一截 ——
-判据 `loment_elf_test::test_collection_keeps_blocks_that_were_already_free` 里那只 `gc_auto` 程序
-修之前是 **rc = 132**（约八次回收把 64 KiB 丢光）。修法是清扫那一格**直接挂回表头**
-（顶到前沿的那一块仍走前沿回退），不再借道那条带守卫的 `free`。
+**而这个「修法」本身后来变成了 bug（2026-10-15，`FujoJTOP/loment#366`）**：重置的理由是
+「本来就在链上的块会被再 `free` 一次（双重插入，链就毁了）」—— 可那条理由**站在 `#164` 之前**：
+当时 `free` 不验所有权，谁调都往里挂。`#164` 之后 `__loment_free` 只认**借出中**的块
+（块头 `next` 是负数，见 §2.8），已经在链上的一律**惰性返回** —— 于是重置**防不住任何东西**，
+却把**当前所有空闲块**从分配器手里**永久**丢掉：清扫撞上它们时那道守卫拒绝重挂，
+而清扫**不会**把它们放回去。字节还在 arena 里、还在前沿之下，`alloc` 再也摸不到 ——
+64 KiB 的 arena 约**八次回收**就见底。
+
+**落地的修法是那一行直接删掉**（`__loment_collect` 与 `__loment_minor` 两处都删），
+不留"重置"这个动作。判据两条互补：
+`loment_elf_test::test_a_collection_keeps_the_free_list`（单只程序，直接量"收完还在不在链上"）
+与 `::test_collection_keeps_blocks_that_were_already_free`（三只同源，第三只是**证伪**：
+不 `free` 的那一份必须耗尽）。
 
 **同一处还有一半是"漏了"而不是"错了"（`FujoJTOP/loment#367`）**：触发那句原先只挂在 `alloc`
 这个**内建**的发射点上，而 `str_concat` 走的是同一个分配函数、却不经过那个点 —— 于是一份
@@ -578,7 +583,7 @@ L2 之所以能不扫描，是因为**严格后进先出**：前沿退回去，�
 | **两个实现一致** | L0 那一对、L1 那份真值表、L2 那份真值表、**收集器那一份**，两个实现都**逐字节**一致（`loment_p8_test` 的 `test_m88_l0_alpha_pair_is_byte_identical` / `test_m91_l1_definite_lifetime_is_byte_identical` / `test_m89_l2_epoch_is_byte_identical` / `test_m90_gc_auto_collector_is_byte_identical`）。m90 尤其难"蒙对"：收集器本体可以脚本生成，但**挂点是手写的** —— 根表每格吃三条 temp，编号错一位整段就错 | ✅ **已写** |
 | **块内精确真的按掩码走** | 四个站点四格（字面量值 ⇒ 掩码 0 / 非字面量值 ⇒ 那一位置位 / 交给用户函数 ⇒ 不精确 / 偏移是变量 ⇒ 不精确）+ "只有精确站点改写块头" + "掩码真的带上去了且没有表"（`lomentc_test::test_slot_table_rule`）；同一份源两个实现**逐字节一致**，且产物里那两条带掩码的标记必须在、不许空转（`loment_p8_test::test_m92_slot_table_is_byte_identical`）| ✅ **已写**（静态 + 孪生；动态那一半在 §7 记了理由）|
 | **`--debug` 不改产物** | L0 与 L2 各一份：`--debug` 的 IR 与不带的那一份**必须不同**且带 `#dbg_declare`（否则判据在空转），过**两个**链接器后与原生产物**逐字节相同**，跑起来退出码一致（`loment_elf_test::test_debug_flag_adds_metadata_and_nothing_else` + `::test_debug_ir_links_the_same_through_the_mirror`）| ✅ **已写** |
-| **回收不吞空闲链表** | 三只同源程序（只差 `choose` 档位与有没有 `free`）：循环里只握一块活块，每圈分配 8008 B、把**上一块** `free` 掉 —— 被 `free` 的那一块在回收发生时**没有任何根指着它**，正是"已经空闲、应当被重挂"的那一类。2.4 MB 请求过 64 KiB arena：`gc_auto` + `free` **跑完**（rc=7）、`gc_manual` + `free` **跑完**（钉住"程序本身跑得动"）、`gc_manual` 不 `free` **耗尽**（rc=132，证伪）。修之前第一只是 rc=132（`loment_elf_test::test_collection_keeps_blocks_that_were_already_free`，`FujoJTOP/loment#366`）| ✅ **已写**（2026-10-15）|
+| **回收不吞空闲链表** | 三只同源程序（只差 `choose` 档位与有没有 `free`）：循环里只握一块活块，每圈分配 8008 B、把**上一块** `free` 掉 —— 被 `free` 的那一块在回收发生时**没有任何根指着它**，正是"已经空闲、应当留在链上"的那一类。2.4 MB 请求过 64 KiB arena：`gc_auto` + `free` **跑完**（rc=7）、`gc_manual` + `free` **跑完**（钉住"程序本身跑得动"）、`gc_manual` 不 `free` **耗尽**（rc=132，证伪）。修之前第一只是 rc=132（`loment_elf_test::test_collection_keeps_blocks_that_were_already_free`，`FujoJTOP/loment#366`）| ✅ **已写**（2026-10-15）|
 | **每个分配点都触发** | 一份**一次 `alloc` 都不调**的程序（循环里 `str_concat(a, a)`，活集恒 32 B）：320 KB 请求过 64 KiB arena —— `gc_auto` **跑完**（rc=7）/ `gc_manual` **耗尽**（rc=132，证伪）。修之前 `gc_auto` 那只也是 rc=132：触发只挂在 `alloc` 内建上，`str_concat` 的分配点没问（`loment_elf_test::test_every_alloc_site_arms_the_collector`，`FujoJTOP/loment#367`）| ✅ **已写**（2026-10-15）|
 | **提升缓冲的字也在根里** | `#362` 的复现：一份 `gc_auto_alpha` 的源里，`hold` 是 L0 候选（`alloc(8)` 字面量、只经由只解引用的 `wr64` 使用），目标唯一的引用就是写进 `hold` 的那 8 个字节；末尾那个 `alloc(32)`（40 B 块，全程序只有目标用这个尺寸）是**探测块**。三只同源程序：`alpha` **跑完**（rc=7；修之前 rc=3，读回 200）；`alpha` **不写那 8 个字节** → **必须不是 7**（证伪：没有那 8 个字节，对象本就该被收）；`auto` **跑完**（rc=7，那一档没有 L0）（`loment_elf_test::test_a_promoted_buffer_is_scanned`，`FujoJTOP/loment#362`）| ✅ **已写**（2026-10-15）|
 | **复用不让遍历失步** | `#368` 的复现：每圈拼一条 8 字节的串再 `free`、随后分配 16 字节 —— 被 `free` 的那块会被**复用**，而 `24 - 16 = 8 < 16` 正好走**不拆**那条路（块的记录尺寸被写小了，遍历掉进块内部读到 0 就原地打转）。4097 圈、两次回收：`gc_auto` **跑完**（rc=7；修之前被 timeout 杀掉 rc=124）/ `gc_manual` **耗尽**（rc=132，证伪）（`loment_elf_test::test_a_recycled_block_does_not_derail_the_walks`，`FujoJTOP/loment#368`）| ✅ **已写**（2026-10-15）|

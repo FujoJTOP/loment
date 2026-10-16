@@ -5957,9 +5957,10 @@ done:
 
 ; **清扫**：从 `%from` 起把没标记的块**交回分配器**。**起点参数化**同 `propagate`
 ; （小回收只清扫年轻代）。
-; **这里不重置空闲链表**（`@__loment_freehead`）—— 两个调用方在进这里之前各重置一次
-; （`__loment_collect` 与 `__loment_minor` 都是「先清空、再整堆清扫」），所以**重挂的那一半
-; 由这里承担**：`kill:` 里是**直接挂回表头**，不走 `__loment_free`。理由写在那一格。
+; **这里不重置空闲链表**（`@__loment_freehead`）—— 全量那一趟由**调用方**在进这里之前重置。
+; 理由见 `__loment_collect` 里那段：重置是「防止同一块被挂两次」的手段，而**小回收不能重置**
+; —— 老年代里那些**已经挂在链上的空闲块**不属于这次清扫的范围，重置一次就把它们从链上
+; 丢了（不是不安全，是白漏内存）。
 define internal void @__loment_sweep(i32 %from) {
 entry:
   br label %sl
@@ -5984,13 +5985,6 @@ sb:
 keep:
   br label %slc
 kill:
-  ; **直接挂回表头，不走 `__loment_free`**（`FujoJTOP/loment#366`）—— 那条路有一条守卫：
-  ; 只在块头 `next == -1`（借出态）时才链接。而**已经空闲的块**头里存的正是链表后继
-  ; ⇒ 守卫直接返回，块既不进链、也不在前沿里 = **永久丢失**。调用方进这里之前刚把链表
-  ; 清空（那正是为了防「同一块挂两次」），于是「清空 + 由清扫重挂」里**重挂的那一半**
-  ; 必须自己挂。少了这一半，每收一次就丢掉「这趟之前已经空闲」的全部块 —— 64 KiB 的
-  ; arena 约八次回收见底（`#366` 的 rcode 132）。链表此刻是空的 ⇒ 直接挂不会重复。
-  ;
   ; **这里的「清标记」什么都不做**（曾经写的是 `store i32 0, ptr %smp`）—— 那不是清一格，
   ; 是**越界清**：`%smp` 指向位图里的**一格字节**（`@__loment_mark` 每 8 字节堆一位），
   ; `store i32` 一次抹掉 **4 格 = 256 字节堆里的全部块**；就算写成 `store i8 0`，也照样
@@ -5999,20 +5993,9 @@ kill:
   ; —— 于是它们在同一趟清扫里被当垃圾交回分配器，程序随后读到的是复用后的字节。
   ; 而清零**本来就不需要**：走到这一格的**前提**就是「这一位是 0」（`%smsm` 为假）。
   ; 判据：`loment_elf_test::test_sweep_*` 两条同形语料（同源只差 `choose` 档位）。
-  %kend = add i32 %si, %ssz
-  %ktail = icmp eq i32 %kend, %so
-  br i1 %ktail, label %krew, label %klnk
-krew:
-  ; 顶着前沿的那一块：**收回前沿**（与 `__loment_free` 同一条规矩），不挂链 ——
-  ; 挂上它只会让 `alloc` 的 bump 那一侧看着更满，前沿却缩不回去。
-  store i32 %si, ptr @__loment_off
-  br label %slc
-klnk:
-  %k4 = add i32 %si, 4
-  %kpp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %k4
-  %khead = load i32, ptr @__loment_freehead
-  store i32 %khead, ptr %kpp
-  store i32 %si, ptr @__loment_freehead
+  %k8 = add i32 %si, 8
+  %kp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %k8
+  call void @__loment_free(ptr %kp)
   br label %slc
 slc:
   %sex = add i32 %si, %ssz
@@ -6251,9 +6234,10 @@ done:
 
 ; **清扫**：从 `%from` 起把没标记的块**交回分配器**。**起点参数化**同 `propagate`
 ; （小回收只清扫年轻代）。
-; **这里不重置空闲链表**（`@__loment_freehead`）—— 两个调用方在进这里之前各重置一次
-; （`__loment_collect` 与 `__loment_minor` 都是「先清空、再整堆清扫」），所以**重挂的那一半
-; 由这里承担**：`kill:` 里是**直接挂回表头**，不走 `__loment_free`。理由写在那一格。
+; **这里不重置空闲链表**（`@__loment_freehead`）—— 全量那一趟由**调用方**在进这里之前重置。
+; 理由见 `__loment_collect` 里那段：重置是「防止同一块被挂两次」的手段，而**小回收不能重置**
+; —— 老年代里那些**已经挂在链上的空闲块**不属于这次清扫的范围，重置一次就把它们从链上
+; 丢了（不是不安全，是白漏内存）。
 define internal void @__loment_sweep(i32 %from) {
 entry:
   %hb = call ptr @__loment_arena()
@@ -6279,13 +6263,6 @@ sb:
 keep:
   br label %slc
 kill:
-  ; **直接挂回表头，不走 `__loment_free`**（`FujoJTOP/loment#366`）—— 那条路有一条守卫：
-  ; 只在块头 `next == -1`（借出态）时才链接。而**已经空闲的块**头里存的正是链表后继
-  ; ⇒ 守卫直接返回，块既不进链、也不在前沿里 = **永久丢失**。调用方进这里之前刚把链表
-  ; 清空（那正是为了防「同一块挂两次」），于是「清空 + 由清扫重挂」里**重挂的那一半**
-  ; 必须自己挂。少了这一半，每收一次就丢掉「这趟之前已经空闲」的全部块 —— 64 KiB 的
-  ; arena 约八次回收见底（`#366` 的 rcode 132）。链表此刻是空的 ⇒ 直接挂不会重复。
-  ;
   ; **这里的「清标记」什么都不做**（曾经写的是 `store i32 0, ptr %smp`）—— 那不是清一格，
   ; 是**越界清**：`%smp` 指向位图里的**一格字节**（`@__loment_mark` 每 8 字节堆一位），
   ; `store i32` 一次抹掉 **4 格 = 256 字节堆里的全部块**；就算写成 `store i8 0`，也照样
@@ -6294,20 +6271,9 @@ kill:
   ; —— 于是它们在同一趟清扫里被当垃圾交回分配器，程序随后读到的是复用后的字节。
   ; 而清零**本来就不需要**：走到这一格的**前提**就是「这一位是 0」（`%smsm` 为假）。
   ; 判据：`loment_elf_test::test_sweep_*` 两条同形语料（同源只差 `choose` 档位）。
-  %kend = add i32 %si, %ssz
-  %ktail = icmp eq i32 %kend, %so
-  br i1 %ktail, label %krew, label %klnk
-krew:
-  ; 顶着前沿的那一块：**收回前沿**（与 `__loment_free` 同一条规矩），不挂链 ——
-  ; 挂上它只会让 `alloc` 的 bump 那一侧看着更满，前沿却缩不回去。
-  store i32 %si, ptr @__loment_off
-  br label %slc
-klnk:
-  %k4 = add i32 %si, 4
-  %kpp = getelementptr i8, ptr %hb, i32 %k4
-  %khead = load i32, ptr @__loment_freehead
-  store i32 %khead, ptr %kpp
-  store i32 %si, ptr @__loment_freehead
+  %k8 = add i32 %si, 8
+  %kp = getelementptr i8, ptr %hb, i32 %k8
+  call void @__loment_free(ptr %kp)
   br label %slc
 slc:
   %sex = add i32 %si, %ssz
