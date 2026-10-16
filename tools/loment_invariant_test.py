@@ -182,7 +182,7 @@ def boundary_cases() -> dict[str, str]:
         ps = ", ".join(f"a{i}: i32" for i in range(1, n + 1))
         args = ", ".join("1 as i32" for _ in range(n))
         c[f"boundary-params-{n}"] = (
-            "module w\n\nfn f(" + ps + ") -> i32 {\n    a1\n}\n\n"
+            "module w\n\nfn f(" + ps + ") -> i32 {\n    return a1;\n}\n\n"
             "fn _start() {\n    let r: i32 = f(" + args + ");\n"
             "    syscall4(60, r as u64, 0, 0);\n}\n")
     for n in (64, 65):                      # #44：今天的墙
@@ -195,7 +195,7 @@ def boundary_cases() -> dict[str, str]:
             + " + ".join("1" for _ in range(n))
             + ";\n    syscall4(60, x, 0, 0);\n}\n")
     for n in (800,):                        # 源大小（函数条数）
-        body = "".join(f"fn f{i}() -> i32 {{ {i} }}\n\n" for i in range(n))
+        body = "".join(f"fn f{i}() -> i32 {{ return {i}; }}\n\n" for i in range(n))
         c[f"boundary-{n}fn"] = (
             "module w\n\n" + body + "fn _start() {\n    syscall4(60, 7, 0, 0);\n}\n")
     return c
@@ -207,9 +207,9 @@ def boundary_cases() -> dict[str, str]:
 #: 一格就把这一行划掉（判据会提醒）。量于 2026-10-15，`origin/main` 上前一版（`#368` 那棵树）。
 #:
 #: 两格的来路（都在**自举驱动**那一侧，参考实现那边都不死 —— 这就是 `#369` 说的陷阱）：
-#:   * `eleven-params` / `boundary-params-11`：`#265`。10 个参数干净、11 个 SIGILL(132)。
-#:     参考实现那一侧**有声**（`[ERR] 期望 ;，得到 '}'`），但那条报文是**错的** ——
-#:     真因是参数个数的上限，报出来的却是语法错（另开 issue，不算这一类的成员）。
+#:   * `eleven-params` / `boundary-params-11`：`#265`。10 个参数干净、11 个 SIGILL(132)，
+#:     而**参考实现照旧编得出 IR**（`rc=0`）—— 于是这一格又是"两份实现分岔，而死掉的是
+#:     用户真正跑的那份"。10 个参数那一格两边都过，所以墙正好在 11 上。
 #:   * `struct-literal-no-trailing-comma`：`#11`。末字段没尾逗号的结构体**当字面量用**时
 #:     SIGSEGV(139)。参考实现照着编得出 IR（`rc=0`）—— 两份实现在这里**分岔**，
 #:     而分岔的方向是"用户跑的那份死掉"。
