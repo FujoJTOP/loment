@@ -1955,8 +1955,8 @@ fn rec_short(ctx: ptr, line: u32, col: u32, mlen: u32, plen: u32, clen: u32) -> 
         o = em_byte(ctx, o, load8(ctx, C_PATH + k));
         k = k + 1;
     }
-    // `line == 0` = 编译器没有位置（`E028`..`E031`：文件读不到 / 写不出去 / 单元太大 /
-    // 没有入口）。那时只印文件名 —— `x.lomt:0: error[...]` 里那个 0 会被编辑器当成第 0 行。
+    // `line == 0` = 编译器没有位置（`E028`..`E030`：文件读不到 / 写不出去 / 单元太大）。
+    // 那时只印文件名 —— `x.lomt:0: error[...]` 里那个 0 会被编辑器当成第 0 行。
     // 与 `h_loc` 同一条口径。
     if line > 0 {
         o = em_byte(ctx, o, COLON);
