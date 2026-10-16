@@ -2005,12 +2005,12 @@ fn pt_vm(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     return pt_qs(out, o, "no_vm");
 }
 
-/// `lms`（`docs/247`, v15）：`lms_close` / `lms_open`。与 `pt_vm` **同形** ——
+/// `lms`（`docs/252`, v15）：`lms_close` / `lms_open`。与 `pt_vm` **同形** ——
 /// 只认那两个词，默认 `lms_close`（与参考实现的 `CORE_DIMS["lms"]` / `CORE_DEFAULTS["lms"]`
 /// 是同一张表；加一维两边一起动）。
 ///
 /// ⚠ **取值带维名前缀**（`lms_*`，照 `gc_manual`/`gc_auto` 的先例）：`open` / `close`
-/// 单独太泛。⚠ **它不引入运行期组件**（`docs/247` §11.2），所以它**不与 `no_runtime`
+/// 单独太泛。⚠ **它不引入运行期组件**（`docs/252` §11.2），所以它**不与 `no_runtime`
 /// 冲突** —— 这一层不判冲突（那是校验器的事），只把源码里写的那个词如实抄进对象。
 fn pt_lms(out: ptr, o: u32, unit: ptr, t: ptr, lo: u32, hi: u32) -> u32 {
     let d: u32 = 0;
@@ -5078,7 +5078,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     let nlw2: u32 = pt_rung_total(unit, t, lo, hi, 2);
     let nlw3: u32 = pt_rung_total(unit, t, lo, hi, 3);
     let nlw_tot: u32 = nlw0 + nlw1 + nlw2 + nlw3;
-    // v15 = v14 + **内存安全**（`docs/247`，用户 2026-10-15 定第六维）：`lms_close` / `lms_open`。
+    // v15 = v14 + **内存安全**（`docs/252`，用户 2026-10-15 定第六维）：`lms_close` / `lms_open`。
     // 它在**最后** —— 与前面几维同形，且"这份产物开没开内存安全"是**不读源码可判**的。
     o = pt_key(out, o, 1, "potato");
     o = pt_qs(out, o, "v15");
@@ -5121,7 +5121,7 @@ pub fn potato_emit(unit: ptr, t: ptr, nt: u32, sw: ptr, out: ptr) -> u32 {
     o = pt_key(out, o, 1, "vm");
     o = pt_vm(out, o, unit, t, lo, hi);
     o = pt_str(out, o, ",\n");
-    // v15（`docs/247`）：内存安全。**必填**，紧跟在 `vm` 之后 ——
+    // v15（`docs/252`）：内存安全。**必填**，紧跟在 `vm` 之后 ——
     // ⚠ **次序是判据**：参考实现那边 `"lms"` 紧跟在 `"vm"` 之后，两串字节逐字节比。
     o = pt_key(out, o, 1, "lms");
     o = pt_lms(out, o, unit, t, lo, hi);

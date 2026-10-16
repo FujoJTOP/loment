@@ -1108,7 +1108,7 @@ def test_m90_gc_auto_collector_is_byte_identical():
 
 @test
 def test_m92_lms_entry_a_rescue_is_byte_identical():
-    """LMS 第 3 级入口 A（`docs/247` §5.3）：`alloc` 分配不出时**先收一次再试** ——
+    """LMS 第 3 级入口 A（`docs/252` §5.3）：`alloc` 分配不出时**先收一次再试** ——
     **两个实现逐字节一致**。
 
     ⚠ **这一条是为一个"孪生看不见的分歧"专门立的。**

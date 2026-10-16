@@ -112,7 +112,7 @@ TOP_KEYS_V13 = TOP_KEYS_V12 | {"vm"}
 # 于是"这份程序要多少联网宽度"里的**组成**是**不读源码可判**的 ——
 # `docs/218` §7 结尾那句"先让它可见且可判，再谈让它随证据变宽"的第一步。
 TOP_KEYS_V14 = TOP_KEYS_V13 | {"net_ladder"}
-# v15 = v14 + **内存安全** `lms` (`docs/247`，用户 2026-10-15 定第六维): `lms_close` / `lms_open`。
+# v15 = v14 + **内存安全** `lms` (`docs/252`，用户 2026-10-15 定第六维): `lms_close` / `lms_open`。
 # **与 `mode`/`gc`/`runtime`/`port`/`vm` 同级同形** —— 一个字符串取值、**必填**、只有根单元
 # 能定。于是"这份产物开没开内存安全"是**不读源码可判**的 —— 而这一维与 `gc` **正交**：
 # `gc` 管"谁归还"（生命周期的内向可达），这一维管"谁能碰"（许可的外向）；
@@ -156,13 +156,13 @@ PORTS = ("sealed", "hosted")
 #: （T0 解释 / T1 反馈向量 / … 那梯子会随年份长，钉进值名里就等于把今天的内容钉成身份）。
 #: ⚠ 发行版发的对象里它**恒为** `no_vm`（渠道闸）；校验器判不了渠道，读得出值。
 VMS = ("vm", "no_vm")
-#: `lms` 的取值 = **要不要内存安全**（`docs/247`，用户 2026-10-15 定第六维）。
+#: `lms` 的取值 = **要不要内存安全**（`docs/252`，用户 2026-10-15 定第六维）。
 #: `lms_close`（关，**默认**）= 今天的形状；`lms_open`（开）= 检查器发 E024–E026 +
 #: 保障器**按站点分配**发内联界检查。
 #: 与 `RUNTIMES` / `PORTS` / `VMS` 同一条纪律：**取值只说"有没有"**，不说"里面装了什么"
 #: （今天是边界检查，明天可能是派生指针追踪 —— 装的东西不进值名）；
 #: **但带维名前缀**（照 `GC_WORDS` 那一族的 `gc_manual`/`gc_auto` 先例）。
-#: **它不引入运行期组件**，所以与 `no_runtime` **不冲突**（`docs/247` §11.2）。
+#: **它不引入运行期组件**，所以与 `no_runtime` **不冲突**（`docs/252` §11.2）。
 LMSS = ("lms_close", "lms_open")
 #: **核心模式的全部取值**（`docs/182` §1.3 的"核心语法硬写法"）：各维的取值并起来。
 #:
@@ -179,7 +179,7 @@ LMSS = ("lms_close", "lms_open")
 #: `choose vm` 报 **E022「未定义的开关」**（码对、理由错），而 `loment_rule_parity` 只比
 #: **码集**所以判绿。⇒ **加第三维的人：这里与 `sw_is_core` 两处都要动。**
 #:
-#: ⚠ **`lms`（`docs/247`）是第三次** —— 同上，这一行与 `sw_is_core` **两处都要动**，
+#: ⚠ **`lms`（`docs/252`）是第三次** —— 同上，这一行与 `sw_is_core` **两处都要动**，
 #: 而漏掉是**静默**的（`choose lms` 会报成"未定义的开关"，码是 E022、码集不变）。
 CORE_WORDS = (frozenset(MODES) | frozenset(GCS) | frozenset(RUNTIMES)
               | frozenset(PORTS) | frozenset(VMS) | frozenset(LMSS))
@@ -566,7 +566,7 @@ def validate(doc: object) -> list[str]:
         lm = doc.get("lms")
         if lm not in LMSS:
             errs.append(f"{ver}: lms 必须是 {LMSS} 之一，得到 {lm!r}")
-        # ⚠ **刻意不写与 `no_runtime` 的冲突**（`docs/247` §11.2）：LMS 的四格落的都是
+        # ⚠ **刻意不写与 `no_runtime` 的冲突**（`docs/252` §11.2）：LMS 的四格落的都是
         # **指令**（一条 `cmp` / 一个 `llvm.trap`），**不发运行期组件** —— 所以
         # `lms open` + `no_runtime` 不矛盾。这里多写一条反而会把那条结论说反。
 

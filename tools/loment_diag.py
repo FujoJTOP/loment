@@ -214,23 +214,23 @@ RULES = [
      "控制流：可能从末尾掉出去",
      "让每条路径都 `return`（末尾补一个，或把收尾写成两支都返回的 `if`）。"
      "走到没有 `return` 的那条路是**非法指令**（SIGILL），不是返回一个默认值。"),
-    # E028 = **LMS 第 1 级检查器**（`docs/247` §5.1）。⚠ **码号从 E028 起**：本文初稿
+    # E028 = **LMS 第 1 级检查器**（`docs/252` §5.1）。⚠ **码号从 E028 起**：本文初稿
     # 写的 E024–E026 是按**旧树**读的，而 origin/main 上那三个码已被命令声明那批占了
     # （`docs/223`），现行最高是 E027。
     ("E028", r"越过定长数组的界",
      "越界：字面量下标越过定长数组的界",
      "这个下标是**字面量**，而数组的长度是**编译期已知**的 —— 所以「越界」在这里是一个"
-     "**编译期事实**，不是运行期的一种可能（`docs/247` §5.1）。改下标，或把数组声明改长。"
+     "**编译期事实**，不是运行期的一种可能（`docs/252` §5.1）。改下标，或把数组声明改长。"
      "⚠ `lms` 关着时这一条**不发** —— 那时它要么是 UB（走 clang），要么静默踩相邻字节"
-     "（走 `lomelf`），正是 `docs/247` §4.4 实测出来的那一格。"),
-    # E029 = **LMS 第 1 级检查器**（`docs/247` §5.1）：**用完再放**（use-after-free）。
+     "（走 `lomelf`），正是 `docs/252` §4.4 实测出来的那一格。"),
+    # E029 = **LMS 第 1 级检查器**（`docs/252` §5.1）：**用完再放**（use-after-free）。
     # 与 E006（已被移动）**分开**：移走是**所有权**的事，释放是**合法性**的事 ——
     # 两回事、两条诊断。⚠ `docs/210` §2.8 给 `free` 加的那五条检查管的是 **`free` 自己
     # 那一端**（这块是不是真块、有没有重复释放），管不了"**之后再用**"。
     ("E029", r"指向的块已经被 `free`",
      "用完再放：这块内存已经被 `free`，不能再用",
      "`free(p)` 之后 `p` 指向的块已经还回去了，再用它就是 use-after-free —— "
-     "而它**不一定会崩**：块可能还留着旧字节、直到被复用（`docs/247` §5.1）。"
+     "而它**不一定会崩**：块可能还留着旧字节、直到被复用（`docs/252` §5.1）。"
      "要么别 `free`（让 LGC 管），要么在 `free` 之后把 `p` 重新赋值或不再碰它。"
      "⚠ `lms` 关着时这一条**不发**。"),
     ("E019", r"期望 .*得到|期望表达式|非法字符|顶层只允许|未知顶层关键字|"
@@ -797,8 +797,8 @@ CARDS: dict[int, Card] = {
     28: Card(
         what="一个字面量下标越过了**定长数组**的界（声明是 `[u32; 4]`，却写了 `a[10]`）。",
         why="这里两边的数**都是编译期已知的** —— 所以它不是一个「运行期的一种可能」，"
-            "而是**一个编译期事实**（`docs/247` §5.1）。`lms` 关着时它有两种下场，而且"
-            "**都不报错**：走 clang 是 UB（`docs/247` §4.4 实测过，IR 里直接长出 "
+            "而是**一个编译期事实**（`docs/252` §5.1）。`lms` 关着时它有两种下场，而且"
+            "**都不报错**：走 clang 是 UB（`docs/252` §4.4 实测过，IR 里直接长出 "
             "`getelementptr inbounds … i32 10`），走仓内 `lomelf` 是静默踩相邻字节。"
             "能在这里说死，是 `lms` 第 1 级唯一要做的事。",
         fixes=(
@@ -814,7 +814,7 @@ CARDS: dict[int, Card] = {
         what="一个变量指向的块**已经被 `free`**，之后又用到了它。",
         why="`free(p)` 之后那块内存已经还回分配器，再用 `p` 就是 use-after-free。"
             "它**不一定会崩** —— 块可能还留着旧字节，一直到最后被下一次 `alloc` 复用"
-            "（`docs/247` §5.1），所以症状是那种「上线很久、某次分配把它盖掉」才炸的问题。"
+            "（`docs/252` §5.1），所以症状是那种「上线很久、某次分配把它盖掉」才炸的问题。"
             "`docs/210` §2.8 给 `free` 加的那五条检查管的是 **`free` 自己那一端**"
             "（是不是真块、有没有重复释放），管不了「之后再用」。与 E006 分开："
             "移走是**所有权**的事，释放是**合法性**的事。",
@@ -1427,9 +1427,9 @@ CARDS_EN: dict[int, Card] = {
         what="A literal index runs past the end of a **fixed-size array** (declared "
              "`[u32; 4]`, written `a[10]`).",
         why="Both numbers here are **known at compile time**, so this is not \"one "
-            "possible runtime outcome\" - it is **a compile-time fact** (`docs/247` "
+            "possible runtime outcome\" - it is **a compile-time fact** (`docs/252` "
             "section 5.1). With `lms` off it has two endings and **neither reports "
-            "anything**: through clang it is UB (measured in `docs/247` section 4.4 - "
+            "anything**: through clang it is UB (measured in `docs/252` section 4.4 - "
             "the IR literally grows a `getelementptr inbounds ... i32 10`), and through "
             "the in-repo `lomelf` it silently writes into the neighbouring bytes. Being "
             "able to say it here is the whole job of `lms` level 1.",
@@ -1449,7 +1449,7 @@ CARDS_EN: dict[int, Card] = {
              "used again afterwards.",
         why="After `free(p)` that block has gone back to the allocator, so using `p` again "
             "is a use-after-free. It **does not necessarily crash** - the block may keep "
-            "its old bytes until some later `alloc` reuses it (`docs/247` section 5.1), "
+            "its old bytes until some later `alloc` reuses it (`docs/252` section 5.1), "
             "so it is the kind of bug that ships quietly and then blows up when an "
             "allocation finally lands on it. The five checks `free` gained in `docs/210` "
             "section 2.8 cover **`free`'s own end** (is this really a block, was it "

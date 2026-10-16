@@ -1219,11 +1219,11 @@ def test_p4_guard_bounds():
 
 @test
 def test_e028_literal_index_over_a_fixed_array():
-    """LMS 第 1 级（`docs/247` §5.1）：`lms` 开着时，**字面量下标越过定长数组的界**
+    """LMS 第 1 级（`docs/252` §5.1）：`lms` 开着时，**字面量下标越过定长数组的界**
     是**编译期**的一个诊断，不是运行期的一种可能。
 
     这一对是这一格**买到的全部**：同一份源，加不加 `choose lms_open`，判决相反 ——
-    而"关着"的那一半不是"没报错"而已，它是 `docs/247` §4.4 **实测**出来的那一格：
+    而"关着"的那一半不是"没报错"而已，它是 `docs/252` §4.4 **实测**出来的那一格：
     发出来的是 `getelementptr inbounds [4 x i32], ptr %a.addr, i32 0, i32 10`，
     而 `inbounds` 在 LLVM IR 里**恰是"越界即 UB"的标记**（走 `lomelf` 则静默踩相邻字节）。
     """
@@ -1244,7 +1244,7 @@ def test_e028_literal_index_over_a_fixed_array():
 
 @test
 def test_e029_use_after_free():
-    """LMS 第 1 级（`docs/247` §5.1）：**用完再放** —— `free(p)` 之后再用 `p`。
+    """LMS 第 1 级（`docs/252` §5.1）：**用完再放** —— `free(p)` 之后再用 `p`。
 
     与 E006（已被移动）**分开**：移走是**所有权**的事，释放是**合法性**的事。
     ⚠ `docs/210` §2.8 给 `free` 加的那五条检查管的是 **`free` 自己那一端**
@@ -3668,7 +3668,7 @@ _TIER_CHOOSES = (
     ("gc_auto_alpha/sealed", "choose gc_auto_alpha\nchoose runtime"),
     ("gc_manual/hosted", "choose hosted\nchoose runtime"),
     ("gc_auto/hosted", "choose hosted\nchoose gc_auto\nchoose runtime"),
-    # **LMS 第 3 级入口 A**（`docs/247` §5.3）：`alloc` 分配不出时先收一次再试。
+    # **LMS 第 3 级入口 A**（`docs/252` §5.3）：`alloc` 分配不出时先收一次再试。
     # ⚠ 这两格是**故意**加进来的 —— 那一支 IR（`boom` 改成 `rescue`/`dead`、`floop`
     # 的 phi 多一条入边）是本项目里**手写 IR 最容易写错**的一类，而孪生判据看不出来
     # （两处实现一起错时它照样绿）。**只有过一遍 clang 才知道它是不是合法 LLVM。**
@@ -3679,7 +3679,7 @@ _TIER_CHOOSES = (
 
 @test
 def test_lms_entry_a_rescue_needs_both_lms_and_a_collector():
-    """LMS 第 3 级入口 A（`docs/247` §5.3）：`alloc` 分配不出时**先收一次再试**。
+    """LMS 第 3 级入口 A（`docs/252` §5.3）：`alloc` 分配不出时**先收一次再试**。
 
     **两个条件缺一不可** —— `lms` 开着（它属于 LMS 第 3 级）**而且**这份产物里真有
     收集器（`gc_auto` / `gc_auto_alpha`）。`gc_manual` 下**没有东西可收**，
