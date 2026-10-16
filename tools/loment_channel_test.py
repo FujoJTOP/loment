@@ -40,10 +40,11 @@ PROBE_PLAIN = "module probe_plain\n\nfn f() -> u32 {\n    return 1;\n}\n"
 #: 0.1.4.5 里 libc 不可调用。与 `vm` 那条同一个闸、同一个理由。
 #: 入口写 `fn main`（`docs/222` §4.3：hosted 产物由 C 运行期起）—— 这一条只看驱动器收不收。
 PROBE_HOSTED = "module probe_hosted\n\nchoose hosted\n\nfn main() -> u32 {\n    return 1;\n}\n"
-#: 探针：一份 `use libl` 的最小单元。**发行版里必须被拒**（`docs/232` §1.1，用户 2026-10-12：
-#: 「LibL 仍然在仓库中，和 LVM 一样发行再锁」）。
+#: 探针：一份 `use libl` 的最小单元。**2026-10-15 起发行版必须收它**（`#358` 放开闸，
+#: `docs/232` §1.1）。这条探针**不是删掉而是反转** —— 棘轮规矩：期望改了就把判据反过来，
+#: 删掉等于把"这道闸曾经存在"这件事一起删掉。放开的前提写在 `docs/232` §1.3 那份承诺里。
 #:
-#: `choose runtime` 不能省：`libl` 是门面，它拉的那四份都声明了 `choose runtime`（库里写
+#: `choose runtime` 不能省：`libl` 是门面，它拉的那几份都声明了 `choose runtime`（库里写
 #: `choose` 是**需求**，根必须满足，`docs/227` §2.2）。少了它就先在运行期那关被拒，
 #: 测到的就不是渠道闸了。
 PROBE_LIBL = ("module probe_libl\n\nchoose runtime\n\nuse libl\n\n"
@@ -51,15 +52,17 @@ PROBE_LIBL = ("module probe_libl\n\nchoose runtime\n\nuse libl\n\n"
 
 #: 渠道常量在源码里被**读到**的处数 —— 也就是 dev/release 两个种子该差几处。
 #:
-#: 今天 2：`checker.lomt` 的 `check()`（`choose vm` 那条闸，`choose hosted` 那条**与它
-#: 共用同一个 `let`**，所以只算一处）与 `driver.lomt` 的 `use <名字>` 分支
-#: （`use libl` 那条闸，`docs/232` §1.1）。每读一次，常量就在 IR 里被具体化一次 ——
-#: 所以产物差 2 个字符（长度仍相同）。
+#: **今天回到 1**（2026-10-15，`#358` 放开 `use libl` 之后）：`checker.lomt` 的 `check()` 里
+#: 那一个 `let` —— `choose vm` 与 `choose hosted` 两条闸**共用它**，所以只算一处。
+#: `driver.lomt` 里那处（`use libl` 的闸）**随闸一起拿掉了** ⇒ 两个种子只差 1 个字符，
+#: 又回到"恰好一个字节"那个最强的口径。
+#:
+#: 历史：LibL 的闸还在时这个数是 2；再往前（端口闸各写一个 `let` 那版）曾变成 3，
+#: 判据当场红、而红的样子**像"注入改歪了"**。
 #:
 #: **改这个数之前先读那条判据的 docstring**：理由是"不为此往自举单元里加函数"。
-#: ⚠ **也不要为新增的一条闸各写一个 `let`**：2026-10-12 给端口闸单写一个时，这个数
-#: 变成 3、判据当场红，而红的样子**像"注入改歪了"**。共用同一个 `let` 才是对的。
-CHANNEL_READ_SITES = 2
+#: ⚠ **新增一条闸时也别各写一个 `let`**：提到共用位置（同文件内）才对。
+CHANNEL_READ_SITES = 1
 
 TESTS: list[tuple[str, object]] = []
 
@@ -93,16 +96,14 @@ def test_release_seed_differs_only_in_the_channel_constant():
       * 每一处都是 `'0' → '1'`；
       * **处数恰好等于** `CHANNEL_READ_SITES`。
 
-    **为什么不是"恰好一个字符"**（2026-10-12 改）：渠道常量现在被**读两处** ——
-    `check()` 里那条 `choose vm` 的闸，和 `driver.lomt` 里 `use libl` 那条（`docs/232` §1.1）。
-    常量在每一处各被具体化一次，于是产物差 **2** 个字符而不是 1。**长度仍相同**。
+    **处数是钉出来的**：`CHANNEL_READ_SITES` 今天写死 1（2026-10-15 `#358` 放开 `use libl`
+    之后又回到 1 —— 见那个常量上面的注释）。以后多一处读取点 ⇒ 这条红，逼改的人
+    **先想清楚**那是不是有意的（并顺手更新 `docs/231` §5 判据 F 的口径）。
 
-    **没有把它合并成一个读取点**（那样差又回到 1）：合并要往自举单元里**加一个函数**，
-    而 `checker.lomt` 那条注释记着实测 A/B —— 加函数那版 **62.9s（红）**、纯净树 58.24s（过），
-    60s 护栏只剩 ~1% 余量。**用一个新函数换回一个好看的数字，不值得。**
-
-    于是这里钉的是**处数**：`CHANNEL_READ_SITES` 写死 2。以后多一处读取点 ⇒ 这条红，
-    逼改的人**先想清楚**那是不是有意的（并顺手更新 `docs/231` §5 判据 F 的口径）。
+    **为什么不去动读取点的布局**：`checker.lomt` 里那两个 `choose` 的闸之所以**共用同一个
+    `let`** 而不是各写一个，是因为往自举单元里**加函数**很贵 —— `checker.lomt` 那条注释
+    记着实测 A/B：加函数那版 **62.9s（红）**、纯净树 58.24s（过），60s 护栏只剩 ~1% 余量。
+    **用一个新函数换回一个好看的数字，不值得。**
     """
     dev = loment_seed.reference_ir("dev")
     rel = loment_seed.reference_ir("release")
@@ -221,15 +222,17 @@ def test_the_release_launcher_shuts_the_port_door():
 def test_release_driver_refuses_channel_gated_constructs():
     """**判据 D**：发行版驱动器拒**被渠道闸关住的东西**，dev 驱动器收 —— 两端都要测。
 
-    被闸关住的今天有**三个**，形状不同、机制同一条（读同一个渠道常量）：
+    今天**两关一放**，机制同一条（读同一个渠道常量）：
 
-    * **`choose vm`** —— 一维核心模式，闸在 `check()`（`docs/231` §2）；
-    * **`use libl`** —— 一个**名字**，闸在**名字解析**处（`docs/232` §1.1，用户 2026-10-12）；
+    * **`choose vm`** —— 一维核心模式，闸在 `check()`（`docs/231` §2）。**发行版拒**；
     * **`choose hosted`** —— 另一维核心模式，闸与 `vm` 同处、**共用同一个 `let`**
-      （`docs/222` §4.5，同一天用户的话：「锁掉 LibC … 因为这尚未完工」）。
+      （`docs/222` §4.5，同一天用户的话：「锁掉 LibC … 因为这尚未完工」）。**发行版拒**；
+    * **`use libl`** —— 一个**名字**，闸在**名字解析**处。**2026-10-15 放开**（`#358`）：
+      探针**留着**、期望**反转**，发行版现在必须**收**它。棘轮规矩是**替换**不是删掉；
+      放开的条件写在 `docs/232` §1.3 那份承诺里。
 
-    三个都测，而且**共用同一对驱动器**（各建一次 ELF 很贵）—— 几段闸读的是同一个常量，
-    建三对驱动器只是把同一件事再做一遍。
+    三份探针都测（`libl` 那份现在验的是**收**），而且**共用同一对驱动器**（各建一次 ELF
+    很贵）—— 几段闸读的是同一个常量，建三对驱动器只是把同一件事再做一遍。
 
     跳过条件与 `loment_p8_test` 同：要 clang（建 ELF）与 WSL（跑 ELF）。
     """
@@ -238,18 +241,20 @@ def test_release_driver_refuses_channel_gated_constructs():
         return
     probe_dir = ROOT / "loment" / "build"
     probe_dir.mkdir(parents=True, exist_ok=True)
-    #: (标签, 源码, 发行版里必须拒吗, 驱动器 stderr 里必须点到的名字) —— `plain` 那行是
-    #: **对照组**：它在两边都得过。**点名那一栏只对"那个名字就是肇事 token"的闸有意义**：
-    #: 驱动器只吐**码 + 位置 + 肇事 token**（文本由报错器渲染，`docs/182` §5.3），所以
-    #: `use libl` 那条点得到 `libl`，而 `choose hosted` 那条肇事 token 是 `choose` ——
-    #: 它的报文文本由 `loment_diag` 那张 E022 卡负责，已由上面那条 Python 判据守着。
-    probes = [("plain", PROBE_PLAIN, False, None),
-              ("vm", PROBE_VM, True, None),
-              ("libl", PROBE_LIBL, True, "libl"),
-              ("hosted", PROBE_HOSTED, True, None)]
+    #: (标签, 源码, 发行版里必须拒吗) —— `plain` 那行是**对照组**：它在两边都得过；
+    #: `libl` 那行是**反转过来的老闸**，也是"发行版收"的第二例。
+    #:
+    #: **没有"报文里必须点到的名字"这一栏了**：驱动器只吐**码 + 位置 + 肇事 token**、
+    #: 文本由报错器渲染（`docs/182` §5.3），而剩下的两关肇事 token 都是 `choose` 这个
+    #: 关键字、不是被闸关住的模式名 —— 它们报文的文本由 `loment_diag` 那张 E022 卡负责，
+    #: 已由上面那条 Python 判据守着。原来那一栏只服务 `use libl` 那条点名闸，闸放开了。
+    probes = [("plain", PROBE_PLAIN, False),
+              ("vm", PROBE_VM, True),
+              ("libl", PROBE_LIBL, False),
+              ("hosted", PROBE_HOSTED, True)]
     made: list[Path] = []
     try:
-        for tag, src, _refuse, _named in probes:
+        for tag, src, _refuse in probes:
             p = probe_dir / f"channel_probe_{tag}.lomt"
             p.write_text(src, encoding="utf-8", newline="\n")
             made.append(p)
@@ -259,21 +264,17 @@ def test_release_driver_refuses_channel_gated_constructs():
             # td 里的路径，td 一销毁它就是悬空的（第一版踩过）。
             dev_elf = P8._build_linux_elf(SEED.read_text(encoding="utf-8"), td, "chan_dev")
             rel_elf = P8._build_linux_elf(loment_seed.reference_ir("release"), td, "chan_rel")
-            for tag, _src, refuse, named in probes:
+            for tag, _src, refuse in probes:
                 # **dev 每一份都得过** —— 不然"发行版拒"可能只是因为它什么都拒。
                 P8._run_driver(dev_elf, rel % tag, td, f"cd_{tag}")
                 rc, _out, err = P8._run_driver_raw(rel_elf, rel % tag, td, f"cr_{tag}")
                 if refuse:
                     assert rc != 0, (
                         f"发行版驱动器收下了 `{tag}` 那条闸 —— 渠道闸没生效"
-                        f"（`docs/231` §2 / `docs/222` §4.5 / `docs/232` §1.1）")
-                    if named:
-                        assert named in (err or ""), (
-                            f"`{tag}` 拒了但报文没点名 {named!r} —— "
-                            f"分不清是不是因为别的理由拒的：{(err or '')[:120]!r}")
+                        f"（`docs/231` §2 / `docs/222` §4.5）")
                 else:
                     assert rc == 0, f"对照组在发行版里被拒了：{err[-200:]}"
-        print("      dev 收 / 发行版拒：vm · libl · hosted（后两个点名）—— 两端都核过")
+        print("      dev 收 / 发行版拒：vm · hosted；发行版**收** libl（已放开的旧闸）")
     finally:
         for p in made:
             p.unlink(missing_ok=True)

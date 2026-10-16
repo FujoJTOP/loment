@@ -618,9 +618,11 @@ def test_install_scripts_stay_pure_ascii():
 #: **同日第四个包 `os` 是 6**（`sys` `time` `signal` `tty` `user` + 门面，`docs/242`），
 #: 整棵树随之 151 -> 158。
 #: **2026-10-14 起 `os` 是 7**（多一个 `thread`，`docs/245`），整棵树随之 158 -> 159。
+#: **2026-10-15 起 `host` 是 8**（多一个 `libl_host.lomt` —— LibL 的宿主脸，`docs/232` §5.1
+#: 与 `#401`），整棵树随之 159 -> 160。
 STORE_DIR = ROOT / "lompi" / "store"
-STORE_MODULES = {"std": 133, "host": 7, "internet": 8, "os": 7}
-STORE_FILES = 159
+STORE_MODULES = {"std": 133, "host": 8, "internet": 8, "os": 7}
+STORE_FILES = 160
 
 
 def _store_line(out: str) -> str:
