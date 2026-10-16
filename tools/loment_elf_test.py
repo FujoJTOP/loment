@@ -833,6 +833,88 @@ def test_a_recycled_block_does_not_derail_the_walks():
 
 
 @test
+def test_a_promoted_buffer_is_scanned():
+    """**L0 提升到栈上的那块缓冲，里面的字也要被根扫看到**（`FujoJTOP/loment#362`）。
+
+    **Why**：`choose gc_auto_alpha` 的 L0 把 `let NAME: ptr = alloc(<字面量>)` 提到栈上，
+    于是那个局部槽里存的是**栈**地址。根扫是这么判的：`rdo = 槽里的值 − @__loment_heap`，
+    `ult 65536` 才当堆内地址 —— 栈地址减出来是个巨大的无符号数，**直接跳过**。
+    而 `__loment_propagate` 只在堆里走。两者合起来：**那块缓冲的内容从来没人扫**。
+
+    而 L0 的规则**并不禁止**缓冲里装堆指针：`_ptr_only_uses` 会把"只解引用"的用户函数
+    （这里就是 `wr64`）吸收进安全集，于是它能把任意 u64 写进缓冲 —— 那正是容器会做的事。
+    只被缓冲里那 8 个字节指着的对象，于是被当垃圾收掉，块还被复用，程序读回的是别人的字节。
+
+    **How to apply**：语料取自 `#362`。`hold` 是 L0 候选（`alloc(8)` 字面量、只经由 `wr64`
+    解引用）；目标 `t` 唯一的引用就是写进 `hold` 的那 8 个字节；末尾那个 `alloc(32)`
+    （块长 40 B，全程序只有目标用这个尺寸）是**探测块** —— 对象真被收了，它就一定落在
+    目标那块上、把载荷盖成 200。三只同源程序：
+      * `alpha` + 写进去 → **跑完**（rc = 7）；修之前是 **rc = 3**（读回 200）；
+      * `alpha` + **不写** → **必须不是 7**：这一半是**证伪** —— 没有那 8 个字节，对象本就
+        该被收，探测块就该盖掉它。少了这一半，"跑完"可能只是探测块什么也没盖到；
+      * `auto` + 写进去 → **跑完**（rc = 7）：那一档没有 L0，堆块照常被扫，
+        是 issue 里那一对里的另一半。
+
+    端到端：IR 过的是**包内镜像链接器**（`lomelf.compile_ll`）。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    body = ("module l0hole\n%s\nchoose runtime\n\n"
+            "fn junk() -> u64 {\n"
+            "    let p: u64 = alloc(16) as u64;\n"
+            "    store8(p as ptr, 0, 200);\n"
+            "    return p;\n}\n\n"
+            "fn wr64(p: ptr, o: u32, v: u64) -> u32 {\n"
+            "    store8(p, o, (v & 255) as u8);\n"
+            "    store8(p, o + 1, ((v >> 8) & 255) as u8);\n"
+            "    store8(p, o + 2, ((v >> 16) & 255) as u8);\n"
+            "    store8(p, o + 3, ((v >> 24) & 255) as u8);\n"
+            "    store8(p, o + 4, ((v >> 32) & 255) as u8);\n"
+            "    store8(p, o + 5, ((v >> 40) & 255) as u8);\n"
+            "    store8(p, o + 6, ((v >> 48) & 255) as u8);\n"
+            "    store8(p, o + 7, ((v >> 56) & 255) as u8);\n"
+            "    return 0;\n}\n\n"
+            "fn _start() {\n"
+            "    let hold: ptr = alloc(8);\n"
+            "    let t: u64 = alloc(32) as u64;\n"
+            "    store8(t as ptr, 0, 7);\n"
+            "%s"
+            "    let i: u32 = 0;\n"
+            "    while i < 4000 { let _a: u64 = junk(); i = i + 1; }\n"
+            "    let probe: u64 = alloc(32) as u64;\n"
+            "    store8(probe as ptr, 0, 200);\n"
+            "    if load8(t as ptr, 0) == 7 { syscall4(60, 7, 0, 0); }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    cases = (("alpha", "choose gc_auto_alpha", "    wr64(hold, 0, t);\n"),
+             ("alpha_nowrite", "choose gc_auto_alpha", ""),
+             ("auto", "choose gc_auto", "    wr64(hold, 0, t);\n"))
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, tier, extra in cases:
+            src = td / f"{tag}.lomt"
+            src.write_text(body % (tier, extra), encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"l0hole_{tag}", td, timeout=30)[0])
+    assert got[0] == 7, (
+        f"`gc_auto_alpha` 那一只读到 {got[0]}（期望 7）—— 目标被收了。提升后的缓冲是一块"
+        "**栈**内存，它的槽里存的是栈地址，根扫按'减堆基址、小于 arena'判，于是整块缓冲"
+        "从来没人扫；只被它指着的对象就成了垃圾")
+    assert got[1] != 7, (
+        f"**不写那 8 个字节的那一只也跑通了**（退出码 {got[1]}）—— 那这条判据测不出什么："
+        "没有那 8 个字节，对象本来就该被收，探测块就该盖掉它")
+    assert got[2] == 7, (
+        f"`gc_auto` 那一只读到 {got[2]}（期望 7）—— 那一档没有 L0，堆块照常被扫，"
+        "不该在这里出问题（issue 里的另一半正是它）")
+    print(f"      alpha 跑通 (rc={got[0]})；alpha 不写就不保 (rc={got[1]})；"
+          f"auto 跑通 (rc={got[2]}) —— 提升缓冲的字在根扫里")
+
+
+@test
 def test_l0_static_promotion_bounds_the_heap():
     """**L0（静态提升）真的发生**（`docs/210` §2.2）—— 判据是**一对**程序。
 

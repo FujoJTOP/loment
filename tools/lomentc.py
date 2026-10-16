@@ -7029,7 +7029,13 @@ class _Ir:
         """
         if not self.gc_any:
             return
-        self.rootk = sum(1 for ty, _ in self.vars.values() if self._root_ty(ty))
+
+        def slots(name: str) -> int:
+            """这个名字占几格根表：L0 提升过的缓冲按它的**字数**算，其余各占一格。"""
+            n = self.l0.get(name)
+            return (n + 7) // 8 if n else 1
+
+        self.rootk = sum(slots(nm) for nm, (ty, _) in self.vars.items() if self._root_ty(ty))
         if self.rootk == 0:
             return
         n0 = self.t()
@@ -7037,6 +7043,29 @@ class _Ir:
         i = 0
         for name, (ty, slot) in self.vars.items():
             if not self._root_ty(ty):
+                continue
+            sz = self.l0.get(name)
+            if sz:
+                # **L0 提升的缓冲：它的每一个 8 字节字各占一格**（`FujoJTOP/loment#362`）。
+                # 那个槽里存的是**栈**地址（`%NAME.buf`），而根扫拿槽里的值去减堆基址，
+                # 得到一个巨大的无符号数、`ult 65536` 为假 —— 于是整块缓冲**从来没人扫**。
+                # 而 L0 的规则**不禁止**缓冲里装堆指针：`_ptr_only_uses` 会把"只解引用"
+                # 的函数（如 `wr64`）吸收进安全集，于是那种函数可以把任意 u64 写进缓冲。
+                # 只登记**字**的地址就够了 —— 根扫本来就是"读那一格、看它像不像堆内地址"，
+                # 收集器一侧一个字都不用改。
+                k = (sz + 7) // 8
+                for j in range(k):
+                    idx = self.t()
+                    self.w(f"{idx} = add i32 {n0}, {i}")
+                    gp = self.t()
+                    self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots,"
+                           f" i32 0, i32 {idx}")
+                    bp = self.t()
+                    self.w(f"{bp} = getelementptr [{k} x i64], ptr %{name}.buf, i32 0, i32 {j}")
+                    v = self.t()
+                    self.w(f"{v} = ptrtoint ptr {bp} to i64")
+                    self.w(f"store i64 {v}, ptr {gp}")
+                    i += 1
                 continue
             idx = self.t()
             self.w(f"{idx} = add i32 {n0}, {i}")

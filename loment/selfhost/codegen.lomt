@@ -6536,7 +6536,7 @@ fn root_count(s: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
     let j: u32 = 0;
     while j < nl {
         if root_ty_tok(src, toks, load32(s, CG_LOCAL + j * 8 + 4)) == 1 {
-            n = n + 1;
+            n = n + root_slots(s, src, toks, load32(s, CG_LOCAL + j * 8));
         }
         j = j + 1;
     }
@@ -6586,6 +6586,67 @@ fn emit_root_slot(s: ptr, out: ptr, src: ptr, toks: ptr, n0: u32, c: u32,
     return emit_str(s, out, "\n");
 }
 
+/// 这个名字是不是"L0 提升过"的：是就回它的**字节数**，不是回 0。
+///
+/// **两道闸与 `emit_l0_buf` 同一份**：非 alpha 档（槽 572 为 0）L0 表根本不建 —— 而
+/// `l0_size` 自己不看旗标，所以这里必须看；合成的名字（≥ 2^31）也不是提升对象。
+fn l0_bytes(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    if load32(s, 572) == 0 || nm >= 2147483648 {
+        return 0;
+    }
+    return l0_size(s, src, toks, nm);
+}
+
+/// 这个名字占几格根表：**L0 提升过的缓冲按它的字数算**（`FujoJTOP/loment#362`），其余一格。
+fn root_slots(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    let n: u32 = l0_bytes(s, src, toks, nm);
+    if n == 0 {
+        return 1;
+    }
+    return (n + 7) / 8;
+}
+
+/// 登记 L0 缓冲里的**一个字**（`FujoJTOP/loment#362`）：那一格存的是**栈**地址
+/// （`%NAME.buf + 8j` 的地址），根扫读它就知道缓冲里那个字像不像堆内地址。
+/// 三条 temp 的次序与 `emit_root_slot` 一致（`idx` / `gp` / `bp` / `v`）。
+fn emit_root_word(s: ptr, out: ptr, src: ptr, toks: ptr, n0: u32, c: u32,
+                  nm: u32, j: u32, kw: u32) -> u32 {
+    let idx: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, idx);
+    emit_str(s, out, " = add i32 ");
+    emit_temp_ref(s, out, n0);
+    emit_str(s, out, ", ");
+    emit_dec(s, out, c);
+    emit_str(s, out, "\n");
+    let gp: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, gp);
+    emit_str(s, out, " = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 ");
+    emit_temp_ref(s, out, idx);
+    emit_str(s, out, "\n");
+    let bp: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, bp);
+    emit_str(s, out, " = getelementptr [");
+    emit_dec(s, out, kw);
+    emit_str(s, out, " x i64], ptr %");
+    emit_local_name(s, out, src, toks, nm);
+    emit_str(s, out, ".buf, i32 0, i32 ");
+    emit_dec(s, out, j);
+    emit_str(s, out, "\n");
+    let v: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, v);
+    emit_str(s, out, " = ptrtoint ptr ");
+    emit_temp_ref(s, out, bp);
+    emit_str(s, out, " to i64\n  store i64 ");
+    emit_temp_ref(s, out, v);
+    emit_str(s, out, ", ptr ");
+    emit_temp_ref(s, out, gp);
+    return emit_str(s, out, "\n");
+}
+
 /// `gc_auto`：把本帧"持有指针的槽"登记进根表（`docs/210` §4.2）。表满
 /// （1024 格，递归深了才可能）**点名拒**，不静默写穿 —— 溢出分支与参考侧同形。
 ///
@@ -6613,8 +6674,22 @@ fn roots_push(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
     let j: u32 = 0;
     while j < nl {
         if root_ty_tok(src, toks, load32(s, CG_LOCAL + j * 8 + 4)) == 1 {
-            emit_root_slot(s, out, src, toks, n0, c, load32(s, CG_LOCAL + j * 8), 0);
-            c = c + 1;
+            let lnm: u32 = load32(s, CG_LOCAL + j * 8);
+            let lsz: u32 = l0_bytes(s, src, toks, lnm);
+            if lsz == 0 {
+                emit_root_slot(s, out, src, toks, n0, c, lnm, 0);
+                c = c + 1;
+            } else {
+                // **L0 提升的缓冲：一个字一格**（`FujoJTOP/loment#362`）。槽里存的是栈地址，
+                // 根扫拿它减堆基址得到巨大的无符号数 ⇒ 整块缓冲从来没人扫。
+                let kw: u32 = (lsz + 7) / 8;
+                let w: u32 = 0;
+                while w < kw {
+                    emit_root_word(s, out, src, toks, n0, c, lnm, w, kw);
+                    c = c + 1;
+                    w = w + 1;
+                }
+            }
         }
         j = j + 1;
     }
