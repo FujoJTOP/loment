@@ -180,6 +180,11 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_sign_test", "loment_src", "loment_lib_test", "loment_cli_test",
                  # 报错器 (docs/182 §6/§8): 渲染的字段、两条报错通道、缺席时的兜底
                  "loment_err_test",
+                 # `#343` 那一类的**计数**（`#369`）：编译器不作声地死掉 —— 两条不变量
+                 # （非零退出要带一条诊断、不许被信号打死）过一层语料，**两份实现都问**
+                 # （参考实现是 Python，发不出信号；用户真正跑的是自举驱动）。缺口记成账，
+                 # 只许变短。实测约 17s（含一次 种子 -> clang -> stage1）。
+                 "loment_invariant_test",
                  # std 核的行为判据 (docs/180): lib/ 里的函数算得对不对
                  "loment_std_test",
                  # LibL 的 libc 面 (docs/232): 同一组调用与**真 glibc** 逐字节对跑。
@@ -255,6 +260,10 @@ SHARD_COST = {
     "loment_lib_test": 10.0,
     "loment_cli_test": 50.8,
     "loment_err_test": 6.6,
+    # `#369` 的计量器：28 次运行 + 一次 `种子 -> clang -> stage1`。这个数是**估的**
+    # （于 Windows+WSL 实测 17s；runner 上原生起 stage1，应该更小）—— 按这张表自己的
+    # 说明，估偏只会让分片不均，不会漏判据。
+    "loment_invariant_test": 20.0,
     "loment_std_test": 1.0,
     "loment_libl_test": 3.0,
     # 实测: 8 条; 每条各编一个原生探针 (参考编译器 IR + lomelf), 端到端那条还起一个
