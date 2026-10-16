@@ -1219,7 +1219,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "3860c3d34cc5688397a0843d80bd13eafdde148c53ffbb209e5b3c34a87df4b6"
+   "sha256": "f674d9fe6b84f2571d1d4b97f094351ed280503898254c6fc639f268e74870cd"
   },
   {
    "path": "loment/build/genesis/SHA256SUMS",
@@ -1819,7 +1819,7 @@
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "dde9a81898cc5cc0b925dfecef0b0145677d1b9da347ba503feeb578d276ea27"
+   "sha256": "de398c5bf4d3337c749df0e218229b67d2997c362ad1770af7635989547e5995"
   },
   {
    "path": "loment/selfhost/comefor.lomt",
@@ -1867,7 +1867,7 @@
   },
   {
    "path": "loment/selfhost/ir_logic.lomt",
-   "sha256": "aa89b739590dac860586a1e512ed3e8a4098d1f745a09b8ecffb335b0bf747ad"
+   "sha256": "277ad6ed1af232b8f46445e7d3ef7447ede36afae9d4860ba673fc72f2a69016"
   },
   {
    "path": "loment/selfhost/ir_mem.lomt",
