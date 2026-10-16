@@ -15,7 +15,7 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "8acfacc2043e9e2e26b5a89e9a04654a494fc5d472176e64fe8e92049981acb5"
+   "sha256": "9be4d3e22814ec77951b404d181176e8d521de7e505c5238a38fc3e427a3949e"
   },
   {
    "path": "tools/lomentc_test.py",
@@ -811,7 +811,7 @@
   },
   {
    "path": "tools/loment_tools_test.py",
-   "sha256": "3faa8df94b774cafa4e1197879af90a04ad7c7b5960ed8bef82bdfe613566136"
+   "sha256": "72000886bacd76c652b206bf2e4b169e4718a949c74e56f8fde308272fa5419c"
   },
   {
    "path": "tools/loment_boot.py",
@@ -876,6 +876,10 @@
   {
    "path": "tools/ci.py",
    "sha256": "eee26a1d3657938a0ba96ad0ad7626c33728b043e681693abe61aa2d3b5272bd"
+  },
+  {
+   "path": "tools/lomf.py",
+   "sha256": "796f452cea51a35628e75f9302481c962cf71314b8068b2913a71a1011eff013"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -947,7 +951,7 @@
   },
   {
    "path": "tools/loment_elf_test.py",
-   "sha256": "eb152875c23b50f3be2f5ca911b11806e32f04842730cebf01d8eaba18cb051e"
+   "sha256": "cc27f1a3bb3187c6d125b39bd276bb2b4215d4035dc5f61ea78b7d23fd8e4e6e"
   },
   {
    "path": "tools/loment_pe_test.py",
@@ -1207,7 +1211,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "a4ab4b00e6b4d37cf333a8450ee9149d35b848505659af6f216d33e1e3b7fb8d"
+   "sha256": "3e3f6fe5606af3354415ae47983a9dffe3dca061fad8ab685f0181c382330d81"
   },
   {
    "path": "loment/build/genesis/SHA256SUMS",
@@ -1303,7 +1307,7 @@
   },
   {
    "path": "loment/tools/lomrel.lomt",
-   "sha256": "758bbcd3cc1028fcb7a87e718f1b151c528a22c94ac224e945f6188a7aa25967"
+   "sha256": "d257a493f0fc9c942451c5155592d7628befbcfb835544c3fe42dd51be030963"
   },
   {
    "path": "loment/tools/lomstatus.lomt",
@@ -1638,6 +1642,10 @@
    "sha256": "1ef9f8f13d825e34464b6cf2676580f2798b02bec0219a4dbab1943877a6a3ab"
   },
   {
+   "path": "loment/patches/0001-alloc-slack.lomf",
+   "sha256": "083fd97a14a315b4c841abe74942a60ab798775e5d8cfe264cf3578a1bb1dcc6"
+  },
+  {
    "path": "loment/examples/ahci.lomt",
    "sha256": "a29e4733e3ceac3e8ccda53ec5b4ccbdd3a0d7f203844fbf78d30ab7bcba67f0"
   },
@@ -1779,7 +1787,7 @@
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "a26f26beb076637cffa3c3606ea321972328f431eb7785df9682c372d39420bb"
+   "sha256": "fab2e522483af2bda3e0f4df484f296ec0000d7c22fc99db6aedadc19bfafdc4"
   },
   {
    "path": "loment/selfhost/comefor.lomt",
@@ -2346,8 +2354,12 @@
    "sha256": "563df8c1432758fd180f3c1866177393a63d6c609262409af26964c7252b2e79"
   },
   {
+   "path": "docs/247-loment-modification-files.md",
+   "sha256": "6c177f2019c407cadafb960e37f84a952ec2f4ae28f3df1d94baab42ea1b0987"
+  },
+  {
    "path": "docs/manual/index.md",
-   "sha256": "337832b3fa4d72ce8d1f463d3e7172150d7731c8bf180c8eaabf0830c44c8d91"
+   "sha256": "f3aff5bd845e025c05677a65fb3f7154fbf1c94a829c11c9442bd3712602d9ba"
   },
   {
    "path": "docs/manual/api/ahci.md",
@@ -2571,7 +2583,7 @@
   },
   {
    "path": "tools/loment_release.py",
-   "sha256": "bd6a1af38f63a71ec789de55dfa13c1166e614fb071cbd3576b991f91d7eb513"
+   "sha256": "ef8949c5ab0fc1b19aae91b8fdc50e3efe1980d1f57808c7fad7b12c98989be9"
   },
   {
    "path": "tools/loment_status.py",
