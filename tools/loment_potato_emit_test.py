@@ -146,7 +146,7 @@ EXTRA_COVERED = (
 #: 但必须是"点名拒绝"而不是"发个壳出去"）。
 EXTRA_REFUSED = {
     "loment/comefor/def_dialect.lomt": "comefor",
-    "loment/extblock/evil.lomt": "外部代码块",
+    "loment/extblock/evil.lomt": "external code blocks",
     # `choose write grammar python` 那种源：自举侧的前门本来就收不了（docs/188 §7.1），
     # 与这一格无关，但"收不了"也要看得见。
     "loment/lib/lumtui_math.lomt": "grammar",
@@ -154,7 +154,7 @@ EXTRA_REFUSED = {
     # 值得记：**先问这东西能不能存在，再吵它叫什么** —— 它**没有名字规则**（`Box_[u32]` 不是
     # 标识符），但更前面的是**后端 M23**（struct 字段暂只支持标量）挡着，`Box<ptr>` 就证明了
     # 这条：名字没问题，IR 照样拒。两个实现现在都**点名拒**。
-    "loment/examples/arg_shape/main.lomt": "泛型实参的形状",
+    "loment/examples/arg_shape/main.lomt": "this shape of generic argument",
 }
 
 TESTS: list = []

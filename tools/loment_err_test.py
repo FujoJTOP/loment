@@ -1664,6 +1664,35 @@ def test_err_twin_selfhost_compiles():
     print(f"      种子自举链编译 lomerrcheck.lomt 成功 ({len(rr.stdout)}B IR)")
 
 
+@test
+def test_a_position_less_record_carries_no_line_number():
+    """`line == 0` = 编译器**没有位置可指**（`E028`..`E030`：文件读不到 / 写不出去 /
+    单元太大，`issue #8`）。三条一起立：
+
+      * `--> <file>` 后面**不带行号** —— `file:0` 看着像第 0 行，编辑器会照着跳；
+      * **不印 `(no such line in the source file)`** —— 那会让读者以为源码有问题，
+        而这几个码的 `file` 常常根本不是源码（`E029` 那个是一条**还不存在**的产物路径）；
+      * `--short` 那一路同理：`file: error[E028]` 而不是 `file:0:`。
+    """
+    with tempfile.TemporaryDirectory(prefix="lomenterr-nopos-") as td:
+        d = Path(td) / "nopos.jsonl"
+        d.write_text(json.dumps({
+            "file": "nosuch.lomt", "line": 0, "col": 0, "code": "E028",
+            "message": "cannot open this file",
+        }) + "\n", encoding="utf-8", newline="\n")
+        rc, out = _render(d)
+        assert rc == 1, (rc, out[:300])
+        assert "E028" in out and "cannot read this input file" in out, out[:300]
+        assert "--> nosuch.lomt\n" in out, f"位置那一行没只印文件: {out[:400]!r}"
+        assert "nosuch.lomt:0" not in out, f"`-->` 后面带了行号: {out[:400]!r}"
+        assert "no such line" not in out, f"去源里找了第 0 行: {out[:400]!r}"
+        rc, out = _render(d, "--short")
+        assert rc == 1, (rc, out[:300])
+        assert "nosuch.lomt: error[E028]" in out, out[:300]
+        assert "nosuch.lomt:0" not in out, out[:300]
+    print("      没有位置的记录：`--> 文件` 不带行号、不去源里找第 0 行，--short 同")
+
+
 # ---------------------------------------------------------------- 入口
 
 

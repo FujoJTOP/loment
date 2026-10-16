@@ -1494,7 +1494,7 @@ def test_m85_missing_module_declaration_says_so():
             "nomod.lomt": ("fn _start() {" + chr(10) + "    syscall4(60, 0, 0, 0);" + chr(10) + "}" + chr(10),
                            "module"),
             "noname.lomt": ("module" + chr(10) + chr(10) + "fn _start() {" + chr(10)
-                            + "    syscall4(60, 0, 0, 0);" + chr(10) + "}" + chr(10), "同一行"),
+                            + "    syscall4(60, 0, 0, 0);" + chr(10) + "}" + chr(10), "same line"),
         }
         for name, (src, want) in bad.items():
             p = work / name
@@ -1538,14 +1538,14 @@ def test_m85_driver_checks_before_emitting():
             rel = f.relative_to(ROOT).as_posix()
             rc, out, err = _run_driver_raw(elf, rel, td, f"neg_{f.stem}")
             assert rc != 0, f"{f.name}: 负例没被拒 (exit {rc})"
-            assert "静态检查未通过" in err, f"{f.name}: 没报诊断: {err[:200]}"
+            assert "static checks failed" in err, f"{f.name}: 没报诊断: {err[:200]}"
             assert "@" in err and "line" in err, f"{f.name}: 诊断格式不对: {err[:200]}"
             assert out.strip() == "", f"{f.name}: 被拒时不该产出 IR"
         # 单元级负例: 跨模块同名 —— 驱动要自己装载完这两个文件才发现, 也必须拒
         rel = "loment/selfhost/neg_across/entry.lomt"
         rc, out, err = _run_driver_raw(elf, rel, td, "neg_across")
         assert rc != 0, f"跨模块重名没被拒 (exit {rc})"
-        assert "静态检查未通过" in err, f"没报诊断: {err[:200]}"
+        assert "static checks failed" in err, f"没报诊断: {err[:200]}"
         assert out.strip() == "", "被拒时不该产出 IR"
         # 跨单元负例（`docs/227` §4 第 2 条）：依赖用了**会拖运行期的构造**（除法）却
         # 什么都没声明，而根写着 `no_runtime`（默认档）。
@@ -1558,7 +1558,7 @@ def test_m85_driver_checks_before_emitting():
         rel = "loment/selfhost/neg_dep_choose/entry.lomt"
         rc, out, err = _run_driver_raw(elf, rel, td, "neg_dep_choose")
         assert rc != 0, f"依赖用了运行期构造却没声明, 没被拒 (exit {rc})"
-        assert "静态检查未通过" in err, f"没报诊断: {err[:200]}"
+        assert "static checks failed" in err, f"没报诊断: {err[:200]}"
         assert out.strip() == "", "被拒时不该产出 IR"
         for f in pos:
             rel = f.relative_to(ROOT).as_posix()
@@ -1566,7 +1566,7 @@ def test_m85_driver_checks_before_emitting():
             rc, out, err = _run_driver_raw(elf, rel, td, f"pos_{f.stem}")
             # 正例的判据是"**检查阶段**放行"; 能不能发 IR 取决于它是不是 IR 后端的合法目标
             # (pos/ok.lomt 是给 checker 写的正例, 含 IR 后端不支持的类型, 这不是闸门的事)
-            assert "静态检查未通过" not in err, f"{f.name}: 正例被 check 拒了: {err[:200]}"
+            assert "static checks failed" not in err, f"{f.name}: 正例被 check 拒了: {err[:200]}"
             if unsupported is None:
                 assert rc == 0, f"{f.name}: 正例退出码 {rc}: {err[:200]}"
                 assert out == _unit_ll(f), f"{f.name}: 正例产物与参考不一致"
@@ -1618,7 +1618,7 @@ def test_m87_driver_strips_grammar_decl():
         # 参考实现这份是**收**的 (拿它自己的前门按 Python 读) —— 分歧正是 docs/189 §4.1 那句话
         assert _unit_ll(f).strip(), "参考实现本该读得通这份 (夹具的前提)"
         assert rc != 0, f"foreign.lomt: 别的拼法没被拒 (exit {rc})"
-        assert "自举侧收不了" in err, f"foreign.lomt: 没说到点子上: {err[:200]}"
+        assert "does not take" in err, f"foreign.lomt: 没说到点子上: {err[:200]}"
         assert "未定义的开关" not in err, f"foreign.lomt: 报成了词法/语法错: {err[:200]}"
         assert out.strip() == "", "被拒时不该产出 IR"
         print("      声明: 两个原生拼法(loment/rust)抹掉后都与不带那份逐字节一致; "
@@ -2167,7 +2167,7 @@ def test_m85_driver_gate_on_probe_cases():
         miss.write_text("module g_namemiss\n\nuse nosuchmod\n\nfn f() -> u32 { return 0; }\n",
                         encoding="utf-8", newline="\n")
         rc2, _o2, err2 = _run_driver_raw(elf, _wsl_path(miss), td, "g_namemiss")
-        assert rc2 != 0 and "名字导入" in err2, \
+        assert rc2 != 0 and "name import" in err2, \
             f"名字导入失败没报出来: rc={rc2} err={err2[-200:]!r}"
         print("      名字导入失败: 驱动器报错并退出非零")
         # ---- 名字形式的两层落点与 use 条数上限 (2026-09-16, 见 docs/143 + docs/158 §2)
@@ -2206,7 +2206,7 @@ def test_m85_driver_gate_on_probe_cases():
         lim_hi.write_text("module lim\n\nuse many\n\nfn main() -> u32 {\n    return 0;\n}\n",
                           encoding="utf-8", newline="\n")
         rc4, _o4, err4 = _run_driver_raw(elf, _wsl_path(lim_hi), td, "g_uselim")
-        assert rc4 != 0 and "超过上限" in err4, \
+        assert rc4 != 0 and "`use` lines in one file" in err4, \
             f"{nlim} 条 use 没被拒: rc={rc4} err={err4[-300:]!r}"
         print(f"      use 超过 {lomentc.MAX_USE} 条: 驱动器报错并退出非零")
         # ---- 自定义后缀 (2026-09-16, 见 docs/143 §2.3): `loment.conf` 把名字形式的后缀
@@ -2248,7 +2248,7 @@ def test_m85_driver_gate_on_probe_cases():
             'pub fn source_ext() -> str { return "foo"; }\n',
             encoding="utf-8", newline="\n")
         rc6, _o6, err6 = _run_driver_raw(elf, _wsl_path(c_hi), td, "g_badcfg")
-        assert rc6 != 0 and "名字导入" in err6, \
+        assert rc6 != 0 and "name import" in err6, \
             f"不以 `.` 开头的后缀没被忽略: rc={rc6} err={err6[-300:]!r}"
         assert lomentc.source_ext_of(cust, None) == ".lomt", "参考实现没忽略配坏的后缀"
         print("      配坏的后缀 (缺前导 `.`): 驱动与参考都当没配")
@@ -2307,13 +2307,21 @@ def test_m85_entry_load_distinguishes_empty_file_from_directory():
         elf = _build_linux_elf(_unit_ll(DRIVER_LOMT), td, "fujocs_empty")
         work = Path(td)
 
-        def run(p: Path, name: str) -> tuple[int, str]:
+        def run(p: Path, name: str, *extra: str) -> tuple[int, str]:
             if native:
                 elf.chmod(0o755)
-                r = subprocess.run([str(elf), str(p)], cwd=str(ROOT),
+                r = subprocess.run([str(elf), str(p), *extra], cwd=str(ROOT),
                                    capture_output=True, shell=False)
                 err = r.stderr.decode("utf-8", "replace")
                 return r.returncode, err
+            if extra:
+                # 带额外实参的那一次走这条路：`_run_driver_raw` 只会递一个入口。
+                script = (f"rm -f {_T}{name} && cp {_wsl_path(elf)} {_T}{name} && "
+                          f"chmod +x {_T}{name} && cd {_wsl_path(ROOT)} && "
+                          f"{_T}{name} {_wsl_path(p)} {' '.join(extra)} > /dev/null")
+                r2 = subprocess.run([*_WSLCMD, "bash", "-lc", script],
+                                    capture_output=True, text=True, timeout=300, shell=False)
+                return r2.returncode, r2.stderr
             # 绝对路径交给 WSL 里跑的驱动前要转成 /mnt/<drive>/…, 否则反斜杠会被
             # bash 吃掉 (与本文件其它传绝对路径的判据同一条约定)
             rc, _out, err = _run_driver_raw(elf, _wsl_path(p), td, name)
@@ -2323,28 +2331,45 @@ def test_m85_entry_load_distinguishes_empty_file_from_directory():
         empty.write_bytes(b"")
         rc, err = run(empty, "empty")
         assert rc == 1, f"空文件应当退 1, 得到 {rc}: {err[:300]}"
-        assert "空文件" in err, f"空文件没说自己是空的: {err[:300]}"
-        assert "路径对吗" not in err, f"空文件仍被说成路径问题: {err[:300]}"
-        assert "目录" not in err, f"空文件被说成目录: {err[:300]}"
+        assert "is empty" in err, f"空文件没说自己是空的: {err[:300]}"
+        assert "is the path right" not in err, f"空文件仍被说成路径问题: {err[:300]}"
+        assert "is a directory" not in err, f"空文件被说成目录: {err[:300]}"
 
         rc, err = run(work, "dir")
         assert rc == 1, f"目录应当退 1, 得到 {rc}: {err[:300]}"
-        assert "目录" in err, f"目录没说自己是目录: {err[:300]}"
-        assert "路径对吗" not in err, f"目录仍被说成路径问题: {err[:300]}"
-        assert "空文件" not in err, f"目录被说成空文件: {err[:300]}"
+        assert "is a directory" in err, f"目录没说自己是目录: {err[:300]}"
+        assert "is the path right" not in err, f"目录仍被说成路径问题: {err[:300]}"
+        assert "is empty" not in err, f"目录被说成空文件: {err[:300]}"
 
         missing = work / "no-such-entry.lomt"
         rc, err = run(missing, "missing")
         assert rc == 1, f"缺文件应当退 1, 得到 {rc}: {err[:300]}"
-        assert "打不开" in err, f"缺文件不再报「打不开」: {err[:300]}"
-        assert "空文件" not in err and "目录" not in err, (
+        assert "cannot open" in err, f"缺文件不再报「打不开」: {err[:300]}"
+        assert "is empty" not in err and "is a directory" not in err, (
             f"缺文件被说成空文件或目录: {err[:300]}")
+        # `issue #8`：这句话里**不许有杂散字节**。原先那句手写了长度 20，而文案只有
+        # 19 字节 —— 多出来的一字节是字符串常量的 NUL，用户拿到的是 `打不开 \0路径`
+        # （任何把它当 C 串读的消费者都只看得到前半截）。行尾那个 `\n` 不算杂散。
+        assert "\x00" not in err, f"缺文件那句话里带了 NUL: {err[:300]!r}"
+        assert "\x00" not in run(work, "dir_nul")[1], "目录那句话里带了 NUL"
+        # `issue #8`：**没有源码位置**的失败也要进结构化诊断（`E028` 这一档）。
+        # 没写进去的话启动器只能回吐裸行 —— 那正是 issue 报的那个症状。
+        # `line` 必须是 **0**，不是编出来的行号：渲染器见 0 就不印 `:行号`。
+        dj = work / "d.jsonl"
+        rc, err = run(missing, "missing_diag", "--diag-out", _wsl_path(dj) if not native else str(dj))
+        assert rc == 1, f"缺文件应当退 1, 得到 {rc}: {err[:300]}"
+        recs = [json.loads(x) for x in dj.read_text(encoding="utf-8").splitlines() if x.strip()]
+        assert recs, "缺文件没写结构化诊断 (启动器只能回吐裸行)"
+        assert recs[0]["code"] == "E028", f"缺文件的码不是 E028: {recs[0]}"
+        assert recs[0]["line"] == 0, f"没有位置的那一档 line 必须是 0: {recs[0]}"
+        assert recs[0]["file"].endswith("no-such-entry.lomt"), recs[0]
+        assert "cannot open" in err, "写结构化诊断的同时, 给人看的那一行也要照打"
 
         comment = work / "comment.lomt"
         comment.write_text("// only a comment\n", encoding="utf-8", newline="\n")
         rc, err = run(comment, "comment")
         assert rc == 0, f"只有注释的文件应当被接受, 得到 {rc}: {err[:300]}"
-        assert "空文件" not in err and "路径对吗" not in err, err[:300]
+        assert "is empty" not in err and "is the path right" not in err, err[:300]
 
         real = work / "one.lomt"
         real.write_text("module m\n\nfn f() -> u32 {\n    return 1;\n}\n",

@@ -847,12 +847,11 @@ knowing costs half a day.
     disk[0..4] revocable` + a trivial `_start`. This is why the `tour` example in section 1 does
     not link.
 21. **`lomelf`'s backfill table overflows on small programs**, with a message that tells the
-    reader to edit the compiler source: `lomelf: 回填表满了 — 抬高 TB_FIX 的容量
-    (loment/tools/lomelf.lomt 的 TB_FIX_MAX)` (*the backfill table is full - raise TB_FIX's
-    capacity*). A twelve-line enum plus `match` is enough to hit it.
+    reader to edit the compiler source: `loment: the backfill table is full -- raise TB_FIX_MAX
+    in loment/tools/lomelf.lomt`. A twelve-line enum plus `match` is enough to hit it.
 22. **A unit can carry only one name-form `use`.** The second one fails with
-    `fujoc-s: 打不开 <garbage>` (*cannot open …*) where the "path" is a fragment of your own
-    source - exit 1, no file name, no line. The path form `use "…/text.lomt"` has no such limit,
+    `loment: cannot open <garbage>` where the "path" is a fragment of your own
+    source - exit 1, no line. The path form `use "…/text.lomt"` has no such limit,
     so that is the workaround. A unit that carries imports also loses most of its string-literal
     capacity: measured, **eight ~34-byte literals** are enough to bring the compiler down with
     the same message, while a unit with no imports takes forty of them. The length of the store

@@ -5500,9 +5500,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if out is None:
         out = str(src.with_suffix(".exe" if target == "pe" else ""))
-    Path(out).write_bytes(blob)
+    # **写不出去要说话，而且要说清是哪个路径**（`issue #8`）。这里原先是一句**裸写**：
+    # 目录不存在就是没接住的 `OSError`，用户拿到 Python 栈 —— 而"父目录没建"这条
+    # 看一眼路径就明白。自举侧那一半（`loment/tools/lomelf.lomt`）同一条口径，码是 E029。
     import os
-    os.chmod(out, 0o755)
+    try:
+        Path(out).write_bytes(blob)
+        os.chmod(out, 0o755)
+    except OSError as e:
+        print(f"[ERR] 写不了输出文件 {out}: {e.strerror or e}", file=sys.stderr)
+        return 1
     print(f"[OK] {src} -> {out} ({len(blob)} B, text {info['text']} B, data {info['data']} B)")
     return 0
 
