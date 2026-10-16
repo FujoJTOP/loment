@@ -858,7 +858,11 @@ class Emitter:
         cur = ty
         for p in parts[1:]:
             ity, ival = parse_operand(p)
-            self.get(ity, ival, RCX)
+            # **GEP 的下标是**符号扩展的（LLVM LangRef）—— `get` 按设计零扩展，所以这里
+            # 必须走 `get_signed`：`getelementptr i8, ptr %p, i32 -4` 要的是 `%p - 4`，
+            # 零扩展把它变成 `%p + 4294967292`（4 GiB 之外，撞了就是 SIGSEGV）。
+            # 结构体那条路不受影响：它走 `field_offset` + `alu_ri`，那条本来就符号扩展。
+            self.get_signed(ity, ival, RCX)
             if cur.startswith("["):
                 et = elem_of(cur)
                 step = size_of(et)
