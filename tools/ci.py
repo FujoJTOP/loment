@@ -24,6 +24,13 @@ import time
 from _safepath import safe_open
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+#: `#371`: 能不能跑 Linux ELF 取决于**平台** —— Linux 上原生跑, Windows 上经 WSL。
+#: 写法上是个**前缀**（`[*_WSLCMD, "bash", "-lc", …]`），所以各调用点不必知道细节。
+_WSLCMD = [] if sys.platform.startswith("linux") else ["wsl", "-e"]
+
+
 KERNEL = os.path.join(ROOT, "kernel", "fujo-kernel.bin")
 # 端口可覆盖: 同机并行跑多个 agent 时避免互抢 (FUJO_MON_PORT / FUJO_SER_PORT)
 MON_PORT = int(os.environ.get("FUJO_MON_PORT", "4568"))
@@ -132,6 +139,9 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  # `loment/tools/lvm.lomt`（走种子自举链编成 ELF），比 stdout 字节 + 退出码。
                  # 它同时也在测**自举链把镜像编得对不对**。没有 clang 就 SKIP（不假装成立）。
                  "lvm_twin_test",
+                 # LVM 的 T1（`docs/247`）：反馈剖面 —— 确定性 / 关上什么都不写 /
+                 # 块次数 == 出边和（对语料每一份）/ 循环次数已知的夹具逐条对上。
+                 "lvm_profile_test",
                  # `lom/net.lom` 那条 L0 契约 (docs/228): 号 → 面的单源, 四面对账
                  "loment_net_test",
                  # FFI 第 1 阶段 (docs/173): 外部目标文件 + C ABI + lomelf 单独链接, 跑出结果
@@ -336,7 +346,7 @@ def _sweep_wsl_tmp() -> None:
     见 `FUJO_MON_PORT`)。按时间清就没有这个口子。
     """
     try:
-        subprocess.run(["wsl", "-e", "bash", "-lc",
+        subprocess.run([*_WSLCMD, "bash", "-lc",
                         "find /tmp -maxdepth 1 -name 'loment-*' -mmin +60 -delete "
                         "2>/dev/null || true"],
                        capture_output=True, timeout=120, shell=False)

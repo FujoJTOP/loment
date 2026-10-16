@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
+import loment_diag  # noqa: E402
 import lomentc  # noqa: E402
 import potato  # noqa: E402
 
@@ -302,6 +303,36 @@ def test_bitwise_precedence():
     """& 比 | 结合更紧 (与 Rust 一致)。"""
     rs = lomentc.emit_rust(parse('module m\nfn f() -> u32 { return 1 | 2 & 3; }\n'), ROOT)
     assert "(1 | (2 & 3))" in rs, rs
+
+
+@test
+def test_free_is_refused_on_the_rust_backend():
+    """`free` 在 Rust 后端**点名拒**，不再静默降级成空操作（issue #165）。
+
+    **两件事一起钉，缺一条就测不到这件事：**
+      * Rust 侧**抛**，而且码是 E023（"这一版还没实现"）—— 不是"你源码写错了"那一类；
+      * IR 侧**照旧发真的 `@__loment_free`** —— 只钉前者的话，"两边都不发"也会通过，
+        而那恰恰是这条 issue 要消灭的**静默分歧**。这是本仓"孪生判据只证明一致、不证明对"
+        的同一条教训：验收要的是"两边不静默地不一致"，不是"Rust 侧闭嘴了"。
+    """
+    src = ("module m\n"
+           "fn f() -> u32 {\n"
+           "    let p: ptr = alloc(8);\n"
+           "    free(p);\n"
+           "    return 0;\n"
+           "}\n")
+    mod = parse(src)
+    try:
+        lomentc.emit_rust(mod, ROOT)
+        raise AssertionError("Rust 后端给 `free` 发了码 —— 应当点名拒（issue #165）")
+    except lomc.LomError as e:
+        # 判的是 **`e.msg`（模板本身）**：`classify` 不剥 `行:列: ` 前缀，拿 `str(e)` 去
+        # 问会一律落 E999 —— `native` 那批也一样（既有行为，不是这条引入的）。
+        # "每句话都有码"那条判据扫的也正是**模板**。
+        code, _title, _hint = loment_diag.classify(e.msg)
+        assert code == "E023", f"拒了，但码不是 E023: {code} / {e.msg}"
+    assert "__loment_free" in lomentc.emit_llvm(mod, ROOT), \
+        "原生侧那条真回收不见了 —— 修 Rust 侧不该动它"
 
 
 @test
@@ -2029,6 +2060,52 @@ def test_l0_rule_pair():
         L0_MANUAL_SRC.replace("choose gc_manual", "X")
 
 
+
+#: `docs/246` §5.3 那一刀（"系统调用的实参是**借**"）的三份源 —— **只差一行**。
+_SYSCALL_BORROW_SRC = """module sysborrow
+choose gc_auto_alpha
+choose runtime
+
+fn put(fd: u64, v: u32, nr: u64) {
+    let buf: ptr = alloc(16);
+    store8(buf, 0, v as u8);
+    store8(buf, 1, 0);
+    syscall4(@@NR@@, fd, buf as u64, 2);
+}
+
+fn _start() {
+    put(1, 65, 1);
+    syscall4(60, 0, 0, 0);
+}
+"""
+
+
+@test
+def test_syscall_borrow_rule():
+    """**交给白名单里的系统调用是"借"**（`docs/246` §5.3）：那一格进 L0，**表外的照旧不进**。
+
+    **Why**：这一刀是"让 L0–L2 真的有事可干"里唯一能动语料的一刀（`tools/loment_gc_surface.py`：
+    证明面 4/23 → **8/23**），而它的实质是**一条语言对内核的断言**（"这批系统调用在调用期间就把
+    缓冲区消费掉、不留存用户指针"）—— 断言错了就是**悬垂指针**。所以判据必须**三个方向都钉**：
+
+      1. 表内（`write` = 1）⇒ 提升（否则这一刀空转）；
+      2. **表外**（`sendto` = 44，故意排除：带 `MSG_ZEROCOPY` 时内核持有那些页）⇒ **不**提升 ——
+         这一格就是"表本身"的守卫：谁把 44 加进白名单，判据立刻红；
+      3. 号**不是字面量**（`nr` 是参数）⇒ **不**提升 —— 不知道是哪个系统调用，就不许当借。
+
+    三份源**只差那一行**（下面最后一条断言钉着），所以"差别来自这一行"这个说法成立。
+    """
+    tbl_in, _ = _l0_emit(_SYSCALL_BORROW_SRC.replace("@@NR@@", "1"))
+    tbl_out, _ = _l0_emit(_SYSCALL_BORROW_SRC.replace("@@NR@@", "44"))
+    tbl_var, _ = _l0_emit(_SYSCALL_BORROW_SRC.replace("@@NR@@", "nr"))
+
+    assert tbl_in == {"put": {"buf": 16}}, f"表内的号应当让这一格进 L0，得到 {tbl_in}"
+    assert tbl_out == {}, f"表外的号不许进 L0，得到 {tbl_out}"
+    assert tbl_var == {}, f"号不是字面量时不许进 L0，得到 {tbl_var}"
+    # 三份源只差那一行
+    a = _SYSCALL_BORROW_SRC.replace("@@NR@@", "X")
+    assert a.count("X") == 1 and a.replace("X", "1") == _SYSCALL_BORROW_SRC.replace("@@NR@@", "1")
+
 #: `gc_ladder` 那一对（`docs/210` §3/§5）：一份 `gc_auto_alpha` 的源里四层**各来一站** ——
 #: `a` 是字面量尺寸（L0）、`b` 尺寸是变量且顶层（L1）、`c` 在循环体里（L2）、`d` 外逃（L3）。
 GC_LADDER_ALPHA_SRC = """module gc_ladder
@@ -3228,6 +3305,13 @@ def test_runtime_dep_must_declare_and_agree():
     # ③ 根满足它 ⇒ **不许**报（"合法的那一对不许拒"）
     e = run(lib_rt, "module root" + NL + "choose runtime" + tail)
     assert e == [], e
+#: `@__loment_heap`（间接寻址那一份）的**初值写法** —— 语义上是全零指针，但必须写成
+#: `zeroinitializer` 而不是 `null`：**我们自己的两个链接器**（`tools/lomelf.py` 与
+#: `loment/tools/lomelf.lomt`）的 IR 子集只有零初始化这一种写法，`ptr null` 会让它们
+#: 在解析期就拒掉（实测 `标量初值解析失败: 'null'`，`FujoJTOP/loment#359` 那一轮）。
+#: 这条不是偏好，是**约束**。
+HEAP_PTR_INIT = "internal global ptr zeroinitializer"
+
 #: `docs/228` 的 A 那一份程序：分配 **200000** 字节（> 64 KiB）逐字节写 7，读回最后一字节。
 #: **源只有一份** —— `loment_hosted_test` 那条运行时判据（A3）用的就是**同一个常量**。
 #: 分开抄一份必然漂，而 A3 的全部意义就是"两个方向上看的是同一条程序"。
@@ -3372,7 +3456,7 @@ def test_hosted_heap_comes_from_the_platform_and_sealed_is_untouched():
     sealed = _heap_ir(HEAP_SEALED_SRC)
 
     # A2：arena 不是 `.bss` 里的定长数组，而是宿主给的一块
-    assert "@__loment_heap = internal global ptr null" in hosted
+    assert f"@__loment_heap = {HEAP_PTR_INIT}" in hosted
     assert "[65536 x i8]" not in hosted, "hosted 的 arena 还是那个静态数组"
     assert "declare ptr @malloc(i64)" in hosted, "没向宿主声明分配器"
     assert "; loment-heap: platform 1048576" in hosted, "没把这件事写进产物"
@@ -3423,7 +3507,7 @@ def test_hosted_gc_auto_grows_too_and_gets_the_hosted_collector():
     """
     ir = _heap_ir(HEAP_HOSTED_GC_AUTO_SRC)
     assert "; loment-heap: platform 1048576" in ir
-    assert "@__loment_heap = internal global ptr null" in ir, "arena 不是宿主来的"
+    assert f"@__loment_heap = {HEAP_PTR_INIT}" in ir, "arena 不是宿主来的"
     assert "@__loment_mark = internal global [16384 x i8]" in ir, "标记表没跟着 arena 换"
     assert "[1024 x i8]" not in ir
     assert "%hb = call ptr @__loment_arena()" in ir, "收集器没用基址指针"
@@ -3433,6 +3517,68 @@ def test_hosted_gc_auto_grows_too_and_gets_the_hosted_collector():
     assert "@__loment_mark = internal global [1024 x i8]" in sealed
     assert "@__loment_heap = internal global [65536 x i8] zeroinitializer" in sealed
     assert "malloc" not in sealed
+
+
+#: `docs/219` §8b 的 **S2**（V1 剩下的最后一件）那一份：根开了运行期、**声明了外部函数**，
+#: 于是堆按需带上（`_heap_needed` 的 `_declares_extern` 那一支）。与 `HEAP_SRC` 的差别
+#: 只有"有没有 `extern fn`"这一件事 —— 判据要**两个方向一起判**（见那条 test 的说明）。
+FFI_HEAP_SRC = """module ffi_heap
+
+@@CHOOSE@@
+
+extern fn c_len(p: ptr) -> i32;
+
+fn ask(p: ptr) -> i32 {
+    return c_len(p);
+}
+
+fn main() -> i32 {
+    return 7;
+}
+"""
+FFI_HEAP_SEALED_SRC = FFI_HEAP_SRC.replace("@@CHOOSE@@", "choose runtime")
+FFI_HEAP_ALPHA_SRC = FFI_HEAP_SRC.replace("@@CHOOSE@@", "choose gc_auto_alpha\nchoose runtime")
+
+
+@test
+def test_ffi_artifacts_get_an_arena_big_enough_for_a_real_library():
+    """`docs/219` §8b 的 **S2**：声明了 `extern fn` 的 `sealed` 产物，arena **给够**。
+
+    **Why**：这是 V1（`docs/183` §4）实测剩下的最后一件 —— 真 `libz.a` 的 `deflateInit`
+    在**静态** arena 上要 **256–512 KiB**（`docs/219` §8b 的实测矩阵），而 `_IR_HEAP` 的
+    64 KiB 一装就 `__loment_abort`。而 `sealed` 的定义是"底下没有东西"，**没有宿主的
+    `malloc` 可问**（`docs/228` §2）⇒ 只有一条路：arena **封在产物里，但给够**（1 MiB）。
+    没有这一条，"链真 libc"到 `compress` 就断在这儿。
+
+    **How to apply**：判据必须**两个方向一起判**。只判"FFI 那一份很大"会被"给**所有**程序
+    都加大"骗过 —— 而那正是 `sealed` 那条保证被改掉的样子（同一个坑 `docs/228` §5 的 A1
+    已经踩过：只判 hosted 有 `malloc`）。所以对照那一半是**同一份源去掉 `extern fn`**：
+    它必须还是老样子（64 KiB、直接寻址、产物里一个字不提 arena）。
+
+    第三条钉住 `gc_auto_alpha` 那一格。它的收集器（`_IR_GC_TRIGGER_ADAPT`）是**直接寻址**
+    arena 的，换 arena 要连它一起换、也就是再抄一份那段文本（`hosted` 与 alpha **定义上
+    冲突**，仓库里没有"间接寻址的 alpha"这份先例）。所以那一格**明写地**留在 64 KiB，
+    而且**说出来**（"不静默"）—— 这条判据钉的就是"它说了"。
+    """
+    ffi = _heap_ir(FFI_HEAP_SEALED_SRC)
+    sealed = _heap_ir(HEAP_SEALED_SRC)
+
+    # ① `extern fn` 那一档：arena 封在产物里、给够 1 MiB、寻址走基址指针
+    assert f"; loment-heap: ffi {lomentc.FFI_ARENA_BYTES}" in ffi, \
+        "没把 arena 这件事写进产物（构建那一侧不该去读源码来知道它）"
+    assert "[1048576 x i8] zeroinitializer" in ffi, "arena 还是那块 64 KiB 的数组"
+    assert "getelementptr [65536 x i8], ptr @__loment_heap" not in ffi, "还在直接寻址"
+    assert "%hb = call ptr @__loment_arena()" in ffi, "分配器没用基址指针"
+    assert "ret ptr @__loment_arena_block" in ffi, "arena 不是产物里那块静态的"
+    assert "malloc" not in ffi, "sealed 的产物里出现了宿主符号"
+    # ② 对照：**没有** `extern fn` 的那一份一个字节没动
+    assert "[65536 x i8] zeroinitializer" in sealed
+    assert "loment-heap" not in sealed, "没链外源库的产物也被改大了 —— 那是 sealed 那条保证"
+    # ③ `gc_auto_alpha` 那一格：留 64 KiB，**而且说出来**
+    alpha = _heap_ir(FFI_HEAP_ALPHA_SRC)
+    assert "; loment-heap: static 65536" in alpha, \
+        "这一格没换 arena，却也没说出来 —— 那是静默"
+    assert "[65536 x i8] zeroinitializer" in alpha
 
 
 #: `docs/232` 那条判据的输入：**一档一份**最小程序。每档都得有自己的产物 ——

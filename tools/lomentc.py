@@ -372,9 +372,11 @@ HOSTED_ARENA_BYTES = 1 << 20
 #: **惰性**：第一次 `alloc` 才要（不在启动路径上挂钩子）；要不到就落 `__loment_abort`。
 #:
 #: **`sealed` 走不到这一段** —— 它走 `_IR_HEAP`，逐字节不变（`docs/228` §2）。
-_IR_HEAP_HOSTED = '''; ---- 分配器（`docs/228` 的 `hosted` 那一份；`docs/175` §3.4）--------------------
+_IR_HEAP_HOSTED_HEAD = '''; ---- 分配器（`docs/228`：arena 从**外面**来的那一份；`docs/175` §3.4）--------------------
 ;
-; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**宿主**来、寻址走 `%hb`。
+; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**外面**来
+; （**谁给**写在下面那段 `@__loment_arena()` 里：宿主给的、或产物里那块静态的）、
+; 寻址走 `%hb`（基址）。
 ;
 ; **`free` 的所有权校验与 `_IR_HEAP` 是同一套**（借出标记是负数 + 四条廉价检查；2026-10-13 起
 ; 标记由原先那个 `-1` 放宽成 `-(掩码 + 2)`，好让块头带上**块内槽掩码**，见 `docs/210` §2.9），
@@ -384,6 +386,10 @@ _IR_HEAP_HOSTED = '''; ---- 分配器（`docs/228` 的 `hosted` 那一份；`doc
 ;
 ; 一次要 `@ARENA@` 字节，惰性（第一次 `alloc` 才要）；要不到就 `__loment_abort`。
 
+'''
+
+#: `@__loment_arena()` 的**宿主版**：向宿主要一块（`malloc`）。
+_IR_ARENA_HOST = '''; **宿主版**：向宿主要一块（`malloc`），惰性（第一次 `alloc` 才要）。
 define internal ptr @__loment_arena() {
 entry:
   %h = load ptr, ptr @__loment_heap
@@ -403,8 +409,30 @@ have:
   %r = phi ptr [ %h, %entry ], [ %m, %set ]
   ret ptr %r
 }
+'''
 
-define internal ptr @__loment_alloc(i32 %size) {
+#: `@__loment_arena()` 的**封着版**：arena 是一块**就在产物里**的静态数组
+#: （`docs/219` §8b 的 **S2**，2026-10-15）。
+#:
+#: **为什么要单独一版**：`sealed` 的定义是"底下没有东西"（`docs/228` §2），所以没有宿主
+#: `malloc` 可问；而一个真 C 库（zlib 的 `deflateInit` 就是）要 **256–512 KiB**，比
+#: `_IR_HEAP` 那 64 KiB 大一档。两者合起来只有一条路：**arena 封在产物里，但给够**。
+#: "向外面要"（`mmap`/`brk`，即 `docs/219` §8b 的 **S1e B**）**不在这条路上** —— 它要一张
+#: 平台表，是另一格的事；这里**明说**代价：`[N x i8]` 是 `.bss`，而本仓的链接器把 `.bss`
+#: 按零字节摆进数据段（S1f 的取舍）⇒ **产物文件会大 N 字节**。
+#:
+#: **谁走这一版**：根开了运行期、声明了 `extern fn`、且**不是** `hosted` 的单元
+#: （见 `emit_llvm` 里那个门）。判据落在**产物自己说出来**的 `; loment-heap: ffi <N>` 上。
+_IR_ARENA_STATIC = '''@__loment_arena_block = internal global [@ARENA@ x i8] zeroinitializer
+
+define internal ptr @__loment_arena() {
+entry:
+  ret ptr @__loment_arena_block
+}
+'''
+
+#: `_IR_HEAP_HOSTED` 的**身子**：分配器本体 + 三个全局。与上面两段拼出两种 arena。
+_IR_HEAP_HOSTED_BODY = '''define internal ptr @__loment_alloc(i32 %size) {
 entry:
   %hb = call ptr @__loment_arena()
   %need0 = add i32 %size, 15
@@ -558,10 +586,37 @@ setprev:
   ret void
 }
 
-@__loment_heap = internal global ptr null
+@__loment_heap = internal global ptr zeroinitializer
 @__loment_off = internal global i32 8
 @__loment_freehead = internal global i32 0
-'''.replace("@ARENA@", str(HOSTED_ARENA_BYTES))
+'''
+
+
+def _heap_indirect(arena: str, nbytes: int) -> str:
+    """把"头 + 一段 `@__loment_arena()` + 身子"拼成一份**间接寻址**的分配器。
+
+    两处用它：`hosted`（arena 从宿主的 `malloc` 来）与 **FFI**（arena 是产物里那块静态
+    数组，见 `_IR_ARENA_STATIC`）。拼出来的两份**只差 arena 那一段** —— 分配器本体、分配器
+    状态、块的形状都是同一份文本，因为那才是"换 arena 不该动的东西"。
+    """
+    return (_IR_HEAP_HOSTED_HEAD + arena + "\n" + _IR_HEAP_HOSTED_BODY).replace(
+        "@ARENA@", str(nbytes))
+
+
+_IR_HEAP_HOSTED = _heap_indirect(_IR_ARENA_HOST, HOSTED_ARENA_BYTES)
+
+#: `FFI` 那一份的 arena 字节数（`docs/219` §8b 的 S2）。
+#:
+#: **量出来的，不是挑的**：真 `libz.a` 的 `deflateInit`（memLevel 默认 8）在这里要
+#: **256–512 KiB** —— 512 KiB 起 `compress → uncompress → 原文` 才跑完（实测矩阵见
+#: `docs/219` §8b）。取 1 MiB 是给它留一档余量。
+#:
+#: ⚠ **与 `HOSTED_ARENA_BYTES` 绑在一起**：`gc_auto` 那一档的收集器（标记表 = `arena/8`
+#: 行）**两份共用同一段文本**（`_IR_GC_HOSTED`）—— 前提就是这两个数**相等**。改一个必须
+#: 同时改另一个，否则 FFI + `gc_auto` 那份的表按错的 arena 算。这条不是注释，是约束。
+FFI_ARENA_BYTES = 1 << 20
+assert FFI_ARENA_BYTES == HOSTED_ARENA_BYTES, "FFI 与 hosted 的收集器共用文本，两个数必须相等"
+_IR_HEAP_FFI = _heap_indirect(_IR_ARENA_STATIC, FFI_ARENA_BYTES)
 
 _RUST_RUNTIME = '''
 // ---- Loment 运行时 (M15 堆分配) ----
@@ -3490,27 +3545,19 @@ def resolve_name(name: str, root: Path, proj: Path | None = None,
     后缀来自 `loment.conf`（`source_ext_of`），默认 `.lomt`；每层都按 `_ext_chain` 的顺序
     试（自定义后缀优先，再兜默认），所以项目换后缀不会把工具链自带的模块弄丢。
 
-    ---- **渠道闸（`libl`）**（`docs/232` §1.1）
+    ---- **渠道闸（`libl`）：已放开**（`docs/232` §1.1 / §1.3，2026-10-15）
 
-    **发行版里 `use libl` 是错误**（用户 2026-10-12：「LibL 仍然在仓库中，和 LVM 一样发行
-    再锁」）。与 `check()` 里那条 `choose vm` 的闸**同形**：读同一个渠道常量，打包期只换
-    那一行；dev 放行、发行版点名拒。
+    这里原先有一条与 `choose vm` 同形的闸：发行版里 `use libl` 直接报错（用户 2026-10-12
+    「LibL 仍然在仓库中，和 LVM 一样发行再锁」）。`#358` 把它**放开**了 —— 放开的条件是
+    **先把承诺写下来**，那就是 `docs/232` §1.3（哪些名字算数、加是自由的减不是、偏离写在
+    模块头注里）。
 
-    **为什么闸在名字解析这一层**：被锁的是**一个名字能不能取到**，那是装载器的事 ——
-    `check()` 那层手上只有 token 流，判"这个单元 `use` 过谁"要另做一趟全量扫描。
-    自举侧同一个位置是 `driver.lomt` 的 `use` 分支（`resolve_use_name` 的调用点），
-    两边因此落在同一层、报文也对得上。
+    所以这一层现在**没有** `libl` 的判断：名字照常解析。**留这段注释是为了让"闸去哪了"
+    有据可查** —— 判据那一侧也按棘轮规矩**反转**（`loment_channel_test` 从"发行版拒
+    `use libl`"改成"发行版收 `use libl`"），而不是把那条判据删掉。
+
+    （`choose vm` 那条闸**原样留着**：LVM 还没到兑现的时候。）
     """
-    # 只闸**名字形式**：路径形式（`use "…/libl.lomt"`）与"把文件拷进自己项目"都绕得过去
-    # —— 那与那四份面本身可用是一回事（它们经 `use std` 本来就在）。这条边界写进
-    # `docs/232` §1.1，不假装它堵得住。
-    if loment_channel.RELEASE and name == "libl":
-        raise LomError(
-            1, 1,
-            "发行版不含 `libl` 入口 —— `use libl` 只在**开发通道**可用。"
-            "LibL 是这个标准库的**名字**，那四张脸（string/ctype/stdlib/stdio）在发行版里"
-            "经 `use std` 或按名 `use string` 都还在。"
-            "**修法**：改用 `use std`（或按需 `use string` 等），或换本仓的工具链来开发它")
     exts = _ext_chain(ext)
     stores = store_roots(root, tool_dir)
 
@@ -3965,9 +4012,10 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
             f"或者改用本仓的工具链来开发它（`python tools/loment.py …`）")
 
     # **渠道闸（对外端口）**：`hosted` 那一维要的是**真 libc / 真共享库**（`docs/222` §4）。
-    # 那条路还没完工 —— 机制在，但 `docs/219` §8b 的 S2 还差三件（堆太小、堆只在程序自己
-    # 分配时才发、某个成员的数据/重定位还有残留缺陷），所以发行版里它只能是一句**拿不到的
-    # 承诺**。与上面 `vm` 那条同一个闸、同一个理由：**承诺落空比拒绝更坏，发行版说"不"**。
+    # 那条路还没完工 —— 机制在，而 `docs/219` §8b 的 S2 里**静态**那一半 2026-10-15 落齐了
+    # （局部符号、栈对齐、arena、自举链接器的归档都修完了），剩的是**动态**那一半（`#360`）
+    # 与开闸本身（`#406`），所以发行版里它只能是一句**拿不到的承诺**。
+    # 与上面 `vm` 那条同一个闸、同一个理由：**承诺落空比拒绝更坏，发行版说"不"**。
     #
     # 用户 2026-10-12：「锁掉 LibC，在 0.1.4.5（即将发布）中不可调用 LibC，因为这尚未完工」。
     # 两扇门都要关：这一条关**声明的门**（`choose hosted`），`--link` 那扇由链接器自己关
@@ -3979,7 +4027,7 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
         errs.append(
             f"{_ln}: 发行版不含对外端口 —— `choose hosted` 只在**开发通道**可用。"
             f"真 libc / 真共享库那条路还没完工（`docs/222` §4 的机制在，`docs/219` §8b 的 "
-            f"S2 还差三件），所以发行版里它只能是一句拿不到的承诺。"
+            f"S2：静态那一半已落，动态那一半是 `#360`），所以发行版里它只能是一句拿不到的承诺。"
             f"**修法二选一**：删掉这一行（回到默认的 `sealed`），"
             f"或者改用本仓的工具链来开发它（`python tools/loment.py …`）")
 
@@ -4614,7 +4662,14 @@ def _expr_rs(e) -> str:
         if e.name == "alloc":  # M15
             return f"__loment_alloc({a[0]})"
         if e.name == "free":
-            return "{ let _ = " + a[0] + "; 0u32 }"
+            # Rust 后端**兑现不了** `free`：那边的运行期（`_RUST_RUNTIME`）只有一个 bump
+            # 分配器，**没有空闲链表** —— 原生/IR 后端有 `@__loment_free`（bump + 地址序
+            # 空闲链表 + 拆分 + 前沿回退），这里没有对应物。原先这句降级成
+            # `{ let _ = p; 0u32 }`，于是**同一份源**在原生后端真回收、在 Rust 后端
+            # **静默泄漏**（issue #165）。承诺落空比拒绝更坏，所以在这里点名拒。
+            raise LomError(getattr(e, "line", 1), 1,
+                           "rust 后端不支持 `free`：那边的运行期只有一个 bump 分配器，"
+                           "`free` 在那里什么都不会释放。要真回收就用原生/IR 后端")
         if e.name == "load8":
             return f"(__loment_load8({a[0]}, {a[1]}) as u32)"
         if e.name == "store8":
@@ -5586,9 +5641,10 @@ done:
 
 ; **清扫**：从 `%from` 起把没标记的块**交回分配器**。**起点参数化**同 `propagate`
 ; （小回收只清扫年轻代）。
-; **这里不重置空闲链表**（`@__loment_freehead`）—— 两个调用方在进这里之前各重置一次
-; （`__loment_collect` 与 `__loment_minor` 都是「先清空、再整堆清扫」），所以**重挂的那一半
-; 由这里承担**：`kill:` 里是**直接挂回表头**，不走 `__loment_free`。理由写在那一格。
+; **这里不重置空闲链表**（`@__loment_freehead`）—— 全量那一趟由**调用方**在进这里之前重置。
+; 理由见 `__loment_collect` 里那段：重置是「防止同一块被挂两次」的手段，而**小回收不能重置**
+; —— 老年代里那些**已经挂在链上的空闲块**不属于这次清扫的范围，重置一次就把它们从链上
+; 丢了（不是不安全，是白漏内存）。
 define internal void @__loment_sweep(i32 %from) {
 entry:
   br label %sl
@@ -5613,13 +5669,6 @@ sb:
 keep:
   br label %slc
 kill:
-  ; **直接挂回表头，不走 `__loment_free`**（`FujoJTOP/loment#366`）—— 那条路有一条守卫：
-  ; 只在块头 `next == -1`（借出态）时才链接。而**已经空闲的块**头里存的正是链表后继
-  ; ⇒ 守卫直接返回，块既不进链、也不在前沿里 = **永久丢失**。调用方进这里之前刚把链表
-  ; 清空（那正是为了防「同一块挂两次」），于是「清空 + 由清扫重挂」里**重挂的那一半**
-  ; 必须自己挂。少了这一半，每收一次就丢掉「这趟之前已经空闲」的全部块 —— 64 KiB 的
-  ; arena 约八次回收见底（`#366` 的 rcode 132）。链表此刻是空的 ⇒ 直接挂不会重复。
-  ;
   ; **这里的「清标记」什么都不做**（曾经写的是 `store i32 0, ptr %smp`）—— 那不是清一格，
   ; 是**越界清**：`%smp` 指向位图里的**一格字节**（`@__loment_mark` 每 8 字节堆一位），
   ; `store i32` 一次抹掉 **4 格 = 256 字节堆里的全部块**；就算写成 `store i8 0`，也照样
@@ -5628,20 +5677,9 @@ kill:
   ; —— 于是它们在同一趟清扫里被当垃圾交回分配器，程序随后读到的是复用后的字节。
   ; 而清零**本来就不需要**：走到这一格的**前提**就是「这一位是 0」（`%smsm` 为假）。
   ; 判据：`loment_elf_test::test_sweep_*` 两条同形语料（同源只差 `choose` 档位）。
-  %kend = add i32 %si, %ssz
-  %ktail = icmp eq i32 %kend, %so
-  br i1 %ktail, label %krew, label %klnk
-krew:
-  ; 顶着前沿的那一块：**收回前沿**（与 `__loment_free` 同一条规矩），不挂链 ——
-  ; 挂上它只会让 `alloc` 的 bump 那一侧看着更满，前沿却缩不回去。
-  store i32 %si, ptr @__loment_off
-  br label %slc
-klnk:
-  %k4 = add i32 %si, 4
-  %kpp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %k4
-  %khead = load i32, ptr @__loment_freehead
-  store i32 %khead, ptr %kpp
-  store i32 %si, ptr @__loment_freehead
+  %k8 = add i32 %si, 8
+  %kp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %k8
+  call void @__loment_free(ptr %kp)
   br label %slc
 slc:
   %sex = add i32 %si, %ssz
@@ -5673,12 +5711,13 @@ clc:
 roots:
   call void @__loment_markroots()
   call void @__loment_propagate(i32 8)
-  ; **清扫前把空闲链表清空、由这次清扫重新挂** —— 不重置的话，「本来就在链上的块」
-  ; 还会被清扫再挂一次（双重插入，链就毁了）。**重置**比「先标记链上的块再跳过」少一趟遍历。
-  ; **重挂的那一半在 `__loment_sweep` 的 `kill:` 里**，而且必须自己挂（不走 `__loment_free`
-  ; —— 它有一条「只在借出态才链接」的守卫，已经空闲的块过不去）。两半缺一：只清不挂，
-  ; 每收一次就把「这趟之前已经空闲」的块整批丢掉（`FujoJTOP/loment#366`）。
-  store i32 0, ptr @__loment_freehead
+  ; **清扫前**不清空**空闲链表**（`#366`）—— 原先这里有一行 `store i32 0, ptr
+  ; @__loment_freehead`，理由是「本来就在链上的块会被再 free 一次（双重插入，链就毁了）」。
+  ; 那条理由站在 `#164` **之前**：当时 `free` 不验所有权，谁调都往里挂。
+  ; `#164` 之后 `__loment_free` 只认**借出中**的块（`next == -1`），已在链上的块**惰性返回**
+  ; —— 于是重置不再防住什么，却把**当前所有空闲块**从分配器手里**永久**丢掉：
+  ; 清扫撞上它们时那道守卫拒绝重挂，而清扫**不会**把它们放回去。字节还在 arena 里、
+  ; 还在前沿之下，`alloc` 再也摸不到。判据见 `loment_elf_test::test_a_collection_keeps_the_free_list`。
   call void @__loment_sweep(i32 8)
   ret void
 }
@@ -5843,14 +5882,11 @@ rc:
   br label %cr
 prop:
   call void @__loment_propagate(i32 %ot)
-  ; **清扫整堆，但「重置空闲链表 + 释放时清标记」两条一起**（与 `__loment_collect` 同形）：
-  ;   ① 只扫子区间而不重置，会让**同一块被挂两次**（前沿退回去之后又长上来，那块还在链上）——
-  ;      链表一坏，`alloc` 就可能返回一个**低地址的假大块**（实测：那正是「目标块总落在
-  ;      `oldtop` 之下」的成因）；
-  ;   ② 既然重置，重挂就必须**真的发生**（`__loment_sweep` 的 `kill:` 直接挂回表头）——
-  ;      否则这一趟清掉的链表再没人补上，已经空闲的块整批丢（`FujoJTOP/loment#366`）。
-  ; 省下的不是清扫那一趟（那趟本来就便宜），是**清标记与传播只覆盖年轻代**（贵的是它们）。
-  store i32 0, ptr @__loment_freehead
+  ; **清扫整堆，但不清空空闲链表**（`#366`，与 `__loment_collect` 同一条）。
+  ; 原先这里也有那一行，理由两条（① 双重插入、② 既然重置就得能重复跑）；**两条都站在
+  ; `#164` 之前**：今天 `__loment_free` 只认借出中的块，已在链上的一律**惰性返回**，
+  ; 所以「同一块被挂两次」不会发生，而重置只会把那些**已经挂在链上**的空闲块
+  ; （`docs/210` §2.7 自己点名的「不是不安全，是白漏内存」）永久丢掉。不做。
   call void @__loment_sweep(i32 8)
   ; **晋升**（不搬移的那一种）：这次小回收的**幸存者从此算老的** —— 把切成处推到前沿。
   ; 少了这一条，「年轻代」就永远是整个堆（`oldtop` 只有全量才动，而全量在小回收够用的
@@ -6436,6 +6472,74 @@ def _l0_promotable(f: Func, toks: list,
     return out
 
 
+#: **系统调用的实参是"借"**（`docs/246` §5.3）：这批系统调用**在调用期间**就把用户缓冲区
+#: 拷完 / 写完，**不留存那个用户指针** —— 所以把指针（或它的整数转换值）交给它们是"外借"，
+#: 不是外逃；那些站点因此可以走 L0/L1，不必因为一句话整格落收集器。
+#:
+#: **号抄自内核头文件**（`/usr/include/x86_64-linux-gnu/asm/unistd_64.h`）—— 不凭记忆写：
+#: 一个错的号就是**静默的悬垂指针**。入表的判据只有一条：**调用期间消费掉**。
+#:
+#: **故意不入表的**（它们才是这张表真正的内容）：
+#:
+#:   * `clone`(56) / `clone3`(435) —— 子进程**继续用**那个栈指针，调用返回后还留着；
+#:   * `sendto`(44) / `sendmsg`(46) —— 带 `MSG_ZEROCOPY` 时内核持有那些页到发完；
+#:   * `io_setup`(206) / `io_submit`(209) / `io_uring_setup`(425) / `io_uring_enter`(426) ——
+#:     **登记**语义：内核留的就是那个地址；
+#:   * `perf_event_open`(298) / `bpf`(321) —— 同理（attr / 指令流被长期持有）；
+#:   * `ioctl`(16) —— 万能口，接什么都可能，整条不入；
+#:   * `set_robust_list`(273) —— 登记一个"到进程结束都在"的链头。
+_SYSCALL_BORROWS = frozenset((
+    0, 1, 2, 4, 5, 6, 7,                       # read write open stat fstat lstat poll
+    17, 18, 19, 20, 21, 23,                    # pread64 pwrite64 readv writev access select
+    35, 42, 49, 51, 52, 54, 55,                # nanosleep connect bind getsockname getpeername setsockopt getsockopt
+    59, 63, 72, 78, 79, 80, 81,                # execve uname fcntl getdents getcwd chdir fchdir
+    82, 83, 84, 86, 87, 88, 89, 90, 91,        # rename mkdir rmdir link unlink symlink readlink chmod fchmod
+    96, 202, 217, 228, 233,                    # gettimeofday futex getdents64 clock_gettime epoll_ctl
+    257, 258, 260, 262, 263, 264, 265, 266, 267, 268, 269, 270, 271,
+    280, 316, 318, 332,                        # 各种 …at 族 + utimensat renameat2 getrandom statx
+))
+
+#: **只认这三个名字**（不是"以 syscall 开头"）：自举侧只能逐名比（没有前缀比较），
+#: 两边必须**同判** —— 放宽成前缀就可能在某个用户函数名上与自举侧分道扬镳。
+_SYSCALL_BUILTINS = ("syscall4", "syscall6", "syscall7")
+
+
+def _syscall_borrow_ok(toks: list, i: int) -> bool:
+    """`NAME`（下标 `i`）是 `NAME as <类型>`、**整个实参就是这次 cast**，而且它所在的那个调用
+    是 `syscall4/6/7` 之一、第一个实参是**白名单里的字面量号**？（`docs/246` §5.3 的落地形态。）
+
+    **为什么要求 cast**：交出去的必须是"一个整数"，那一句正是程序在说"这个地址现在是个数"。
+    **它是不是外逃由接收方决定**：白名单里的系统调用在调用期间消费掉它；不在名单里的一律
+    按外逃算 —— **保守只能往一个方向错**（把借当逃只是错过一次提升，反过来是不安全）。
+    """
+    n = len(toks)
+    if not (i + 3 < n and toks[i + 1].kind != "string" and toks[i + 1].val == "as"
+            and toks[i + 2].kind == "ident" and toks[i + 3].kind != "string"
+            and toks[i + 3].val in (",", ")")):
+        return False                            # 形状不是"整个实参就是这次 cast"
+    depth, j = 0, i - 1
+    while j >= 0:                               # 往前找**未闭合**的那个 `(`
+        tok = toks[j]
+        if tok.kind == "string":
+            j -= 1
+            continue
+        if tok.val == ")":
+            depth += 1
+        elif tok.val == "(":
+            if depth == 0:
+                break
+            depth -= 1
+        j -= 1
+    if j < 1:
+        return False
+    callee, nr = toks[j - 1], toks[j + 1]
+    if not (callee.kind == "ident" and callee.val in _SYSCALL_BUILTINS):
+        return False
+    if nr.kind != "number":
+        return False                            # 号不是字面量 ⇒ 不知道是哪个 ⇒ 不入
+    return (_int_lit(nr.val) & 0xFFFFFFFF) in _SYSCALL_BORROWS
+
+
 def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
                    safe: "frozenset[str] | set[str]" = _L0_SAFE_BUILTINS) -> tuple[bool, int, int]:
     """`name` 在 `[at, end)` 里**只被解引用透过、从不外逃**？回 `(ok, 声明次数, 最后出现下标)`。
@@ -6471,8 +6575,9 @@ def _ptr_only_uses(toks: list, at: int, end: int, name: str, nm: int,
             elif word(k + 1, "="):
                 ok = False                          # 重新赋值
                 break
-            elif not (word(k - 1, "(") and safe_callee(k - 2)
-                      and (word(k + 1, ",") or word(k + 1, ")"))):
+            elif not ((word(k - 1, "(") and safe_callee(k - 2)
+                       and (word(k + 1, ",") or word(k + 1, ")")))
+                      or _syscall_borrow_ok(toks, k)):
                 ok = False                          # 其余任何用法：外逃
                 break
         k += 1
@@ -6706,8 +6811,9 @@ def _l2_ok(toks: list, at: int, end: int, fend: int, l0: dict[str, int],
                     return False           # 体内第二处声明（遮蔽）：认不清哪个是哪个
                 elif word(k + 1, "="):
                     return False           # 重新赋值
-                elif not (word(k - 1, "(") and safe_callee(k - 2)
-                          and (word(k + 1, ",") or word(k + 1, ")"))):
+                elif not ((word(k - 1, "(") and safe_callee(k - 2)
+                           and (word(k + 1, ",") or word(k + 1, ")")))
+                          or _syscall_borrow_ok(toks, k)):
                     return False
         if ndecl != 1:
             return False
@@ -7399,13 +7505,16 @@ class _Ir:
         而"只涨不落的前沿 + 什么都不做的 free"正是 `docs/175` §3.4 点名的那个形状
         （**允诺却不兑现**）。
 
-        **触发也在这里**（`FujoJTOP/loment#367`）：先问一句"该收了没有"，**收在分配之前**
-        —— 所以不需要"分配失败再重试"那条路，`__loment_alloc` 一个字节都不用动。
-        放在这里而不是 `alloc` 的分支里，是因为**每个分配点都得问**：`str_concat` 也走
-        这条，它以前不问，于是"只拼字符串、自己不 `alloc`"的程序从不着手回收，arena 撑爆。
-        对 `alloc` 那一路，发出的两行与从前逐字相同（触发在前、分配在后，同一个 `sz`）。
+        **触发也发在这里**（`#367`）：它原先在 `alloc` 的**调用点**上，而 `str_concat`
+        走的是这个函数、不经过那一处 —— 于是拼接分配的字节**不计入**那个计数器，
+        只拼字符串的程序**一次收集都不跑**（`gc_auto_alpha` 也救不了：它的自适应阈值与
+        空间触发都住在 `__loment_maybe_collect` 里，而那个函数一次都不会被调用）。
+        挪到这儿之后**每一次**分配都计数；发的是同一段文本、同一顺序、同一个实参，
+        所以只含 `alloc` 的程序产物字节**完全不变**。
         """
         if self.gc_any:
+            # 先问一句"该收了没有"—— 收在**分配之前**，所以不需要"分配失败再重试"那条路，
+            # 也就不必动 `__loment_alloc` 一个字节（另外两档的产物因此逐字节不变）。
             self.w(f"call void @__loment_maybe_collect(i32 {size_var})")
         p = self.t()
         self.w(f"{p} = call ptr @__loment_alloc(i32 {size_var})")
@@ -8048,9 +8157,33 @@ def _alloc_promoted(toks: list, a: int, funcs: list) -> bool:
     return False
 
 
-def _heap_needed(mods: list) -> bool:
+def _declares_extern(mods: list) -> bool:
+    """这份单元（**连同依赖**）声明了 `extern fn` 吗 —— 也就是"它要链一份外面的东西"。
+
+    **为什么要问这个**（`docs/219` S2 / `FujoJTOP/loment#359`）：真 C 库总是要 `malloc`
+    （zlib 的 `zutil.o` 就要），而收编面那两条薄壳（`malloc`/`free`）**只在堆在时才发**
+    —— 堆不在，链接期就是"引用了未定义的符号 malloc"。所以"要调外部库"这件事本身
+    就该把堆带上。判据放宽到"有 `extern fn` 就发堆"，是 `docs/219` §8b 里写下的修法。
+    """
+    for m in mods:
+        toks = getattr(m, "toks", None) or []
+        for i, tk in enumerate(toks):
+            if tk.kind == "ident" and tk.val == "extern":
+                nxt = toks[i + 1] if i + 1 < len(toks) else None
+                if nxt is not None and nxt.kind == "ident" and nxt.val == "fn":
+                    return True
+    return False
+
+
+def _heap_needed(mods: list, rt_on: bool = True) -> bool:
     """这份单元（**连同依赖**）要不要那块 arena —— 与自举侧 `heap_needed` 同一条规则：
-    `alloc`（**没被 L0 提到栈上的那些**）/ `str_concat` / `free` 三者之一出现即算。
+
+    * 三个**运行期构造**之一出现即算：`alloc`（**没被 L0 提到栈上的那些**）/ `str_concat`
+      / `free`；
+    * **多一条（2026-10-15）**：根开了运行期、而这份单元**声明了 `extern fn`** ——
+      见 `_declares_extern` 的说明（真 C 库要 `malloc`，堆不在就发不出那两条薄壳）。
+      `no_runtime` 那一档**不跟**：那一维是**保证**（`docs/217`）——产物里不带运行期，
+      于是那样一个单元链一个要 `malloc` 的库时，报的是**未定义的符号**（响亮，且是它选的）。
 
     **必须在发射函数体之前算出来**：`gc_auto_alpha` 的写屏障挂在每个 `store8` 站点上，
     而屏障**引用堆** —— 一份把 `alloc` 全 L0 提走的单元没有堆，那儿的屏障就成了未定义符号
@@ -8059,6 +8192,8 @@ def _heap_needed(mods: list) -> bool:
     它与 `emit_llvm` 里那条**文本判据**（`"@__loment_alloc" in text_all`）说的必须是同一件事
     —— 自举侧两侧同源（`heap_needed` 预扫描 + 同一份发堆门），逐字节判据一直钉着这一点。
     """
+    if rt_on and _declares_extern(mods):
+        return True
     for m in mods:
         toks = getattr(m, "toks", None) or []
         funcs = getattr(m, "funcs", None) or []
@@ -8136,10 +8271,6 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **`gc_auto`**：自动那一档（`docs/210` §2.1 / §2.4）—— 编译器发精确根表 + 在每个分配点
     # 问一句"该收了没有"，收集器在运行期里。与 `gc_alpha` **互斥**（两档不同时成立）。
     gc_auto = mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_auto"
-    # **写屏障要不要挂**（`docs/210` §2.7 / `FujoJTOP/loment#239`）：alpha 档**且**这份
-    # 单元真的要那块 arena。判据得在**发射函数体之前**算好 —— 屏障是在 `store8` 站点上
-    # 发的，而它引用堆。与自举侧同一条规则（那边预扫描成 `s+516`）。
-    _has_heap_pre = _heap_needed([mod, *deps])
     # **运行期维**（`docs/217` / `docs/175` §3.6）。两个方向各一句话：
     #   * `runtime`    ⇒ 产物里**一定**有那段运行期 —— 这里的 `rt_on` 无条件发 `_IR_RUNTIME`；
     #   * `no_runtime` ⇒ 产物里**一定没有** —— 那条**不在这里**：它在 `check()` 里拒
@@ -8149,7 +8280,14 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 就不该装它（一个只会除法的裸机引导程序不该凭空多 64 KiB 的 .bss）。它仍旧按需 ——
     # 而"用得到 `alloc`"这一半由 `check()` 管着：`no_runtime` 下写 `alloc` 是拒的，
     # 所以"产物里有分配器"必然意味着"根写过 `choose runtime`"。
+    # **多一条按需**（2026-10-15）：根开了运行期、而这份单元声明了 `extern fn` ——
+    # 真要链外部库了，堆就带上（`_declares_extern` 的说明）。这个判断要用到 `rt_on`，
+    # 所以 `rt_on` 在这里先算（它只是一次字典读取，没有副作用）。
     rt_on = mod.chooses.get("runtime", CORE_DEFAULTS["runtime"]) == "runtime"
+    # **写屏障要不要挂**（`docs/210` §2.7 / `FujoJTOP/loment#239`）：alpha 档**且**这份
+    # 单元真的要那块 arena。判据得在**发射函数体之前**算好 —— 屏障是在 `store8` 站点上
+    # 发的，而它引用堆。与自举侧同一条规则（那边预扫描成 `s+516`）。
+    _has_heap_pre = _heap_needed([mod, *deps], rt_on)
     meta: list[str] = []
     dbg_types: dict = {}  # M59: 局部变量类型 -> DIBasicType (全模块共享一份)
 
@@ -8242,7 +8380,8 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **调用**，堆全局不再出现在**单元体**里 —— 判据必须落在"分配器被引用了没有"上，
     # 而不是"堆那个符号出现过没有"。两者分开判会漏发（实测：`free` 一用就报
     # "未定义的标签"；而只用整数除法、不用 alloc 的单元会反过来——发出分配器却没有全局）。
-    _needs_heap = "@__loment_alloc" in text_all or "@__loment_free" in text_all
+    _needs_heap = ("@__loment_alloc" in text_all or "@__loment_free" in text_all
+                   or _has_heap_pre)
     # **`hosted` 的堆从宿主来**（`docs/228` 的 A = `docs/219` §8b 的 **S1e**）。
     # 闸门是 `choose port hosted`，因为"堆封在这份产物里"是 `sealed` 的一半含义 ——
     # 一次 `malloc` 是**运行期**对外面的依赖，给 `sealed` 加上它就等于把那条保证改掉
@@ -8253,13 +8392,36 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # 那一块，那条"不静默"的记号因此**没有再出现的场合**（判据从"它说了"改成"它涨了"）。
     # `gc_auto_alpha` 不用管 —— `hosted` 与它**定义上冲突**（`CORE_CONFLICTS`），走不到这儿。
     _hosted_grown = _hosted_port
+    # **`extern fn` 那一档的 arena**（`docs/219` §8b 的 **S2**，2026-10-15）：根开了运行期、
+    # 这份单元声明了 `extern fn`（于是堆按需带上，见 `_heap_needed`）、而且**不是** `hosted`
+    # （那一档本来就吃平台那一块，比这块还大）—— 这一档的 arena 换成**封在产物里、但给够**
+    # 的那一种（`_IR_HEAP_FFI`）。真 C 库要 256–512 KiB（zlib 的 `deflateInit`），
+    # `_IR_HEAP` 那 64 KiB 装不下 —— 这是 V1（`docs/183` §4）实测剩下的最后一件。
+    #
+    # **`gc_auto_alpha` 除外，而且是明写的边界**：那一档的收集器
+    # （`_IR_GC_TRIGGER_ADAPT`）是**直接寻址** arena 的（`getelementptr [65536 x i8], ptr
+    # @__loment_heap, …`），换 arena 就得连它一起换、也就是**再抄一份那段文本**；而 `hosted`
+    # 与 alpha **定义上冲突**（`CORE_CONFLICTS`），仓库里根本没有"间接寻址的 alpha"这份先例。
+    # 所以这一档**留在直接寻址的 64 KiB** —— 与改之前**逐字节相同**，并且**说出来**
+    # （`; loment-heap: static 65536`，"不静默"）。留这一格不是因为难：见 `_IR_ARENA_STATIC`
+    # 的说明，这是"再抄一份"要不要付的问题，`docs/158` §5 那条孪生纪律要挡的正是它。
+    _ffi_heap = rt_on and _declares_extern([mod, *deps]) and not _hosted_port
+    _ffi_grown = _ffi_heap and not gc_alpha
+    #: arena 是不是**从外面来**的（于是分配器与收集器都得走基址指针 `%hb`）
+    _indirect = _hosted_grown or _ffi_grown
     if _needs_heap:
         if _hosted_grown:
             out.append(f"; loment-heap: platform {HOSTED_ARENA_BYTES}")
             if "malloc" not in seen_ext:  # 用户自己 `declare` 过就让他那份说了算
                 out.append("declare ptr @malloc(i64)")
             out.append(_IR_HEAP_HOSTED)
+        elif _ffi_grown:
+            out.append(f"; loment-heap: ffi {FFI_ARENA_BYTES}")
+            out.append(_IR_HEAP_FFI)
         else:
+            if _ffi_heap:
+                # 上面那个例外：说了才不是静默。
+                out.append("; loment-heap: static 65536")
             out.append(_IR_HEAP)
     # **根表跟着 `gc_any` 发**（见 `_IR_ROOTS`）：`gc_auto` / `gc_auto_alpha` 只要函数里有
     # 指针槽就会往根表写 —— 而收集器**跟着堆发**。两件事解绑，才能让"有根没堆"的单元
@@ -8272,7 +8434,10 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
                 # 它引用 `@__loment_heap`/`@__loment_off`/`@__loment_free`，所以必须排在堆之后。
                 # `hosted` 那一份与它**同源**（`_arena_indirect` 机器换的，见 `_IR_GC_HOSTED`）：
                 # 收集器要认的是**同一块 arena**，所以 arena 换了它也得换。
-                out.append(_IR_GC_HOSTED if _hosted_grown else _IR_GC)
+                # **FFI 那一档共用同一份**：`_IR_GC_HOSTED` 里的表是 `arena/8` 行，而
+                # `FFI_ARENA_BYTES` 与 `HOSTED_ARENA_BYTES` **同数**（1 MiB ⇒ 16384 行）——
+                # 这两个数是绑在一起的，不是各挑各的（改一个就得改另一个，见那条常量）。
+                out.append(_IR_GC_HOSTED if _indirect else _IR_GC)
             else:
                 # `gc_auto_alpha` 的**自适应**收集器（`docs/210` §2.4 的"策略池"那一半）：
                 # 与 `gc_auto` 同一段 mark-sweep 本体，**触发**换成自适应的那一支。此前

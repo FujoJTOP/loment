@@ -116,7 +116,8 @@ GLOBS = [
     "tools/loment_err_test.py",
     # lompi (随包发行的独立命令, docs/170): 源码快照 + 它外面的正本与仓内副本的同步/校验
     "lompi/*.lomt",
-    # lompi 的标准库: 随 Loment 一起装 (std 127 模块 + host, 共 137 个文件, 用户 2026-09-16)。
+    # lompi 的标准库: 随 Loment 一起装 (std/host/internet/os 四个包, 共 160 个文件 ——
+    # 数见 `loment_lompi_test.STORE_FILES`; 用户 2026-09-16 定的随包形状)。
     # **版本号是故意写死的**: 自举那边 (loment/tools/lomrel.lomt) 的 glob 只认"一段目录 +
     # 一个名字模式", `**` 在那边展开不出递归 (实测只给一层, 于是把 std/ host/ 两个**目录**
     # 当文件收了进来)。升版本要同时改两份清单 —— `loment_lompi_test` 里那条
@@ -165,7 +166,7 @@ GLOBS = [
     "tools/lomelf.py", "tools/loment_opt_obj.py", "tools/loment_elf_test.py", "tools/loment_pe_test.py",
     # LVM 的 T0（`docs/243`）：那份 IR 的**第四个读者**（解释器）+ 它那条判据
     # （同一批程序，原生产物与 VM 比 stdout 字节 + 退出码）。**两处清单插入同一位置**。
-    "tools/lvm.py", "tools/lvm_test.py", "tools/lvm_twin_test.py",
+    "tools/lvm.py", "tools/lvm_test.py", "tools/lvm_twin_test.py", "tools/lvm_profile_test.py",
     # `lom/net.lom` 那条 L0 契约的判据 (docs/229): 四处对账 + 自证会红。
     # **位置与自举那份 `lomrel.lomt` 对齐**（两份清单的顺序就是它们的顺序）。
     "tools/loment_net_test.py",

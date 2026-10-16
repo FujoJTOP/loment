@@ -916,6 +916,70 @@ fn emit_local_name(s: ptr, out: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
 
 // ---------------------------------------------------------------- L0 静态提升 (docs/210 §2)
 
+/// 白名单里的系统调用号？（`docs/246` §5.3）**512 位位图，16 个 u32** —— 号抄自内核头文件
+/// （`/usr/include/x86_64-linux-gnu/asm/unistd_64.h`），与 `lomentc._SYSCALL_BORROWS` 同表。
+/// 故意不入的那几族写在那边注释里（clone / sendmsg 带 MSG_ZEROCOPY / io_uring / perf / bpf / ioctl）。
+fn syscall_short(nr: u32) -> u32 {
+    if nr >= 512 {
+        return 0;
+    }
+    let w: [u32; 16] = [12452087, 2295989256, 266322176, 1, 0, 0, 33555456, 528,
+                        16842710, 1342177280, 4096, 0, 0, 0, 0, 0];
+    return (w[nr / 32] >> (nr % 32)) & 1;
+}
+
+/// **系统调用的实参是"借"**（`docs/246` §5.3）：`v` 处的名字是 `v as <类型>`、整个实参就是
+/// 这次 cast，外层调用是 `syscall4/6/7` 之一、第一个实参是**白名单里的字面量号**。
+/// 只认这三个名字（不认"以 syscall 开头"）：这里没有前缀比较，而两边必须同判。
+fn syscall_borrow_ok(src: ptr, toks: ptr, v: u32) -> bool {
+    if !(tok_kind(toks, v + 1) != 2 && tok_is(src, toks, v + 1, "as")
+            && tok_kind(toks, v + 2) == 0
+            && tok_kind(toks, v + 3) != 2
+            && (tok_is(src, toks, v + 3, ",") || tok_is(src, toks, v + 3, ")"))) {
+        return false;                       // 形状不是"整个实参就是这次 cast"
+    }
+    let depth: u32 = 0;
+    let j: u32 = v - 1;
+    let stop: u32 = 0;
+    while j > 0 && stop == 0 {              // 往前找**未闭合**的那个 `(`
+        if tok_kind(toks, j) != 2 {
+            if tok_is(src, toks, j, ")") {
+                depth = depth + 1;
+            } else if tok_is(src, toks, j, "(") {
+                if depth == 0 {
+                    stop = 1;
+                } else {
+                    depth = depth - 1;
+                }
+            }
+        }
+        if stop == 0 {
+            j = j - 1;
+        }
+    }
+    if stop == 0 || j < 1 {
+        return false;
+    }
+    if !(tok_kind(toks, j - 1) == 0 && tok_kind(toks, j + 1) == 1) {
+        return false;                       // 被调名 / 号：必须分别是标识符与数字字面量
+    }
+    if !(tok_is(src, toks, j - 1, "syscall4") || tok_is(src, toks, j - 1, "syscall6")
+            || tok_is(src, toks, j - 1, "syscall7")) {
+        return false;
+    }
+    return syscall_short(tok_int(src, toks, j + 1)) == 1;
+}
+
+/// 出现点判据（`docs/246` §5.3）：`v` 处的名字**这次出现算不算"没外逃"** ——
+/// ① 是某个 `l0_safe_callee` 的**整个第一个实参**（老规则）；或 ② 是"借"（见上）。
+fn gc_occ_ok(src: ptr, toks: ptr, v: u32, tbl: ptr) -> bool {
+    if v >= 2 && tok_is(src, toks, v - 1, "(") && l0_safe_callee(src, toks, v - 2, tbl)
+            && (tok_is(src, toks, v + 1, ",") || tok_is(src, toks, v + 1, ")")) {
+        return true;
+    }
+    return syscall_borrow_ok(src, toks, v);
+}
+
 /// 被调 `i` 安不安全 —— **首参不会因为这次调用而外逃**。两类：
 ///
 ///   * 三个内建 `load8` / `store8` / `atomic_add`（`.lomentc._L0_SAFE_BUILTINS` 那张表，
@@ -1003,11 +1067,13 @@ fn safe_mark_fn(src: ptr, toks: ptr, nm: u32, tbl: ptr) -> u32 {
             }
             if !(k >= 2 && tok_is(src, toks, k - 1, "(") && tok_kind(toks, k - 2) == 0
                     && !tok_is(src, toks, k - 3, ".") && !tok_is(src, toks, k - 3, ":")
-                    && (tok_is(src, toks, k + 1, ",") || tok_is(src, toks, k + 1, ")"))) {
+                    && (tok_is(src, toks, k + 1, ",") || tok_is(src, toks, k + 1, ")"))
+                    || syscall_borrow_ok(src, toks, k)) {
                 return 0;                           // 其余任何用法：逃逸
             }
-            if l0_safe_callee(src, toks, k - 2, tbl) == false {
-                return 0;                           // 被调本身还不安全
+            if l0_safe_callee(src, toks, k - 2, tbl) == false
+                    && !syscall_borrow_ok(src, toks, k) {
+                return 0;                           // 被调本身还不安全（"借"那一支不必）
             }
         }
         k = k + 1;
@@ -1088,9 +1154,7 @@ pub fn l0_size_at(src: ptr, toks: ptr, nm: u32, at: u32, end: u32,
             if tok_is(src, toks, k + 1, "=") {
                 return 0;                           // 重新赋值
             }
-            if !(k >= 2 && tok_is(src, toks, k - 1, "(")
-                    && l0_safe_callee(src, toks, k - 2, tbl)
-                    && (tok_is(src, toks, k + 1, ",") || tok_is(src, toks, k + 1, ")"))) {
+            if !(gc_occ_ok(src, toks, k, tbl)) {
                 return 0;                           // 其余任何用法: 外逃
             }
         }
@@ -1206,10 +1270,7 @@ pub fn l2_ok_at(src: ptr, toks: ptr, at: u32, end: u32, fat: u32, fend: u32,
                             return 0;             // 体内第二处声明（遮蔽）
                         } else if tok_is(src, toks, p + 1, "=") {
                             return 0;             // 重新赋值
-                        } else if !(p >= 2 && tok_is(src, toks, p - 1, "(")
-                                && l0_safe_callee(src, toks, p - 2, tbl)
-                                && (tok_is(src, toks, p + 1, ",")
-                                    || tok_is(src, toks, p + 1, ")"))) {
+                        } else if !(gc_occ_ok(src, toks, p, tbl)) {
                             return 0;
                         }
                     }
@@ -1324,9 +1385,7 @@ pub fn l1_ptr_only_at(src: ptr, toks: ptr, nm: u32, at: u32, end: u32,
                 return 0;                            // 第二处声明（遮蔽）
             } else if tok_is(src, toks, k + 1, "=") {
                 return 0;                            // 重新赋值
-            } else if !(k >= 2 && tok_is(src, toks, k - 1, "(")
-                    && l0_safe_callee(src, toks, k - 2, tbl)
-                    && (tok_is(src, toks, k + 1, ",") || tok_is(src, toks, k + 1, ")"))) {
+            } else if !(gc_occ_ok(src, toks, k, tbl)) {
                 return 0;                            // 其余任何用法：外逃
             }
         }
@@ -1429,9 +1488,7 @@ pub fn slot_mask_at(src: ptr, toks: ptr, nm: u32, at: u32, end: u32,
                     if tok_is(src, toks, e + 1, "=") {
                         esc = 1;                     // 重新赋值
                     } else {
-                        if !(e >= 2 && tok_is(src, toks, e - 1, "(")
-                                && l0_safe_callee(src, toks, e - 2, tbl)
-                                && (tok_is(src, toks, e + 1, ",") || tok_is(src, toks, e + 1, ")"))) {
+                        if !(gc_occ_ok(src, toks, e, tbl)) {
                             esc = 1;                 // 其余任何用法：外逃
                         }
                     }
@@ -2430,14 +2487,15 @@ fn find_const(src: ptr, toks: ptr, name_tok: u32) -> u32 {
 /// **不再是内联的纯 bump** —— `free` 兑现之后（`docs/175` §3.4），分配与回收必须是
 /// 同一份状态的读写者。大小从第 szlvl 层取 (u32), 结果 (ptr) 写到第 lvl 层;
 /// 返回分配到的指针的 temp 号。alloc 与 str_concat 共用 (**文本与 `lomentc.alloc_ir` 同序**)。
+///
+/// **触发也发在这里**（`#367`）: 它原先在 `alloc` 的**调用点**上, 而 `str_concat`
+/// 走的是这个函数、不经过那一处 —— 于是拼接分配的字节**不计入**那个计数器, 只拼字符串的
+/// 程序**一次收集都不跑**（alpha 也救不了: 它的阈值与空间触发都住在
+/// `__loment_maybe_collect` 里, 而那个函数一次都不会被调用）。挪到这儿之后**每一次**
+/// 分配都计数; 同一段文本、同一顺序、同一个实参, 所以只含 `alloc` 的程序产物字节不变。
 fn emit_alloc_seq(s: ptr, out: ptr, szlvl: u32, lvl: u32) -> u32 {
     if gc_any(s) == 1 {
-        // `gc_auto`：分配**之前**先问一句"该收了没有"（`docs/210` §2.1）。
-        // 收在分配之前 -> 不需要"分配失败再重试"那条路，`__loment_alloc`
-        // 一个字节都不用动（另外两档的产物因此逐字节不变）。
-        // **放在这里而不是 `alloc` 的分支里**（`FujoJTOP/loment#367`）：`str_concat`
-        // 也走这条 —— **每个分配点都得问**，否则"只拼字符串、自己不 alloc"的程序
-        // 从不着手回收，arena 撑爆。对 `alloc` 那一路发出的两行与从前逐字相同。
+        // 收在**分配之前** -> 不需要"分配失败再重试"那条路, `__loment_alloc` 一字节不动。
         emit_str(s, out, "  call void @__loment_maybe_collect(i32 ");
         emit_val(s, out, szlvl);
         emit_str(s, out, ")\n");
@@ -5421,20 +5479,40 @@ setprev:
 }
 
 /// **`hosted` 那一份分配器**（`docs/228` 的 A = `docs/219` §8b 的 **S1e**）——
-/// 下面这段字面量与 `lomentc._IR_HEAP_HOSTED` **逐字节同源**（脚本从它生成，不手抄）。
+/// 下面这几段字面量与 `lomentc._IR_HEAP_HOSTED` **逐字节同源**（脚本从它切的，不手抄）。
 ///
-/// 与 `emit_heap` **同序、同一条空闲链表**，只换两件事：arena 从**宿主**来
+/// 与 `emit_heap` **同序、同一条空闲链表**，只换两件事：arena 从**外面**来
 /// （`@__loment_arena()` 惰性地 `malloc` 一块，拿不到就 `__loment_abort`），
 /// 于是寻址全走 `%hb`（基址）。块的形状、地址序、首次适配 + 拆分、前沿回退一个字节没动。
+///
+/// **切成三段**：`HEAD`（注释）/ `@__loment_arena()` / `BODY`（分配器本体 + 全局）。
+/// 切在那儿是因为 arena 那一段有**两个版本**（宿主给的、封在产物里给的）——
+/// 换的就是那一段，另外两段一个字都不动 —— 所以是**一个**函数带标志，不是两个。
 ///
 /// **`sealed` 走不到这一段**（`docs/228` §2）—— 闸门是 `choose hosted`，所以现存每一份
 /// sealed 产物的字节不变。**`gc_any` 档也走不到**：收集器的标记表按 arena 偏移索引、
 /// 行数 = arena/8，换 arena 要同时换表的口径，那是收集器的活（`docs/228` §4 的 B1）。
-/// 它**不静默**：那一档发 `; loment-heap: static 65536`（见 `emit_llvm` 里那个门）。
-fn emit_heap_hosted(s: ptr, out: ptr) -> u32 {
-    return emit_str(s, out, "; ---- 分配器（`docs/228` 的 `hosted` 那一份；`docs/175` §3.4）--------------------
+/// **`extern fn` 那一份分配器**（`docs/219` §8b 的 **S2**，2026-10-15）——
+/// 与 `emit_heap_hosted` **只差 arena 那一段**：宿主那一版问 `malloc`，这一版是
+/// **产物里那块静态数组**（`@__loment_arena_block`）。真 C 库（zlib 的 `deflateInit`）
+/// 要 256–512 KiB，`emit_heap` 那 64 KiB 装不下 —— 而 `sealed` 的定义是"底下没有东西"，
+/// 没有宿主的 `malloc` 可问（`docs/228` §2）。
+///
+/// **代价明写**：`[1048576 x i8]` 是 `.bss`，而本仓的链接器把 `.bss` 按零字节摆进
+/// 数据段（S1f 的取舍）⇒ 产物文件大 1 MiB。"向外面要"（`mmap`/`brk` = S1e B）不在
+/// 这条路上。
+///
+/// **谁走这一版**：根开了运行期、声明了 `extern fn`、且**不是** `hosted` 的单元。
+/// 产物自己说出来：`; loment-heap: ffi 1048576`。
+/// **`gc_auto_alpha` 除外**（那一档的收集器是直接寻址 arena 的，见 `emit_llvm`）——
+/// 它留在 64 KiB 并说出 `; loment-heap: static 65536`。
+fn emit_heap_indirect(s: ptr, out: ptr, statik: u32) -> u32 {
+    let d: u32 = 0;
+    d = d + emit_str(s, out, "; ---- 分配器（`docs/228`：arena 从**外面**来的那一份；`docs/175` §3.4）--------------------
 ;
-; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**宿主**来、寻址走 `%hb`。
+; 与 `_IR_HEAP` 同序、同一条空闲链表，只换两件事：arena 从**外面**来
+; （**谁给**写在下面那段 `@__loment_arena()` 里：宿主给的、或产物里那块静态的）、
+; 寻址走 `%hb`（基址）。
 ;
 ; **`free` 的所有权校验与 `_IR_HEAP` 是同一套**（借出标记是负数 + 四条廉价检查；2026-10-13 起
 ; 标记由原先那个 `-1` 放宽成 `-(掩码 + 2)`，好让块头带上**块内槽掩码**，见 `docs/210` §2.9），
@@ -5444,6 +5522,18 @@ fn emit_heap_hosted(s: ptr, out: ptr) -> u32 {
 ;
 ; 一次要 `1048576` 字节，惰性（第一次 `alloc` 才要）；要不到就 `__loment_abort`。
 
+");
+    if statik == 1 {
+        d = d + emit_str(s, out, "@__loment_arena_block = internal global [1048576 x i8] zeroinitializer
+
+define internal ptr @__loment_arena() {
+entry:
+  ret ptr @__loment_arena_block
+}
+
+");
+    } else {
+        d = d + emit_str(s, out, "; **宿主版**：向宿主要一块（`malloc`），惰性（第一次 `alloc` 才要）。
 define internal ptr @__loment_arena() {
 entry:
   %h = load ptr, ptr @__loment_heap
@@ -5464,7 +5554,9 @@ have:
   ret ptr %r
 }
 
-define internal ptr @__loment_alloc(i32 %size) {
+");
+    }
+    d = d + emit_str(s, out, "define internal ptr @__loment_alloc(i32 %size) {
 entry:
   %hb = call ptr @__loment_arena()
   %need0 = add i32 %size, 15
@@ -5618,12 +5710,23 @@ setprev:
   ret void
 }
 
-@__loment_heap = internal global ptr null
+@__loment_heap = internal global ptr zeroinitializer
 @__loment_off = internal global i32 8
 @__loment_freehead = internal global i32 0
-
 ");
+    // **末尾那一个换行不是排版**：参考实现是把各段 `"\n".join(...)` 拼出来的，而堆是其中
+    // **一段** —— 于是它后面**必然**跟着一个分隔符换行。自举这边是逐字节写的，得自己补。
+    // 丢掉的症状很隐蔽：`loment_p8_test` 报 `ir_hosted 首个差异 @6885`，差的就是这一个
+    // 字节（实测；而**链接出来的产物**看不出来 —— 链接器不在乎空行，所以 elf 那套镜像判据
+    // 一直是绿的）。
+    d = d + emit_str(s, out, "\n");
+    return d;
 }
+
+
+
+
+
 
 /// **自动回收**（`choose gc_auto`）—— 文本与 `lomentc._IR_GC` **逐字节同源**
 /// （下面的字面量是脚本从 `_IR_GC` 切的，不手抄）。
@@ -5941,12 +6044,13 @@ clc:
 roots:
   call void @__loment_markroots()
   call void @__loment_propagate(i32 8)
-  ; **清扫前把空闲链表清空、由这次清扫重新挂** —— 不重置的话，「本来就在链上的块」
-  ; 还会被清扫再挂一次（双重插入，链就毁了）。**重置**比「先标记链上的块再跳过」少一趟遍历。
-  ; **重挂的那一半在 `__loment_sweep` 的 `kill:` 里**，而且必须自己挂（不走 `__loment_free`
-  ; —— 它有一条「只在借出态才链接」的守卫，已经空闲的块过不去）。两半缺一：只清不挂，
-  ; 每收一次就把「这趟之前已经空闲」的块整批丢掉（`FujoJTOP/loment#366`）。
-  store i32 0, ptr @__loment_freehead
+  ; **清扫前**不清空**空闲链表**（`#366`）—— 原先这里有一行 `store i32 0, ptr
+  ; @__loment_freehead`，理由是「本来就在链上的块会被再 free 一次（双重插入，链就毁了）」。
+  ; 那条理由站在 `#164` **之前**：当时 `free` 不验所有权，谁调都往里挂。
+  ; `#164` 之后 `__loment_free` 只认**借出中**的块（`next == -1`），已在链上的块**惰性返回**
+  ; —— 于是重置不再防住什么，却把**当前所有空闲块**从分配器手里**永久**丢掉：
+  ; 清扫撞上它们时那道守卫拒绝重挂，而清扫**不会**把它们放回去。字节还在 arena 里、
+  ; 还在前沿之下，`alloc` 再也摸不到。判据见 `loment_elf_test::test_a_collection_keeps_the_free_list`。
   call void @__loment_sweep(i32 8)
   ret void
 }
@@ -6236,12 +6340,13 @@ clc:
 roots:
   call void @__loment_markroots()
   call void @__loment_propagate(i32 8)
-  ; **清扫前把空闲链表清空、由这次清扫重新挂** —— 不重置的话，「本来就在链上的块」
-  ; 还会被清扫再挂一次（双重插入，链就毁了）。**重置**比「先标记链上的块再跳过」少一趟遍历。
-  ; **重挂的那一半在 `__loment_sweep` 的 `kill:` 里**，而且必须自己挂（不走 `__loment_free`
-  ; —— 它有一条「只在借出态才链接」的守卫，已经空闲的块过不去）。两半缺一：只清不挂，
-  ; 每收一次就把「这趟之前已经空闲」的块整批丢掉（`FujoJTOP/loment#366`）。
-  store i32 0, ptr @__loment_freehead
+  ; **清扫前**不清空**空闲链表**（`#366`）—— 原先这里有一行 `store i32 0, ptr
+  ; @__loment_freehead`，理由是「本来就在链上的块会被再 free 一次（双重插入，链就毁了）」。
+  ; 那条理由站在 `#164` **之前**：当时 `free` 不验所有权，谁调都往里挂。
+  ; `#164` 之后 `__loment_free` 只认**借出中**的块（`next == -1`），已在链上的块**惰性返回**
+  ; —— 于是重置不再防住什么，却把**当前所有空闲块**从分配器手里**永久**丢掉：
+  ; 清扫撞上它们时那道守卫拒绝重挂，而清扫**不会**把它们放回去。字节还在 arena 里、
+  ; 还在前沿之下，`alloc` 再也摸不到。判据见 `loment_elf_test::test_a_collection_keeps_the_free_list`。
   call void @__loment_sweep(i32 8)
   ret void
 }
@@ -6371,14 +6476,11 @@ rc:
   br label %cr
 prop:
   call void @__loment_propagate(i32 %ot)
-  ; **清扫整堆，但「重置空闲链表 + 释放时清标记」两条一起**（与 `__loment_collect` 同形）：
-  ;   ① 只扫子区间而不重置，会让**同一块被挂两次**（前沿退回去之后又长上来，那块还在链上）——
-  ;      链表一坏，`alloc` 就可能返回一个**低地址的假大块**（实测：那正是「目标块总落在
-  ;      `oldtop` 之下」的成因）；
-  ;   ② 既然重置，重挂就必须**真的发生**（`__loment_sweep` 的 `kill:` 直接挂回表头）——
-  ;      否则这一趟清掉的链表再没人补上，已经空闲的块整批丢（`FujoJTOP/loment#366`）。
-  ; 省下的不是清扫那一趟（那趟本来就便宜），是**清标记与传播只覆盖年轻代**（贵的是它们）。
-  store i32 0, ptr @__loment_freehead
+  ; **清扫整堆，但不清空空闲链表**（`#366`，与 `__loment_collect` 同一条）。
+  ; 原先这里也有那一行，理由两条（① 双重插入、② 既然重置就得能重复跑）；**两条都站在
+  ; `#164` 之前**：今天 `__loment_free` 只认借出中的块，已在链上的一律**惰性返回**，
+  ; 所以「同一块被挂两次」不会发生，而重置只会把那些**已经挂在链上**的空闲块
+  ; （`docs/210` §2.7 自己点名的「不是不安全，是白漏内存」）永久丢掉。不做。
   call void @__loment_sweep(i32 8)
   ; **晋升**（不搬移的那一种）：这次小回收的**幸存者从此算老的** —— 把切成处推到前沿。
   ; 少了这一条，「年轻代」就永远是整个堆（`oldtop` 只有全量才动，而全量在小回收够用的
@@ -6813,7 +6915,28 @@ fn runtime_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
 /// **被 L0 提升掉的那条不算** —— 参考实现是按**发射出来的文本**判的
 /// （`"@__loment_alloc" in text_all`），提到栈上的 `alloc` 不产生任何对分配器的引用；
 /// 少判这一步，孪生会在全提升的程序上多带一份运行期 + 分配器（实测：逐字节判据立刻红）。
-fn heap_needed(s: ptr, src: ptr, toks: ptr) -> u32 {
+fn heap_needed(s: ptr, src: ptr, toks: ptr, rt_on: u32) -> u32 {
+    // **外源库也要那块 arena**（`docs/219` S2 / `FujoJTOP/loment#359`，2026-10-15）：
+    // 根开了运行期、而这份单元声明了 `extern fn` ⇒ 发堆。真 C 库总要 `malloc`（zlib 的
+    // `zutil.o` 就要），而收编面那两条薄壳**只在堆在时才发** —— 堆不在，链接期就是
+    // "引用了未定义的符号 malloc"。与参考实现 `_declares_extern` 同一条规则。
+    // **`no_runtime` 不跟**：那一维是保证（`docs/217`），产物里不带运行期。
+    // **不另写一个函数**：这一层加函数真的会慢下去（`docs/231` §2.2 量过 +4.7s）。
+    // 顺带把"声明了 `extern fn`"这件事记进槽 544 —— `emit_llvm` 那一步要拿它挑 arena
+    // （`docs/219` §8b 的 S2：外源库那一档要 256–512 KiB，64 KiB 装不下）。同一趟扫描的
+    // 副产品，不另写第二遍（`docs/231` §2.2 那笔账）。
+    if rt_on == 1 {
+        let j: u32 = 0;
+        while tok_kind(toks, j) != 4 {
+            if tok_kind(toks, j) == 0 && tok_is(src, toks, j, "extern") == 1 {
+                if tok_kind(toks, j + 1) == 0 && tok_is(src, toks, j + 1, "fn") == 1 {
+                    store32(s, 544, 1);
+                    return 1;
+                }
+            }
+            j = j + 1;
+        }
+    }
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {
         let hit: u32 = 0;
@@ -7047,10 +7170,12 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     store32(s, 512, runtime_needed(s, src, toks));
     // `choose runtime` = **强制带**（`docs/217`）：用不到也发 `_IR_RUNTIME`。
     // 参考实现那一半是 `if rt_on or "@__loment_" in text_all:` —— 同一个或。
-    if rt_tier(src, toks) == 1 {
+    let rt_on: u32 = rt_tier(src, toks);
+    if rt_on == 1 {
         store32(s, 512, 1);
     }
-    store32(s, 516, heap_needed(s, src, toks));
+    store32(s, 544, 0);   // "声明了 `extern fn`"——由 heap_needed 那一趟扫描顺带写下
+    store32(s, 516, heap_needed(s, src, toks, rt_on));
     store32(s, 532, strings_needed(src, toks));
     // 符号表: 登记函数。同时识别 trait 声明 (方法只声明不发射) 与 impl 块 (方法名 = <类型>_<方法>)
     let i: u32 = 0;
@@ -7274,14 +7399,32 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
     // 所以两侧说的一定是同一件事。**收集器那一档也在这支里**（`docs/230`，= B1）：
     // 标记表的行数就是 arena/8，所以换 arena 必须同时换表（见下面 `emit_gc_hosted`）。
     // `gc_auto_alpha` 不用管 —— `hosted` 与它定义上冲突，走不到这儿。
+    //
+    // **`extern fn` 那一支**（`docs/219` §8b 的 **S2**，2026-10-15）：声明了外部函数
+    // （槽 544）而**不是** `hosted` 的单元，arena 换成**产物里那块静态的、给够 1 MiB 的**
+    // 那一版（`emit_heap_ffi`）。真 C 库要 256–512 KiB，64 KiB 装不下。
+    // **`gc_auto_alpha` 除外，而且是明写的边界**：那一档的收集器（`emit_gc`）是**直接寻址**
+    // arena 的，换 arena 就得连它一起换、再抄一份那段文本；`hosted` 与 alpha 定义上冲突，
+    // 仓库里没有"间接寻址的 alpha"这份先例。所以这一档留在 64 KiB —— 与改之前逐字节相同，
+    // 并且**说出来**（`; loment-heap: static 65536`，"不静默"）。
+    // 与参考实现 `_ffi_heap` / `_ffi_grown` 同一条规则。
+    let indirect: u32 = 0;
     if load32(s, 516) == 1 {
         if contains_ident(src, toks, "hosted") == 1 {
             emit_str(s, out, "; loment-heap: platform 1048576\n");
             if extern_named(s, src, toks, "malloc") == 0 {
                 emit_str(s, out, "declare ptr @malloc(i64)\n");
             }
-            emit_heap_hosted(s, out);
+            emit_heap_indirect(s, out, 0);
+            indirect = 1;
+        } else if load32(s, 544) == 1 && load32(s, 572) != 1 {
+            emit_str(s, out, "; loment-heap: ffi 1048576\n");
+            emit_heap_indirect(s, out, 1);
+            indirect = 1;
         } else {
+            if load32(s, 544) == 1 {
+                emit_str(s, out, "; loment-heap: static 65536\n");
+            }
             emit_heap(s, out);
         }
     }
@@ -7293,7 +7436,9 @@ pub fn emit_module(src: ptr, toks: ptr, out: ptr, s: ptr) -> u32 {
             // 一份不用 `alloc` 的单元（alpha 把 alloc 全 L0 提走那种）**不该带收集器** ——
             // 它引用的是堆那几个全局，带上了就是引用未定义符号。
             // `hosted` 那一份收集器要认的是**同一块 arena**（`docs/230`），所以 arena 换了它也换。
-            if contains_ident(src, toks, "hosted") == 1 {
+            // FFI 那一档**共用同一份**（`indirect` 两条都算）：表是 arena/8 行，而两个 arena
+            // 数相等（都是 1 MiB ⇒ 16384 行）—— 那两个数是绑在一起的，见参考实现那条 assert。
+            if indirect == 1 {
                 emit_gc_hosted(s, out);
             } else {
                 emit_gc(s, out);

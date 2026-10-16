@@ -67,6 +67,14 @@ const E_Q: u32 = 10;       // E010 `?` 误用
 const E_MOVE: u32 = 6;     // E006 移动后使用
 const E_DANGLE: u32 = 12;  // E012 悬垂借用 (返回局部变量的借用)
 const E_MODE: u32 = 22;    // E022 项目模式 `choose` 用法不对 (docs/143 §3.2)
+const E_PARSE: u32 = 19;   // E019 期望表达式 —— 参考实现 `parse_primary` 的口径 (issue #49)
+const E_DEEP: u32 = 23;    // E023 源码太深 —— 嵌套超过 64 层 (issue #44)
+
+/// 拖运行期的构造**有几个** —— 检查器数好放这儿，驱动取来拼报文的"另有 N 处"那半句
+/// （与参考实现 `_runtime_sites` 的 `len(_sites) - 1` 同口径）。见 issue #321。
+/// 槽位在 tyt 块的**最后一个 16 字节**里：`[4096..4100)` 是诊断偏移格（`chk_pub` 专用），
+/// `[4100..4112)` 空着 —— `chk_arena_tyt() = 95856`、下一块 99968，合计 4112 字节。
+pub const RT_N_SITES: u32 = 4100;
 // E005 = 使用了 excluded 的空间。**与 E_CAP(4) 分开**：参考实现的 `loment_diag` 按消息
 // 分码 —— "能力…域/重复" 归 E004、"使用了 excluded 的空间" 归 E005。原先那两条分支
 // 都发 E_CAP，而参考侧同一条消息归类成 5，码集对不上（`loment_rule_parity` 里没有探针，
@@ -364,6 +372,62 @@ fn chk_tok_is(src: ptr, t: ptr, i: u32, s: str) -> bool {
     }
     return true;
 }
+
+/// 语句起点的 token 能不能**开始一个表达式** —— 与参考实现 `parse_primary` / `parse_unary`
+/// 的口径逐条对齐：kind 为 ident(0) / number(1) / string(2)，或 punct 为 `(` `[` `-` `!` `&`。
+///
+/// 为什么要这一条：`@` 在**词法上是合法 punct**（L0 的布局语法用它），但在 L1 里它哪一处都
+/// 不是表达式。原先检查器走到"赋值或表达式语句"那支时对首 token 不作判断，于是 `@` 被
+/// 静默咽掉 —— 编译通过、退出码 0、什么都不说（issue #49，实测 0.1.4.5 发布版同）。
+/// 参考实现自 2026-09-09 起就报 E019，两侧因此一直分叉。
+fn chk_expr_start(src: ptr, t: ptr, i: u32) -> bool {
+    let k: u32 = chk_tok_kind(t, i);
+    if k == 0 || k == 1 || k == 2 {
+        return true;
+    }
+    if k != 3 {
+        return false;
+    }
+    if chk_tok_is(src, t, i, "(") || chk_tok_is(src, t, i, "[") {
+        return true;
+    }
+    if chk_tok_is(src, t, i, "-") || chk_tok_is(src, t, i, "!") {
+        return true;
+    }
+    return chk_tok_is(src, t, i, "&");
+}
+
+/// 数值字面量后面**紧跟的原始字节**是不是构成了一个语言不支持的形式（issue #12）。
+///
+/// **判原始字节，不判 token 相邻** —— 按 token 相邻去认（"数字后面跟标识符"）会把
+/// `48 as u32` 误判（`as` 是 ident token），实测全仓 **1843 处**误报；按原始字节判是
+/// **0 处**。区别就在 `48 as` 的 `48` 后面是空格，而 `0b1010` 的 `0` 后面就是 `b`。
+///
+/// 认出三种：`0b…` / `0o…`（`0` 后面直接跟 `b`/`o`）、`1_000`（数字后面跟 `_`）、
+/// `1.5`（数字后面跟 `.` + 数字 —— 点后面跟 `.` 的 `0..8` 范围不算）。
+fn chk_bad_num_suffix(src: ptr, t: ptr, i: u32) -> bool {
+    if chk_tok_kind(t, i) != 1 {
+        return false;
+    }
+    let e: u32 = tok_start(t, i) + tok_len(t, i);
+    let b: u32 = load8(src, e);
+    if b == 95 {
+        return true;
+    }
+    if tok_len(t, i) == 1 && load8(src, tok_start(t, i)) == 48 {
+        if b == 98 || b == 66 || b == 111 || b == 79 {
+            return true;
+        }
+    }
+    if b == 46 {
+        let c: u32 = load8(src, e + 1);
+        if c >= 48 && c <= 57 {
+            return true;
+        }
+    }
+    return false;
+}
+
 
 /// 核心模式的取值属于**哪一维**（`docs/175` §3.0/§3.4）。
 ///   0 = `mode`（`std` / `no_std`）；1 = `gc`（`gc_manual` / `gc_auto`）；
@@ -2783,6 +2847,15 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
     let tyt: ptr = chk_tyt_of(oc);
     let j: u32 = b + 1;
     let c: u32 = envc;
+    // 数值字面量的**不支持形式**（`0b1010` / `1_000` / `1.5`，issue #12）—— 走一遍 token
+    // 报到字面量自己身上，而不是等它被切成两个 token 后在下游出洋相。
+    let q: u32 = b;
+    while q < e && chk_tok_kind(t, q) != 4 {
+        if chk_bad_num_suffix(src, t, q) {
+            chk_pub(src, t, oc, p, E_PARSE, q);
+        }
+        q = q + 1;
+    }
     while j < e && chk_tok_kind(t, j) != 4 {
         // 结构 token 直接跳过: `while x {` 的 `{` 若落到"赋值"分支, 会一路扫到体内第一个
         // `=` 并把它当成赋值语句, 报出"赋值目标不是左值"(ok.lomt 的 `14@84:{` 假报)。
@@ -2811,6 +2884,10 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
             let eq: u32 = chk_find_at(src, t, k, e, "=");
             let semi: u32 = chk_find_at(src, t, eq + 1, e, ";");
             if eq < e && semi <= e {
+                // `=` 后面必须能开始一个表达式 (`let v: u32 = @ 1;`，issue #395/#49 的表达式那半)
+                if !chk_expr_start(src, t, eq + 1) {
+                    chk_pub(src, t, oc, p, E_PARSE, eq + 1);
+                }
                 let t2: u32 = chk_tex(src, t, syms, n, env, c,
                                       ((eq + 1) as u64) * 4294967296 + (semi as u64), tyt, p, oc);
                 if t2 != 0 && dty != 0 && chk_ty_eq(tyt, t2, dty) == 0 {
@@ -2912,6 +2989,11 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 j = e;
             }
         } else {
+            // 语句起点的 token 必须能开始一个表达式。`@` 这类词法上合法、L1 里却哪一处都不是
+            // 表达式的 token，原先在这里被静默咽掉（issue #49）。参考实现是同一条判断，报 E019。
+            if !chk_expr_start(src, t, j) {
+                chk_pub(src, t, oc, p, E_PARSE, j);
+            }
             // 赋值或表达式语句: 找深度 0 的 `=` (排除 `==` 的第二个字符与 `=>`)
             let eq2: u32 = chk_find_assign(src, t, j, e);
             let semi2: u32 = chk_find_at(src, t, j, e, ";");
@@ -2956,6 +3038,15 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
                 // 表达式语句: 遍历它 (调用里的实参/字段/下标错误都在里面)
                 chk_tex(src, t, syms, n, env, c,
                         (j as u64) * 4294967296 + (semi2 as u64), tyt, p, oc);
+                // 一个**孤零零的标识符**当语句 (`break;`) 是最容易漏的一格: 参考实现把它当
+                // 表达式求值, 于是"未声明的变量"当场就报; 这里原先一声不吭 —— 已发布编译器
+                // 对 `break;` 完全静默、退出码 0 (issue #322)。词法上 `break` 就是 ident,
+                // 所以判据就是"声明过没有"。
+                if semi2 == j + 1 && chk_tok_kind(t, j) == 0 {
+                    if chk_env_get(src, t, env, c, j) == 0 {
+                        chk_pub(src, t, oc, p, E_TYPE, j);
+                    }
+                }
             }
             if semi2 <= e {
                 j = semi2 + 1;
@@ -2980,6 +3071,75 @@ fn chk_body(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
 /// 各缓冲的尺寸按**语料实测**定 (字段≤2, 变体≤3, 形参≤11, 每函数 let≤152, 能力≤1,
 /// 各缓冲的尺寸按**语料实测**定 (字段≤2, 变体≤3, 形参≤11, 每函数 let≤152, 能力≤1,
 /// excluded≤2); 整块 `chk_arena_bytes()` 字节 —— 驱动按这几个 `chk_arena_*()` 切片。
+/// **语法前置趟** —— 把"**解析错就中止**"这条分界补回来。
+///
+/// 参考实现是**先解析、再检查**：源不成立（E019）它当场停，一行业务检查都不跑。自举侧没有
+/// 解析器，检查器直接对着 token 流跑，于是一个语法错之后它还会接着报**下游的伤** ——
+/// `let x = 1;` 会去解类型槽里的下一个 token、`let a: f64 = 1.0;` 还会额外说 `f64` 不是类型，
+/// 码集永远比参考**多一个**（issue #7 / #323 的 EXTRA）。
+///
+/// 这一趟只认**语法层**的形状，报出 E019；调用方看到非零就**不再跑任何检查趟** ——
+/// 于是"语法错了就不谈语义"这条分界恢复了，不是靠一条条补检查去凑。
+///
+/// 只收三类在这里能判定的（它们都不需要语句边界）：
+///   * `let NAME :` 的冒号不在（`if let` 是模式不是绑定，排除）
+///   * `=`（不是 `==` / `=>`）后面接不上一个表达式
+///   * 不支持的数值字面量形式（`0b1010` / `1_000` / `1.5`）
+/// 语句**起点**那一条要在走查里判（要边界），留在 `chk_body`，不在这儿重复。
+fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32) -> u32 {
+    let i: u32 = 0;
+    let depth: u32 = 0;
+    let deep_done: u32 = 0;
+    while chk_tok_kind(t, i) != 4 {
+        // **太深了要当场说**（issue #44）：参考实现在解析期就设 64 层的上限并报 E023；自举侧
+        // 原先一路走到 codegen 才在递归里把栈用穿 —— **段错误、零输出**。这一趟跑到 codegen
+        // 之前，报出来就整趟不跑，正好把那边的段错误也挡在门外。
+        // 只报**第一次**越界：再往上每层都报一遍对读者没意义（参考实现也只报一条）。
+        if chk_tok_is(src, t, i, "{") {
+            depth = depth + 1;
+            if depth > 64 && deep_done == 0 {
+                o = sym_pub(src, t, out, o, E_DEEP, i);
+                deep_done = 1;
+            }
+        }
+        if chk_tok_is(src, t, i, "}") && depth > 0 {
+            depth = depth - 1;
+        }
+        // 裸 `return;`（不带值）**不是合法构造** —— `loment syntax` 明说它必须带值。
+        // 参考实现报 E019 "期望表达式，得到 ';'"；自举侧原先**段错误、什么都不印**
+        // （issue #335）。
+        if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "return")
+                && chk_tok_is(src, t, i + 1, ";") {
+            o = sym_pub(src, t, out, o, E_PARSE, i + 1);
+        }
+        if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "let")
+                && !(i > 0 && (chk_tok_is(src, t, i - 1, "if")
+                               || chk_tok_is(src, t, i - 1, "comefor"))) {
+            // 只在真是 `let NAME …` 时判。`comefor let "def" to {` 里那个 `let` 是**宏声明
+            // 的关键字**、`let c {` 是**外部代码块声明**（`c` 是 `command c` 声明的语言名）
+            // —— 两者都不是变量绑定，误判会让整个文件**一趟检查都不跑**。
+            if chk_tok_kind(t, i + 1) == 0 && !chk_tok_is(src, t, i + 2, ":")
+                    && !chk_tok_is(src, t, i + 2, "{") && chk_tok_kind(t, i + 2) != 5 {
+                o = sym_pub(src, t, out, o, E_PARSE, i + 2);
+            }
+        }
+        if chk_tok_kind(t, i) == 3 && chk_tok_is(src, t, i, "=") {
+            if !chk_tok_is(src, t, i + 1, "=") && !chk_tok_is(src, t, i + 1, ">") {
+                // `{` 也算能开头: 外来表层里 `String[] NAMES = { … }` 是合法的
+                // （`loment/examples/multilang/03-java/`）。
+                if !chk_tok_is(src, t, i + 1, "{") && !chk_expr_start(src, t, i + 1) {
+                    o = sym_pub(src, t, out, o, E_PARSE, i + 1);
+                }
+            }
+        }
+        if chk_bad_num_suffix(src, t, i) {
+            o = sym_pub(src, t, out, o, E_PARSE, i);
+        }
+        i = i + 1;
+    }
+    return o;
+}
+
 pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
                    nc: ptr, exs: ptr, env: ptr, tyt: ptr) -> u32 {
     let oc: ptr = ptr_add(tyt, 4096);   // 诊断偏移格 (见 chk_arena_tyt)
@@ -2988,6 +3148,13 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     store32(oc, 0, 0);
     let n: u32 = 0;
     let o: u32 = 0;
+    // **语法前置趟**：报出任何 E019 就直接收工 —— 参考实现是"解析错就中止"，一条业务检查
+    // 都不跑；自举侧没有解析器，得把这条分界显式补上，否则下游会多报（issue #7 / #323）。
+    o = chk_syntax_prepass(src, t, out, 0);
+    if o != 0 {
+        store32(oc, 0, o);
+        return o / 8;
+    }
     let nexs: u32 = 0;
     let i: u32 = 0;
     // 核心模式**按维**各见过几次（`docs/175` §3.0 / §3.4）。声明的是**整个程序**的取值，
@@ -3262,17 +3429,20 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
     if eff_rt == 2 {
         let jr: u32 = 0;
         let hit: u32 = 4294967295;
-        let found: u32 = 0;
+        let nsites: u32 = 0;
         while chk_tok_kind(t, jr) != 4 {
-            if found == 0 {
-                if chk_rt_site(src, t, jr) == 1 {
+            if chk_rt_site(src, t, jr) == 1 {
+                if nsites == 0 {
                     hit = jr;
-                    found = 1;
                 }
+                nsites = nsites + 1;
             }
             jr = jr + 1;
         }
-        if found == 1 {
+        // 报的还是**第一个**站点（与参考取首项 `_sites[0]` 同判），但**总数**要交给驱动 ——
+        // 报文的"这一类构造本单元另有 N 处"用它（issue #321）。
+        store32(tyt, RT_N_SITES, nsites);
+        if nsites > 0 {
             o = sym_pub(src, t, out, o, E_MODE, hit);
         }
     }
@@ -3319,7 +3489,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
         }
     }
     // ---- **渠道闸（对外端口）**：`hosted` 要的是**真 libc / 真共享库**（`docs/222` §4），
-    // 而那条路还没完工（`docs/219` §8b 的 S2 还差三件）—— 发行版里它只能是一句拿不到的
+    // 而那条路还没完工（`docs/219` §8b 的 S2；静态那一半已落，动态那一半是 #360）——
     // 承诺。与上面 `vm` 那条同形、同一个闸、同一个理由。
     // **次序**：排在那条**之后** —— 参考实现 `tools/lomentc.py` 里两条闸的先后就是这个次序。
     if eff_port == 2 {
