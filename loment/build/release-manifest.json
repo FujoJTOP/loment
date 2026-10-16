@@ -879,7 +879,11 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "3f90cf18fa981d9fbf8b37c8019c4c82d17b1ed91752671abf953f8164ff531b"
+   "sha256": "c6701ed7c260c2ff631c23f2475c42a591be5720b4cd20cef8e9d53868236610"
+  },
+  {
+   "path": "tools/loment_invariant_test.py",
+   "sha256": "19a22e354b8a00c25fc7108697953973f295c6e8a2ca0ef14ad56357409b09fe"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -1311,7 +1315,7 @@
   },
   {
    "path": "loment/tools/lomrel.lomt",
-   "sha256": "4db9bf6d8b917fe0e53ceaa76dcb1ed65f2c260e56bf0dc823b80963c7096bd6"
+   "sha256": "db0a0b800122d64750d11b4c076ce29ba770c7cfc034758768fce6a60c29dd27"
   },
   {
    "path": "loment/tools/lomstatus.lomt",
@@ -1644,6 +1648,34 @@
   {
    "path": "loment/nltrans/surface_lib.lomt",
    "sha256": "1ef9f8f13d825e34464b6cf2676580f2798b02bec0219a4dbab1943877a6a3ab"
+  },
+  {
+   "path": "loment/invariants/bare-return.lomt",
+   "sha256": "a7f2de00b936c3c45b1acf71cbedd0eec0a551aab10038d32da01d992ac6436c"
+  },
+  {
+   "path": "loment/invariants/eleven-params.lomt",
+   "sha256": "2e80420973d5c3b060ed5104581a39d724bd07eb10a6f97a5ed8c28f3bf7e7cb"
+  },
+  {
+   "path": "loment/invariants/flat-250-terms.lomt",
+   "sha256": "3d3ea988283845c9f677d177de85248dc9d064ff5c23890ff17962cca7424fcf"
+  },
+  {
+   "path": "loment/invariants/nested-if-120.lomt",
+   "sha256": "c29ba51f92509af749d1220502be966a2b03e5b2eef4b8961a5b5248ae478a46"
+  },
+  {
+   "path": "loment/invariants/nested-if-36.lomt",
+   "sha256": "110bbbcfbb7e880c19f721a6771edc54942509d4abf55aaf3f3d5e2bf41fc235"
+  },
+  {
+   "path": "loment/invariants/struct-literal-no-trailing-comma.lomt",
+   "sha256": "d588c928d6619fdff17d9aa5d059aa0f7051761c2ba54695081b97fce14ced75"
+  },
+  {
+   "path": "loment/invariants/use-std.lomt",
+   "sha256": "54e937cf050a42334500bd60740ee9a8674ac8d463f8660fdfe1fce8b7abf558"
   },
   {
    "path": "loment/examples/ahci.lomt",
@@ -2595,7 +2627,7 @@
   },
   {
    "path": "tools/loment_release.py",
-   "sha256": "9d70ef76c2c9b91d7a2e7774ccbf2aa532ef19bfdc5cd0c90984941012211bbd"
+   "sha256": "7ca457b1c4a0b1dc344f1e175f63b35a3ed5e91b25dc00f8b658cc0a98811ce2"
   },
   {
    "path": "tools/loment_status.py",
