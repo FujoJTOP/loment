@@ -5350,6 +5350,7 @@ nosplit:
   br label %relink
 relink:
   %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
+  %hsz = phi i32 [ %need, %split ], [ %bsz, %nosplit ]
   %ishead = icmp eq i32 %prev, 0
   br i1 %ishead, label %sethead, label %setprev
 sethead:
@@ -5361,7 +5362,7 @@ setprev:
   store i32 %newhead, ptr %ppp
   br label %taken
 taken:
-  store i32 %need, ptr %hp
+  store i32 %hsz, ptr %hp
   %t4b = add i32 %cur, 4
   %tppb = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %t4b
   store i32 -1, ptr %tppb
@@ -5551,6 +5552,7 @@ nosplit:
   br label %relink
 relink:
   %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
+  %hsz = phi i32 [ %need, %split ], [ %bsz, %nosplit ]
   %ishead = icmp eq i32 %prev, 0
   br i1 %ishead, label %sethead, label %setprev
 sethead:
@@ -5562,7 +5564,7 @@ setprev:
   store i32 %newhead, ptr %ppp
   br label %taken
 taken:
-  store i32 %need, ptr %hp
+  store i32 %hsz, ptr %hp
   %t4b = add i32 %cur, 4
   %tppb = getelementptr i8, ptr %hb, i32 %t4b
   store i32 -1, ptr %tppb

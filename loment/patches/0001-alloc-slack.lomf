@@ -1,0 +1,58 @@
+lomf 1
+mod   0001-alloc-slack
+about 分配器把块的**真实长度**记成了**请求量**。`__loment_alloc` 命中空闲块时，`nosplit`
+about 那一路（`slack < 16`，不值得切一刀）整块拿走，却把 `need` 写回块头 ——
+about `bsz - need` 那 1..15 字节从此无人记账：堆不再是"块首尾相接"，中间多出一个洞。
+about
+about 回收器四处都是**按块头走堆**（`here += heap[here]`）：清标记那一趟、`__loment_sweep`、
+about `__loment_propagate`、`__loment_markp`。走到洞里读到 0，下标**永远不动** —— 死循环，
+about 一个几十条指令的小循环，不发系统调用。于是自动档下**第二次**回收不再终止（`#368`）。
+about
+about 为什么偏偏是第二次：第一次回收之前空闲链表是空的，每次分配都走 bump，出不了零头；
+about 第一次回收的清扫把一批 24 字节块挂回链表，此后 `alloc` 用它们满足 16 字节的请求
+about → 零头 8 字节 → 洞。第二次回收的清标记那一趟才踩上去。
+about
+about 这一笔：`taken` 里记的尺寸按路径取值 —— `split` 用 `need`，`nosplit` 用 `bsz`。
+about 零头留在块内（首次适配分配器本来就不合并），堆恢复"块首尾相接"。
+
+edit tools/lomentc.py expect 2
+old <<<
+  %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
+  %ishead = icmp eq i32 %prev, 0
+>>>
+new <<<
+  %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
+  %hsz = phi i32 [ %need, %split ], [ %bsz, %nosplit ]
+  %ishead = icmp eq i32 %prev, 0
+>>>
+
+edit tools/lomentc.py expect 2
+old <<<
+taken:
+  store i32 %need, ptr %hp
+>>>
+new <<<
+taken:
+  store i32 %hsz, ptr %hp
+>>>
+
+edit loment/selfhost/codegen.lomt expect 2
+old <<<
+  %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
+  %ishead = icmp eq i32 %prev, 0
+>>>
+new <<<
+  %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
+  %hsz = phi i32 [ %need, %split ], [ %bsz, %nosplit ]
+  %ishead = icmp eq i32 %prev, 0
+>>>
+
+edit loment/selfhost/codegen.lomt expect 2
+old <<<
+taken:
+  store i32 %need, ptr %hp
+>>>
+new <<<
+taken:
+  store i32 %hsz, ptr %hp
+>>>

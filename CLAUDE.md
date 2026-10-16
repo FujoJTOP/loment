@@ -149,6 +149,37 @@ ZCode 的内置查看器用 Shiki（语言集构建期固定）、Claude Code �
    防止这条纪律悄悄回退。**能藏的前提是它可复现** —— 上面那条"种子 == 参考实现的产物"
    就是那个前提，两条是一对。
 
+## 开发补丁落成 `.lomf`，不落成"改了一堆 `.lomt`"
+
+**背景**：Loment 自己那块代码反复出现"同一段文本、四个副本、而且嵌在字符串常量里"的形状
+（运行时 IR 在 `tools/lomentc.py` 的两个常量里，自举镜像 `loment/selfhost/codegen.lomt` 里
+还有两份，必须逐字节同）。按行号打的 diff 对这种文本几乎每次都要重来；更要命的是**改错位置
+不报错** —— 改的是运行时 IR，只会在很久以后表现为一个莫名的回收行为。
+
+**做法**：改动写成 `loment/patches/NNNN-<slug>.lomf`，由 `tools/lomf.py` 套用：
+
+```
+python tools/lomf.py --list  loment/patches/0001-alloc-slack.lomf   # 每处现在命中几次
+python tools/lomf.py --check loment/patches/0001-alloc-slack.lomf   # 能不能套
+python tools/lomf.py --apply loment/patches/0001-alloc-slack.lomf   # 套用（幂等）
+```
+
+**约定**：
+
+1. **`edit <路径> expect <次数>` —— `expect` 必写**。一个文件里那段文本出现几次，就等号写几；
+   对不上**一处也不改**（先全量校验再落盘）。这是在替"这段文本有几个副本"站岗：谁又抄出
+   第五份，`--list` 立刻显示"旧=3"。
+2. **两块互不为子串**（解析期就拒）。插入式替换天然让 `old` 是 `new` 的子串，而"已套用"的
+   判据是「`old` 0 次、`new` 正好 `expect` 次」—— 那种补丁套第二遍会**再插一遍**（实测踩过）。
+   把邻近一行的上下文一起写进两块即可。
+3. **补丁与源一起落地**：`.lomf` 是记录、改好的源是事实，两者由
+   `loment_tools_test::test_lomf_patches_in_the_tree_are_applied` 钉住（树里的补丁必须处于
+   "已套用"）。
+4. **编译器不认这个后缀**（`.lomf` 不在任何档的编译面上），所以它不会碰孪生一致那套 ——
+   但**改 `lomentc.py` 与 `codegen.lomt` 的补丁照样要重算种子**（上一节那条不变）。
+
+格式与两条规矩的来路见 `docs/247`。
+
 ## 写 Loment 程序之前，先读那份 agent 指南
 
 **装好 Loment 工具链之后**（`loment version` 能跑），写或改 `.lomt` 之前先读指南：

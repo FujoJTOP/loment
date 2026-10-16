@@ -149,6 +149,10 @@ GLOBS = [
     "tools/loment_gc_surface.py", "tools/loment_gc_surface_test.py",
     "tools/loment_gc_why.py", "tools/loment_gc_why_test.py",
     "tools/loment_syscalls.py", "tools/loment_manual.py", "tools/ci.py",
+    # `.lomf`（修改件）的套用器（`#368`）。开发补丁从现在起以这个后缀落档：编译器**不认**
+    # 它，它是"这一笔改了什么"的**可核对**记录 —— 套用器分得清"待套用"与"已套用"，
+    # 判据（`loment_tools_test::test_lomf_patches_in_the_tree_are_applied`）钉两者一致。
+    "tools/lomf.py",
     "tools/vscode_ext.py", "tools/vscode_ext_test.py",
     # 调试器 (docs/190): DAP 适配器 + ptrace 后端, 及其无头判据。
     # **位置与自举那份 `lomrel.lomt` 对齐** —— 见下面那条注释。
@@ -282,6 +286,10 @@ GLOBS = [
     # 自然语言写法的语料与它的**同源 Loment 孪生** (docs/197): 两份**必须是同一个
     # 程序**的两种拼法 —— 判据比的是"翻出来的 Loment 逐字节相同", 所以两份都得在。
     "loment/nltrans/*.nl", "loment/nltrans/*.lomt",
+    # `.lomf` 修改件（`#368`）：Loment 自己的那些"同一段文本有多个副本"的改动以这个后缀
+    # 落档（运行时 IR 嵌在字符串常量里，自举镜像那边还有一份），于是每一笔都留得下
+    # "改的是哪一段、期望它出现几次"。**与自举那份 `lomrel.lomt` 插入同一位置。**
+    "loment/patches/*.lomf",
     "loment/examples/*.lomt", "loment/selfhost/*.lomt", "loment/corpus.json",
     "lom/*.lom",
     # 设计文档: 这份清单是 **Loment 线**的, 而本仓就是 Loment 的开发口 —— `docs/` 里

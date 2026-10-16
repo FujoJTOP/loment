@@ -2132,6 +2132,93 @@ def test_a_collection_keeps_the_free_list():
           " —— 两档收集之后都还拿得回那片空闲区")
 
 
+#: `#368`：`alloc` 命中空闲块时，`nosplit` 那一路（`slack < 16`，不值得切一刀）整块拿走，
+#: 却把**请求量**写回块头 —— `bsz - need` 那 1..15 字节**无人记账**，堆不再是"块首尾相接"。
+#: 回收器四处都**按块头走堆**（`here += heap[here]`）：清标记那一趟、`__loment_sweep`、
+#: `__loment_propagate`、`__loment_markp`。走到那个洞里读到 0，下标**永远不动** —— 死循环，
+#: 几十条指令，一个系统调用都不发。
+#:
+#: 这只语料两个动作缺一不可：每轮**泄漏**一个 24 字节的块（把前沿推上去），并且每轮
+#: **释放**一个 16 字节的块（让下一次分配去命中的空闲块，于是产生零头）。`SZ = 16` 与
+#: 那段 `str_concat` 的 16 字节请求差 8，正是踩上去的那个零头。
+_HOLE_SRC = (
+    "module alloc_slack\n"
+    "%s\n"
+    "choose runtime\n\n"
+    "const SZ: u32 = 16;\n\n"
+    "fn _start() {\n"
+    "    let s: str = \"abcd\";\n"
+    "    let esc: ptr = alloc(SZ);\n"
+    "    store8(esc, 0, 1);\n"
+    "    let i: u64 = 0;\n"
+    "    while i < 4096 {\n"
+    "        let t: str = str_concat(s, \"efgh\");\n"
+    "        free(str_ptr(t));\n"
+    "        let q: ptr = alloc(SZ);\n"
+    "        store8(q, 0, 2);\n"
+    "        esc = q;\n"
+    "        i = i + 1;\n"
+    "    }\n"
+    "    syscall4(60, 7, 0, 0);\n"
+    "}\n")
+
+
+@test
+def test_a_second_collection_still_terminates():
+    """跨过**两次以上**自动回收仍要跑得完（`#368`）—— 两档各一只，退出码 7。
+
+    **Why**：第一次回收之前空闲链表是空的，每次分配都走 bump，出不了零头；第一次回收的
+    清扫把一批 24 字节块挂回链表，此后 `alloc` 拿它们满足 16 字节的请求 → 零头 8 字节
+    → 洞。**第二次**回收的清标记那一趟才踩上去，于是它永不返回 —— 这也正是"同一份源、
+    只改一个数"为什么分出了 0.2s 与永不结束。
+
+    **How to apply**：两半都要。静态那一半钉 `taken` 记的是**块的真实长度**，并且按路径
+    取值（`split` 用 `need`、`nosplit` 用 `bsz`）；顺带钉住 `bump` 那一路**照旧**记
+    `need` —— 那里 `need` **就是**这块的长度，改它反而错，这是对照，防止有人把两处一起改。
+    动态那一半钉"跑得完"：修前被 `timeout` 打死（rc=124），修后 rc=7。
+
+    **这条不需要 clang**（纯 `lomentc` → IR → `lomelf`），所以只门在 `_wsl()` 上 ——
+    `#371` 的教训是判据挂在不必要的门上等于给覆盖面挖洞。
+    """
+    if not _wsl():
+        print("      SKIP: 需要 WSL")
+        return
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = {}
+        shape = {}
+        for tier in ("gc_auto", "gc_auto_alpha"):
+            src = td / f"{tier}.lomt"
+            src.write_text(_HOLE_SRC % f"choose {tier}", encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            text = ll.read_text(encoding="utf-8")
+            shape[tier] = (text.count("store i32 %hsz, ptr %hp"),
+                           text.count("store i32 %need, ptr %hp"),
+                           text.count("store i32 %need, ptr %wp"),
+                           text.count("call void @__loment_maybe_collect"))
+            blob, _info = lomelf.compile_ll(text)
+            nat = td / f"{tier}.native"
+            nat.write_bytes(blob)
+            got[tier] = _run_bin(nat, f"slack_{tier}", td, timeout=30)[0]
+    flat = [f"{k}[hsz={v[0]} need_hp={v[1]} need_wp={v[2]} 触发={v[3]}]"
+            for k, v in shape.items()]
+    bad_shape = [k for k, v in shape.items() if v[0] < 1 or v[1] != 0 or v[2] < 1]
+    assert not bad_shape, (
+        f"`taken` 记的还是**请求量**、不是块的真实长度（{', '.join(flat)}；期望 "
+        "hsz>=1、need_hp==0、need_wp>=1）—— `bsz - need` 那 1..15 字节会凭空消失，"
+        "堆上多出一个洞，而回收器四处都是**按块头走堆**的")
+    thin = [k for k, v in shape.items() if v[3] < 2]
+    assert not thin, (
+        f"这只语料里触发点少于 2 处（{', '.join(flat)}）—— 那就跨不过两次回收，"
+        "这条判据也就测不到它要测的那件事（`#367` 之后每次分配都发触发，这里该有 3 处）")
+    bad = [f"{k}={v}" for k, v in got.items() if v != 7]
+    assert not bad, (
+        f"自动档下跨过两次回收就跑不完（{', '.join(bad)}；期望都是 7，124 = 被 timeout 打死）。"
+        "成因：`alloc` 的 `nosplit` 分支把请求量写进块头，零头成了洞，回收器走堆时下标永不前进")
+    print(f"      两档都跑完（gc_auto={got['gc_auto']}, gc_auto_alpha={got['gc_auto_alpha']}）；"
+          f"IR：{flat[0]}")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:
