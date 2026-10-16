@@ -3477,27 +3477,19 @@ def resolve_name(name: str, root: Path, proj: Path | None = None,
     后缀来自 `loment.conf`（`source_ext_of`），默认 `.lomt`；每层都按 `_ext_chain` 的顺序
     试（自定义后缀优先，再兜默认），所以项目换后缀不会把工具链自带的模块弄丢。
 
-    ---- **渠道闸（`libl`）**（`docs/232` §1.1）
+    ---- **渠道闸（`libl`）：已放开**（`docs/232` §1.1 / §1.3，2026-10-15）
 
-    **发行版里 `use libl` 是错误**（用户 2026-10-12：「LibL 仍然在仓库中，和 LVM 一样发行
-    再锁」）。与 `check()` 里那条 `choose vm` 的闸**同形**：读同一个渠道常量，打包期只换
-    那一行；dev 放行、发行版点名拒。
+    这里原先有一条与 `choose vm` 同形的闸：发行版里 `use libl` 直接报错（用户 2026-10-12
+    「LibL 仍然在仓库中，和 LVM 一样发行再锁」）。`#358` 把它**放开**了 —— 放开的条件是
+    **先把承诺写下来**，那就是 `docs/232` §1.3（哪些名字算数、加是自由的减不是、偏离写在
+    模块头注里）。
 
-    **为什么闸在名字解析这一层**：被锁的是**一个名字能不能取到**，那是装载器的事 ——
-    `check()` 那层手上只有 token 流，判"这个单元 `use` 过谁"要另做一趟全量扫描。
-    自举侧同一个位置是 `driver.lomt` 的 `use` 分支（`resolve_use_name` 的调用点），
-    两边因此落在同一层、报文也对得上。
+    所以这一层现在**没有** `libl` 的判断：名字照常解析。**留这段注释是为了让"闸去哪了"
+    有据可查** —— 判据那一侧也按棘轮规矩**反转**（`loment_channel_test` 从"发行版拒
+    `use libl`"改成"发行版收 `use libl`"），而不是把那条判据删掉。
+
+    （`choose vm` 那条闸**原样留着**：LVM 还没到兑现的时候。）
     """
-    # 只闸**名字形式**：路径形式（`use "…/libl.lomt"`）与"把文件拷进自己项目"都绕得过去
-    # —— 那与那四份面本身可用是一回事（它们经 `use std` 本来就在）。这条边界写进
-    # `docs/232` §1.1，不假装它堵得住。
-    if loment_channel.RELEASE and name == "libl":
-        raise LomError(
-            1, 1,
-            "发行版不含 `libl` 入口 —— `use libl` 只在**开发通道**可用。"
-            "LibL 是这个标准库的**名字**，那四张脸（string/ctype/stdlib/stdio）在发行版里"
-            "经 `use std` 或按名 `use string` 都还在。"
-            "**修法**：改用 `use std`（或按需 `use string` 等），或换本仓的工具链来开发它")
     exts = _ext_chain(ext)
     stores = store_roots(root, tool_dir)
 

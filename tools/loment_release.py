@@ -116,7 +116,8 @@ GLOBS = [
     "tools/loment_err_test.py",
     # lompi (随包发行的独立命令, docs/170): 源码快照 + 它外面的正本与仓内副本的同步/校验
     "lompi/*.lomt",
-    # lompi 的标准库: 随 Loment 一起装 (std 127 模块 + host, 共 137 个文件, 用户 2026-09-16)。
+    # lompi 的标准库: 随 Loment 一起装 (std/host/internet/os 四个包, 共 160 个文件 ——
+    # 数见 `loment_lompi_test.STORE_FILES`; 用户 2026-09-16 定的随包形状)。
     # **版本号是故意写死的**: 自举那边 (loment/tools/lomrel.lomt) 的 glob 只认"一段目录 +
     # 一个名字模式", `**` 在那边展开不出递归 (实测只给一层, 于是把 std/ host/ 两个**目录**
     # 当文件收了进来)。升版本要同时改两份清单 —— `loment_lompi_test` 里那条
