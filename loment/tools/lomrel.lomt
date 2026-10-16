@@ -223,6 +223,7 @@ tools/loment_gc_why_test.py
 tools/loment_syscalls.py
 tools/loment_manual.py
 tools/ci.py
+tools/loment_invariant_test.py
 tools/loment_suite.py
 tools/vscode_ext.py
 tools/vscode_ext_test.py
@@ -328,6 +329,7 @@ loment/cpptrans/*.cpp
 loment/gotrans/*.go
 loment/nltrans/*.nl
 loment/nltrans/*.lomt
+loment/invariants/*.lomt
 loment/examples/*.lomt
 loment/selfhost/*.lomt
 loment/corpus.json

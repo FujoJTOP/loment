@@ -200,12 +200,21 @@ fn max_of<T>(a: T, b: T) -> T {
 fn no_doc() {
     let x: u32 = 1;
 }
+
+/// 命令 (形态 A): 块那层壳对按深度走的读者是可见的, 块里的函数仍是顶层函数 (#399)
+register edgecmd {
+    /// 块里的那个函数
+    pub fn command_main(argv: ptr, argc: u32) -> u32 {
+        return argc;
+    }
+}
 '''
 
 
 @test
 def test_loment_lomdoc_edge_cases():
-    """语料里没出现的段: excluded / 十六进制常量 / 多行 doc / 双方法 trait / 空 doc。"""
+    """语料里没出现的段: excluded / 十六进制常量 / 多行 doc / 双方法 trait / 空 doc /
+    register 块里的函数 (含它自己的 doc 行 —— 语料那份块里没有 `///`)。"""
     if not (_clang() and _wsl()):
         print("      SKIP: 无 clang/WSL")
         return
@@ -231,7 +240,7 @@ def test_loment_lomdoc_edge_cases():
                     f"  got : {got[max(0,k-70):k+50]!r}")
     finally:
         probe.unlink(missing_ok=True)
-    print("      边界用例 (excluded/hex/多行 doc/双方法 trait/泛型/空 doc) 一致")
+    print("      边界用例 (excluded/hex/多行 doc/双方法 trait/泛型/空 doc/register 块) 一致")
 
 
 #: 别的写法的样本：`choose write grammar c` 打头，第二行就是函数声明。
