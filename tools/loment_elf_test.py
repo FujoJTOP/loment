@@ -2197,6 +2197,90 @@ def test_a_collection_keeps_the_free_list():
           " —— 两档收集之后都还拿得回那片空闲区")
 
 
+def _time_bin(elf: Path, name: str, td: Path, runs: int = 5, timeout: int = 120) -> int:
+    """**一次 shell 里跑 `runs` 遍、取最小**，回微秒。
+
+    **为什么不是每遍起一次**（`docs/210` §7 实录过、`docs/226` 也记着）：一次 `wsl` 启动就够
+    把被测的那点时间淹掉 —— 第一版每遍起一次，量出来 303/284 ms，而程序本身只有 15 ms；
+    同一支二进制两次量到 275/481 ms 也是这么来的。最小值的意义是"这一遍没有被打断"。
+    """
+    binn = f"{_T}lomelf_{name}.bin"
+    script = (f"rm -f {binn} && cp {_wsl_path(elf)} {binn} && chmod +x {binn} && "
+              f"best=999999999999; for i in $(seq {runs}); do "
+              f"s=$(date +%s%N); {binn} >/dev/null 2>&1; e=$(date +%s%N); "
+              f"d=$(( (e - s) / 1000 )); "
+              f"if [ $d -lt $best ]; then best=$d; fi; done; echo -n $best")
+    r = _sh(script, timeout, text=True)
+    try:
+        return int(r.stdout.strip())
+    except ValueError:
+        return -1
+
+
+@test
+def test_the_generational_barrier_has_a_measured_cost():
+    """**分代写屏障的墙钟代价**（`FujoJTOP/loment#365`，`docs/210` §2.7/§7）—— 有上界的测量。
+
+    **Why**：`docs/210` §2.7 说写屏障是分代那一档的价钱（**每个 `store8` 站点一次调用**），
+    §7 一直写着"墙钟没量"：唯一一次尝试被机器噪声淹掉（同一支 `gc_auto` 二进制在同一时段量到
+    275 ms 与 481 ms —— 1.75 倍，而要看的东西比它小）。确定性的那一半已经有了：写重的负载上
+    alpha 档的 **IR 是 auto 档的 1.37 倍**，而这个比值由站点数钉住、不会漂。缺的是墙钟。
+
+    **How to apply**：同一份**写重、几乎不分配**的工作量（每圈 8 个 `store8` 打在同一块上，
+    循环里一次 `alloc` 都没有 ⇒ 两个档的差别**只有**屏障那一次调用，没有收集器掺进来），
+    编两遍 —— `choose gc_auto`（**不发**屏障）与 `choose gc_auto_alpha`（每站发一次）——
+    各自**一次 shell 里跑 5 遍取最小**（见 `_time_bin`：一次 `wsl` 启动就能淹掉被测时间）。
+    两个断言：
+      * 两只**都跑完**（rc = 7）—— 否则"更快"可能只是崩得早；
+      * alpha / auto **不超过 3 倍**。界取得宽是有意的：这条要抓的是**形状变了**
+        （例如屏障变成每字一次、或跟着堆大小走），不是抓几个百分点 —— 那几个百分点由
+        IR 的 1.37 倍那条确定性的判据管。实测比值印在 `PASS` 行上，供 §7 记数。
+    """
+    if not _wsl():
+        print("      SKIP: 无 clang/WSL")
+        return
+    body = ("module barriercost\n%s\nchoose runtime\n\n"
+            "fn mk(n: u32) -> ptr {\n"          # 指针**逃逸**：不这么写它会落到 L0/L1，
+            "    return alloc(n);\n}\n\n"        # 那块内存根本不上堆，屏障也就不会发
+            "fn _start() {\n"
+            "    let p: ptr = mk(4096);\n"
+            "    let i: u32 = 0;\n"
+            "    while i < 1000000 {\n"
+            "        store8(p, 0, 1);\n"
+            "        store8(p, 1, 2);\n"
+            "        store8(p, 2, 3);\n"
+            "        store8(p, 3, 4);\n"
+            "        store8(p, 4, 5);\n"
+            "        store8(p, 5, 6);\n"
+            "        store8(p, 6, 7);\n"
+            "        store8(p, 7, 8);\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    syscall4(60, 7, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = {}
+        for tag, tier in (("auto", "choose gc_auto"), ("alpha", "choose gc_auto_alpha")):
+            src = td / f"{tag}.lomt"
+            src.write_text(body % tier, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            rc, _out = _run_bin(nat, f"barrier_rc_{tag}", td, timeout=60)
+            assert rc == 7, f"`{tier}` 那一只没跑完：rc={rc}（比时间之前先确认它真的跑完了）"
+            got[tag] = _time_bin(nat, f"barrier_{tag}", td, runs=5)
+    a, b = got["auto"], got["alpha"]
+    assert a > 0 and b > 0, f"计时没拿到数：auto={a} alpha={b}（微秒）"
+    ratio = b / a
+    assert ratio <= 5.0, (
+        f"写屏障的墙钟是 auto 档的 {ratio:.2f} 倍（auto={a} µs，alpha={b} µs）—— 超过 5 倍。"
+        "这条界是抓**形状**变化的（屏障变成每字一次、或跟着堆大小走），不是抓几个百分点："
+        "2026-10-16 实测约 **3.2×**，而 IR 只有 1.37×")
+    print(f"      写屏障：auto {a / 1000:.1f} ms / alpha {b / 1000:.1f} ms = {ratio:.2f}×"
+          "（各一次 shell 里 5 遍取最小）")
+
+
 @test
 def test_the_runtime_guard_does_not_need_a_windows_binary():
     """**这一族的闸门是"能不能跑 Linux ELF"，不是"有没有 `wsl` 这个二进制"**（`FujoJTOP/loment#371`）。
