@@ -1329,7 +1329,7 @@ MAXDEPTH = 8
 #:   * `runtime` —— `runtime` / `no_runtime`：产物里**有没有运行期**（`docs/175` §3.6）；
 #:   * `port`    —— `sealed` / `hosted`：产物**通不通着世界**（`docs/222` §4）；
 #:   * `vm`      —— `vm` / `no_vm`：**要哪种执行模型**（`docs/231`）；
-#:   * `lms`     —— `close` / `open`：**要不要内存安全**（`docs/252`）。
+#:   * `lms`     —— `close` / `open`：**要不要内存安全**（`docs/253`）。
 #:
 #: `runtime` 的取值**刻意只说"有没有"**，不说"里面装了什么"：装的东西会随年份长
 #: （今天是收集器，明天可能是线程、宿主服务），把它钉进值名里，两年后加能力就得回头
@@ -1358,14 +1358,14 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # **它今天不提供任何东西**（没有字节码、没有解释器，`docs/231` §1.3），所以被**渠道闸**
     # 关在发行版外面（`_vm_gate` 那一段）：写得出、却什么也拿不到，比写不出来更坏。
     "vm": ("vm", "no_vm"),
-    # **内存安全**（`docs/252`，用户 2026-10-15 定第六维）。与 `gc` **正交** ——
+    # **内存安全**（`docs/253`，用户 2026-10-15 定第六维）。与 `gc` **正交** ——
     # `gc` 管"谁归还"（生命周期的**内向可达**），这一维管"谁能碰"（许可的**外向**）；
     # `docs/210` §6.2 那句"箭头反了"说的就是这两条是同一张图上的相反方向。
     #
     # `lms_close`（关）= 今天的形状，也是**默认** —— 默认档不许改变任何现有程序的行为。
     # `lms_open`（开）= 检查器发 E024–E026，保障器**按站点分配**发内联界检查。
     #
-    # **它不引入运行期组件**（`docs/252` §11.2）：四格落的都是**指令**
+    # **它不引入运行期组件**（`docs/253` §11.2）：四格落的都是**指令**
     # （一条 `cmp` / 一个 `llvm.trap`），没有表、没有位图 —— 所以它与 `no_runtime`
     # **不冲突**，`CORE_CONFLICTS` 里因此没有它。
     # 取值**刻意不带机制名**：今天是边界检查，明天可能是派生指针追踪 ——
@@ -2979,7 +2979,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                lms: bool = False) -> None:
     """结构性问题 (未声明变量 / 未知函数 / 结构体字段 / 枚举变体) 的递归报告。
 
-    `lms`（`docs/252`）是**唯一一个"档"参数**：它开着时，`Index` 那一支多报一条 E028。
+    `lms`（`docs/253`）是**唯一一个"档"参数**：它开着时，`Index` 那一支多报一条 E028。
     与 `enums` 同一条路数 —— 由 `check()` 从**根单元**的 `choose` 里读出来，一路传下去。
     """
     enums = enums or {}
@@ -3165,13 +3165,13 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
         it = expr_type(e.idx, scope, funcs, structs)
         if it is not None and it not in INT_TYPES:
             errs.append(f"{e.line}: 下标类型 {it}，应为整型")
-        # **E028**（`docs/252` §5.1）：`lms` 开着时，**字面量下标越过定长数组的界**当场拒。
-        # 这一格今天**没有任何东西管** —— 实测（`docs/252` §4.4）：`let x: u32 = a[10]`
+        # **E028**（`docs/253` §5.1）：`lms` 开着时，**字面量下标越过定长数组的界**当场拒。
+        # 这一格今天**没有任何东西管** —— 实测（`docs/253` §4.4）：`let x: u32 = a[10]`
         # 配 `[u32; 4]` 发出来的是 `getelementptr inbounds [4 x i32], ptr %a.addr,
         # i32 0, i32 10`，而 `inbounds` 在 LLVM IR 里**恰是"越界即 UB"的标记**。
         # ⇒ **不是新需求**：`docs/205` §1.1 C5 那句「越界访问在**字面量**时编译期拒」
         #   早就写下了 —— 它只是**只覆盖 `guard` 那一格**。
-        # ⚠ **码号是 E028，不是 E024**：`docs/252` 初稿按旧检出写的 E024–E026，
+        # ⚠ **码号是 E028，不是 E024**：`docs/253` 初稿按旧检出写的 E024–E026，
         #   而 origin/main 上那三个已被命令声明那批占了（`docs/223`），现行最高 E027。
         # 只对**定长数组**成立：切片 `[T]` 的长度是运行期的，界不是编译期常量。
         if lms and ot is not None and _is_array(ot) and isinstance(e.idx, IntLit):
@@ -3921,7 +3921,7 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # (`_dep_pass` 挡住递归)。
     mod, deps = prepare(mod, deps)  # M6 单态化
     errs: list[str] = []
-    # **LMS（`docs/252`）**：第 1 级检查器开不开。⚠ **只取根单元**的取值 —— 与 Potato 里
+    # **LMS（`docs/253`）**：第 1 级检查器开不开。⚠ **只取根单元**的取值 —— 与 Potato 里
     # 那个 `lms` 字段、以及自举侧扫 token 的那一支 **同一个来源**。
     # 它管**合法性**（外向许可），与 `gc_*`（生命周期、内向可达）**正交**（`docs/210` §6.2）。
     # ⚠ 这一条**长在检查器里，不长在发射器里**：自举侧的 `codegen.lomt` **根本没有报错
@@ -4530,7 +4530,7 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
     scope: dict[str, str] = {p.name: p.type for p in f.params}
     params = {p.name for p in f.params}
     moved: set[str] = set()
-    #: **已经 `free` 过的块**（`docs/252` §5.1 的 E029）。**与 `moved` 分开两张表**：
+    #: **已经 `free` 过的块**（`docs/253` §5.1 的 E029）。**与 `moved` 分开两张表**：
     #: 移走是**所有权**的事（E006），释放是**合法性**的事（E029）—— 两回事。
     #: ⚠ 这一格今天**没有任何东西管**：`docs/210` §2.8 给 `free` 加的那五条检查管的是
     #: **`free` 自己那一端**（这块是不是真块、有没有重复释放），管不了"**之后再用**"——
@@ -5395,7 +5395,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 空白的第一格）。发行版里它恒为 `no_vm`（渠道闸）。**它今天不承诺性能**：
         # 没有字节码、没有解释器，`choose vm` 的产物与 `no_vm` **逐字节相同**。
         "vm": mod.chooses.get("vm", CORE_DEFAULTS["vm"]),
-        # **内存安全**（`docs/252`，用户 2026-10-15 定第六维）：`close` / `open`。
+        # **内存安全**（`docs/253`，用户 2026-10-15 定第六维）：`close` / `open`。
         # 与 `gc` **正交** —— 同一张图上相反的两个方向（`docs/210` §6.2）。同一条纪律：
         # **必填**，于是"这份产物开没开内存安全"是**不读源码可判的**。
         "lms": mod.chooses.get("lms", CORE_DEFAULTS["lms"]),
@@ -5506,7 +5506,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
 #: **跟着 `gc_any` 发**，收集器**跟着堆发** —— 两件事不再绑死。
 # ---------------------------------------------------------------- LMS 第 3 级入口 A
 #
-# `docs/252` §5.3 的**入口 A**（内存用尽）：「`alloc` 真的分配不出时，**先试着拉回**，
+# `docs/253` §5.3 的**入口 A**（内存用尽）：「`alloc` 真的分配不出时，**先试着拉回**，
 # 拉不回来才死」。今天 `_IR_HEAP` 的 `boom` 是**直接 `abort`** —— 那是"运行期灾难"；
 # 本文要的是"**先收一次再试**"。
 #
@@ -5535,7 +5535,7 @@ def _heap_with_lms_rescue(text: str) -> str:
     assert body[k + 1] == "  call void @__loment_abort()"
     assert body[k + 2] == "  unreachable"
     body[k + 1:k + 3] = [
-        "  ; ---- LMS 第 3 级入口 A（docs/252 §5.3）：先拉回，拉不回来才死 ----",
+        "  ; ---- LMS 第 3 级入口 A（docs/253 §5.3）：先拉回，拉不回来才死 ----",
         "  %lmsdone = load i1, ptr @__loment_lms_retry",
         "  br i1 %lmsdone, label %dead, label %rescue",
         "rescue:",
@@ -5558,7 +5558,7 @@ def _heap_with_lms_rescue(text: str) -> str:
 
 _IR_HEAP_LMS = _heap_with_lms_rescue(_IR_HEAP)
 _IR_HEAP_LMS_HOSTED = _heap_with_lms_rescue(_IR_HEAP_HOSTED)
-#: **`extern fn` 那一份也要救**（`docs/252` §5.3）。`_ffi_grown` 只是"**不是** alpha"，
+#: **`extern fn` 那一份也要救**（`docs/253` §5.3）。`_ffi_grown` 只是"**不是** alpha"，
 #: 所以它可以与 `gc_auto` 同时成立 —— 那一档下产物里有收集器，第 3 级入口 A 就有东西
 #: 可拉。漏掉这一份，`extern fn` + `gc_auto` + `lms_open` 会**静默没有**先拉回这一步。
 _IR_HEAP_LMS_FFI = _heap_with_lms_rescue(_IR_HEAP_FFI)
@@ -8349,7 +8349,7 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **`gc_auto`**：自动那一档（`docs/210` §2.1 / §2.4）—— 编译器发精确根表 + 在每个分配点
     # 问一句"该收了没有"，收集器在运行期里。与 `gc_alpha` **互斥**（两档不同时成立）。
     gc_auto = mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_auto"
-    # **LMS 第 3 级入口 A**（`docs/252` §5.3）：`alloc` 分配不出时**先收一次再试**，
+    # **LMS 第 3 级入口 A**（`docs/253` §5.3）：`alloc` 分配不出时**先收一次再试**，
     # 而不是直接 abort。⚠ **两个条件缺一不可**：
     #   * `lms` 开着 —— 它属于 LMS 第 3 级，不是回收档的事；
     #   * **这份产物里真的有收集器**（`gc_auto` / `gc_auto_alpha`）—— `gc_manual` 下
