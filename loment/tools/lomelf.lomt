@@ -1845,8 +1845,11 @@ fn do_gep(tab: ptr, out: ptr, c: u32, t: ptr, i: u32, le: u32, doff: u32, dlen: 
         let vl: u32 = load32(tab, C_VLLEN);
         let to: u32 = load32(tab, C_TYOFF);
         let tl: u32 = load32(tab, C_TYLEN);
-        // 参考实现: 先无条件取下标值 (结构体那条也会发这一句)
-        d = emit_get(tab, out, d, t, to, tl, vo, vl, RCX);
+        // GEP 的下标是**符号扩展**的 (`#313`) —— `emit_get` 按设计零扩展, 所以这里用
+        // `emit_get_signed`: `getelementptr i8, ptr %p, i32 -4` 要的是 `%p - 4`,
+        // 零扩展会把它变成 `%p + 4294967292`。结构体那条路不受影响 (`field_off` +
+        // `em_alu_ri` 本来就符号扩展)。**与参考实现同形**, 否则 ELF 不逐字节同。
+        d = emit_get_signed(tab, out, d, t, to, tl, vo, vl, RCX);
         if load8(t, cur_o) == 91 {
             let es: u64 = arr_elem(t, cur_o, cur_l);
             let step: u32 = ty_size(t, hi32(es), lo32(es));
