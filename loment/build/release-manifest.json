@@ -883,7 +883,7 @@
   },
   {
    "path": "tools/loment_invariant_test.py",
-   "sha256": "19a22e354b8a00c25fc7108697953973f295c6e8a2ca0ef14ad56357409b09fe"
+   "sha256": "2f2b52a48de836e97d6f7149e71b8d44bea6b86f39cf22a429cd91850d3a79bf"
   },
   {
    "path": "tools/vscode_ext.py",
@@ -1655,7 +1655,7 @@
   },
   {
    "path": "loment/invariants/eleven-params.lomt",
-   "sha256": "2e80420973d5c3b060ed5104581a39d724bd07eb10a6f97a5ed8c28f3bf7e7cb"
+   "sha256": "a274358a0ecff59ef77bb0f7d42738d98717bf3e0a4d32062465c7abb9842e74"
   },
   {
    "path": "loment/invariants/flat-250-terms.lomt",
