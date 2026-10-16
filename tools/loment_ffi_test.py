@@ -1444,19 +1444,45 @@ LIBZ_CANDIDATES = ("/usr/lib/x86_64-linux-gnu/libz.a", "/usr/lib64/libz.a",
 
 
 def _system_libz(dst: Path) -> Path | None:
-    """把系统那份 `libz.a` 取到**仓库里**（两侧都要读它：参考实现在 Windows 侧读文件，
-    镜像在 WSL 侧按仓库相对路径读）。
+    """把系统那份 `libz.a` 取到**仓库里**一份（两侧按**同一条相对路径**读它），取不到返回 None。
 
-    走 `cat` 而不是 `cp`：WSL 往 `/mnt/*` 写、Windows 侧立刻读会读到**空的**（9p 的可见性
-    延迟，`docs/` 里记过）。字节从 WSL 的 stdout 过来就没有这个问题。
+    **取法分两条腿** —— `#371` 起这一族判据在 Linux 上是**原生**跑的（`_WSLCMD` 为空、
+    `_wsl_path` 不加 `/mnt/` 前缀），而 runner 上**没有 `wsl` 这个命令**：
+
+      * **这一侧读得到**（Linux：`/usr/lib/...` 就在本机）⇒ **直接读**。对这一侧来说"拷贝"
+        是多余的一步，而多余的那一步正是会坏的那一步 —— 实测：写死 `subprocess.run(["wsl", …])`
+        在 runner 上直接 `FileNotFoundError`，判据红得**像回归**，其实只是没走平台那两条腿；
+      * **读不到**（Windows：它在 WSL 里）⇒ 从另一侧 `cat` 回来，**不是 `cp`** ——
+        WSL 往 `/mnt/*` 写、这一侧立刻读会读到**空的**（9p 的可见性延迟，`docs/` 里记过）。
+
+    取回来**校验魔数**（`!<arch>\\n`），不是只看长度：半个归档会让判据在错的东西上跑，
+    而它红起来长得和"真缺陷"一模一样。
     """
+    data: bytes | None = None
     for cand in LIBZ_CANDIDATES:
-        r = subprocess.run(["wsl", "-e", "bash", "-lc", f"cat {cand}"],
-                           capture_output=True, timeout=300, shell=False)
-        if r.returncode == 0 and len(r.stdout) > 4096:
-            dst.write_bytes(r.stdout)
-            return dst
-    return None
+        try:
+            p = Path(cand)
+            if p.is_file():
+                b = p.read_bytes()
+                if b[:8] == b"!<arch>\n":
+                    data = b
+                    break
+        except OSError:
+            pass
+    if data is None:
+        for cand in LIBZ_CANDIDATES:
+            try:
+                r = subprocess.run([*_WSLCMD, "bash", "-lc", f"cat {cand}"],
+                                   capture_output=True, timeout=300, shell=False)
+            except OSError:            # 另一条腿不存在（没装 WSL）：**取不到**，不是挂掉
+                return None
+            if r.returncode == 0 and r.stdout[:8] == b"!<arch>\n":
+                data = r.stdout
+                break
+    if data is None:
+        return None
+    dst.write_bytes(data)
+    return dst if dst.read_bytes()[:8] == b"!<arch>\n" else None
 
 
 @test
