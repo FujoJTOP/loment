@@ -27,7 +27,7 @@
 module surface_data
 choose runtime
 
-pub fn n_codes() -> u32 { return 27; }
+pub fn n_codes() -> u32 { return 30; }
 
 /// 报错器自己的版本（`lomenterr version` 打的就是它）。真源：`tools/loment_release.py`。
 pub fn lomenterr_version() -> str { return "0.1.2"; }
@@ -88,6 +88,12 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 53 { return "命令体与声明对不上"; }
     if k == 54 { return "control flow: this function may fall off the end of its body"; }
     if k == 55 { return "控制流：可能从末尾掉出去"; }
+    if k == 56 { return "cannot read this input file"; }
+    if k == 57 { return "输入文件读不了"; }
+    if k == 58 { return "cannot write the output file"; }
+    if k == 59 { return "输出文件写不了"; }
+    if k == 60 { return "this unit is too large for the compiler"; }
+    if k == 61 { return "这个单元超出编译器装得下的量"; }
     return "";
 }
 
@@ -147,6 +153,12 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 53 { return "命令声明与 `command_main` 对不上：少了一个，或者签名不是入口要求的那个。"; }
     if k == 54 { return "A function that **declares a return type** has a path that reaches the end of its body without a `return`."; }
     if k == 55 { return "一个**声明了返回值**的函数，存在一条路径走到末尾却没 `return`。"; }
+    if k == 56 { return "The compiler did not get the source file it was told to read. **Not one character of the source has been looked at** - so this one has no line number."; }
+    if k == 57 { return "编译器要读的那份源文件没拿到。**还没有看源码一个字符** —— 所以这条没有行号。"; }
+    if k == 58 { return "The linker failed to write the artifact to the `-o` path you gave it."; }
+    if k == 59 { return "链接器把产物写到你给的 `-o` 路径上时失败了。"; }
+    if k == 60 { return "This unit outgrew the compiler's **fixed-capacity** tables (the lexer buffer, the symbol table, the codegen table, the backfill table)."; }
+    if k == 61 { return "这个单元超出了这套编译器**固定容量**的那几张表（词法缓冲 / 符号表 / codegen 表 / 回填表）。"; }
     return "";
 }
 
@@ -206,6 +218,12 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 53 { return "`command_main` **不是**被谁直接调用的普通函数 —— 它是工具链生成的那个 `_start` 要去调用的目标，而「生成」这件事只由**命令声明**触发。两半必须成对：没有声明时它是一个**没人调用的函数**（编得过、静默无效）；只有声明而没有它，生成的入口就没有东西可调 —— 那要等到**链接**才炸，所以在检查这一步就拒；签名不对则生成的入口传不进去参数。入口的签名是固定的：`fn command_main(argv: ptr, argc: u32) -> u32`，`argv` 就是 `/proc/self/cmdline` 那一整块，`argv[0]` 是命令自己的路径（`docs/223` §3.2）。"; }
     if k == 54 { return "After codegen that path becomes an **illegal instruction** (`SIGILL`), and it only fires when the path is actually taken - so it is the kind of bug that ships and then blows up when a new input reaches an error branch nobody exercised. \"check passes\" is supposed to mean \"this program will not trap\"; this rule is what makes that true, because a static check is the only place that can say it before the fact."; }
     if k == 55 { return "这类函数发射之后，末尾会落成一条**非法指令**（SIGILL）—— 而它只在**真的走到那一支**时才发生，所以是那种「上线很久、错误分支被新输入踩到」才炸的问题。`check` 通过本该等于「这份程序不会 trap」，这一条就是把那句话兑现：静态检查是唯一能在事前说出口的地方（原先它只是一条写作纪律，见 SKILL.md §6.14）。"; }
+    if k == 56 { return "Loading is the compiler's first pass, and this happens before it. \"The file cannot be read\" and \"the source in it is wrong\" are two different things: no edit to the source can fix the first, so it gets its own code and is **not** a syntax error (E019). An empty file lands here too - that is not \"written wrongly\", it is \"nothing to read\"."; }
+    if k == 57 { return "装载是编译的第一趟，而这一条发生在它之前。「文件读不到」与「文件里的源码写错了」是两件不同的事：前者无论如何改源码都解决不了，所以它单独一个码、而且**不是**语法错（E019）。空文件也落在这里 —— 那不是「写错了」，是「没得读」。"; }
+    if k == 58 { return "The artifact is the compiler's **last step**, so this has nothing to do with your source - the source can be perfect and the write still fail. The most common cause is a **missing parent directory**: `loment build a.lomt -o out/a` when `out/` does not exist yet. Next comes permissions, or the path being held by another process (on Windows, replacing an exe that is running does this)."; }
+    if k == 59 { return "产物是编译的**最后一步**，所以这条与源码无关 —— 源码全对也可能写不出去。最常见的原因是**父目录不存在**：`loment build a.lomt -o out/a` 而 `out/` 还没建。其次是权限，或者那个路径上已经有别的进程占着（Windows 上改了正在运行的 exe 就是这样）。"; }
+    if k == 60 { return "This toolchain is **self-hosted**: it has no optimiser and no dynamic containers, and those tables live inside the program image with a size fixed at compile time. When a unit does not fit, it reports **on the spot** rather than truncating silently - truncation would make code vanish, and that kind of bug only shows up at run time. So this is not \"your source is wrong\"; it is \"this unit is too big for this compiler\"."; }
+    if k == 61 { return "这套工具链是**自举**的，没有优化器也没有动态容器：那几张表开在程序映像里，大小是编译期常量。单元大到装不下时，宁可**当场报错**也不静默截断 —— 截断的话后面的代码会凭空消失，而那种错要等到运行时才现形（`docs/158` §5 记着这条纪律）。所以这条不是「你的源码错了」，是「这一份的形状对这台编译器来说太大了」。"; }
     return "";
 }
 
@@ -265,6 +283,12 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 53 { return "声明 + 签名一致的 `command_main`；普通程序用 `_start`"; }
     if k == 54 { return "the last statement is `return`; an `if` with an `else` where both branches return; a `match` whose every arm returns"; }
     if k == 55 { return "末尾是 `return`；末尾是带 `else` 的 `if`、两支都返回；末尾是每条臂都返回的 `match`"; }
+    if k == 56 { return "the path exists, is a regular file, is not empty, and is readable"; }
+    if k == 57 { return "路径存在、是普通文件、非空、可读"; }
+    if k == 58 { return "the parent directory of `-o` exists and is writable"; }
+    if k == 59 { return "`-o` 的父目录存在且可写"; }
+    if k == 60 { return "the unit fits the lexer buffer / symbol table / codegen table / backfill table"; }
+    if k == 61 { return "单元在词法缓冲 / 符号表 / codegen 表 / 回填表的容量之内"; }
     return "";
 }
 
@@ -324,6 +348,12 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 53 { return "只有 `command_main` 没有声明；`command_main(a: u32, b: u32)`；返回 `()`；两个参数顺序反了"; }
     if k == 54 { return "the last statement is `while` / `for` (these end normally), an expression statement, or an `if` **without** an `else`"; }
     if k == 55 { return "末尾是 `while` / `for`（会正常结束）、末尾是表达式语句、末尾是**没有** `else` 的 `if`"; }
+    if k == 56 { return "a misspelt path; a directory; a 0-byte file; a file you may not read"; }
+    if k == 57 { return "写错的路径；目录；0 字节的文件；没有读权限的文件"; }
+    if k == 58 { return "a directory that does not exist; a read-only directory; a path held by a running exe"; }
+    if k == 59 { return "不存在的目录；只读目录；正在运行的 exe 占着的路径"; }
+    if k == 60 { return "a whole library in one source file; hundreds of `use`; hundreds of top-level declarations"; }
+    if k == 61 { return "单个源文件里塞一整个库；几百个 `use`；几百个顶层声明"; }
     return "";
 }
 
@@ -355,6 +385,9 @@ pub fn code_ascii(c: u32) -> str {
     if c == 25 { return "two process entries: `_start` and `command_main`"; }
     if c == 26 { return "a command declaration and `command_main` come in pairs (one missing, or a wrong signature)"; }
     if c == 27 { return "a non-() function may fall off the end of its body - every path must return"; }
+    if c == 28 { return "cannot read the input file - missing, a directory, unreadable, or empty"; }
+    if c == 29 { return "cannot write the output file - its directory is missing, or it is not writable"; }
+    if c == 30 { return "the unit is too large for this compiler's fixed buffers - split the facade"; }
     return "";
 }
 
@@ -565,6 +598,30 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 433 { return "让每条路径都 `return`：末尾补一个 `return`。"; }
     if k == 435 { return "收尾写成**带 `else` 的 `if`**、两支都返回；`match` 收尾时让**每条臂**都返回（穷尽性由 E008 单独管）。"; }
     if k == 437 { return "函数本来就没有返回值的话，把它声明成 `()` 并去掉 `return` 后面的值。"; }
+    if k == 448 { return "Check the path: the `<file>` in `loment check <file>` has to be that file (a relative path is relative to the **current directory**, nothing else)."; }
+    if k == 450 { return "If you handed it a directory, hand it a file: a directory is not source. To see what a directory holds, use `loment ls <dir>`."; }
+    if k == 452 { return "If the file is empty, write the source into it; and check you can read it (`chmod +r`)."; }
+    if k == 454 { return "A path that is too long, or carries a wildcard (`*`) the shell did not expand, also lands here - the compiler sees the literal text."; }
+    if k == 449 { return "核对路径：`loment check <file>` 里的 `<file>` 要真的是那个文件（相对路径是相对**当前目录**，不是相对别的什么）。"; }
+    if k == 451 { return "给的是目录就换成文件：目录本身不是源。想看一个目录里有什么，用 `loment ls <目录>`。"; }
+    if k == 453 { return "文件是空的就把源码写进去；另外确认它有读权限（`chmod +r`）。"; }
+    if k == 455 { return "路径太长或带了通配符（`*`）也会落到这里 —— shell 没展开时编译器看到的是那个字面量。"; }
+    if k == 464 { return "Create the directory first: `mkdir -p out`, then `loment build a.lomt -o out/a`."; }
+    if k == 466 { return "Pick another landing spot: `-o a` (no directory) writes into the current directory."; }
+    if k == 468 { return "Check you can write in that directory (`touch out/x` settles it); if not, use another one."; }
+    if k == 470 { return "On Windows a failed write is sometimes **the exe you are overwriting still running** - close it and build again."; }
+    if k == 465 { return "先建目录：`mkdir -p out` 再 `loment build a.lomt -o out/a`。"; }
+    if k == 467 { return "换个落点：`-o a`（不写目录）会落在当前目录。"; }
+    if k == 469 { return "确认那个目录你能写（`touch out/x` 试一下就知道了），必要时换个目录。"; }
+    if k == 471 { return "Windows 上「写不了」有时是**那个 exe 正在运行** —— 先关掉它再编。"; }
+    if k == 480 { return "Split the facade: if one `use` pulls in too much, break it into layers (the files under `loment/lib/` are the model)."; }
+    if k == 482 { return "`use` also has a per-file limit (300 lines) - over that is this code."; }
+    if k == 484 { return "If it is the number of declarations, cut the unit into modules so each has its own tables."; }
+    if k == 486 { return "If it genuinely cannot be cut, open an issue: the limits are constants, and raising one has a paper trail."; }
+    if k == 481 { return "把门面拆小：一个 `use` 拉进来的东西太多就分几层（`loment/lib/` 里那些就是样板）。"; }
+    if k == 483 { return "`use` 条数也有上限（一个文件 300 条）—— 超过就是这条。"; }
+    if k == 485 { return "声明那么多函数/类型的话，把单元切成几个模块，各自有自己的表。"; }
+    if k == 487 { return "确实切不动就拿这事开个 issue：上限是常量，抬它有账可查（`docs/158` 记着每次抬高的实测）。"; }
     return "";
 }
 
@@ -598,6 +655,9 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 25 { return 3; }
     if c == 26 { return 4; }
     if c == 27 { return 3; }
+    if c == 28 { return 4; }
+    if c == 29 { return 4; }
+    if c == 30 { return 4; }
     return 0;
 }
 
