@@ -676,27 +676,30 @@ def test_gc_auto_collects_while_manual_exhausts():
           f"manual 耗尽 (rc={got[1]}) —— 自动回收是真的")
 
 
-#: `#367` 的语料：**一次 `alloc` 都不写**，只靠 `str_concat` 分配。6000 次拼接 × 56 字节
-#: （44 的请求取整成 56）≈ 336 KB，**远远**过 64 KiB arena。
+#: `#367` 的语料：**一次 `alloc` 都不写**，只靠 `str_concat` 分配。6000 次拼接 × 16 字节
+#: （8 的请求取整成 16）≈ 94 KB，**远远**过 64 KiB arena。
 #:
-#: **后缀为什么是 40 字节而不是 4**：`gc_auto` 的触发按**请求字节**计，而堆按**块字节**
-#: 消耗（请求 + 8 字节头、再向上取整到 8）。4 字节后缀那个比值是 2，于是计数器攒到 32768
-#: 的那一刻 arena 也正好满 —— 掐在临界上，`gc_auto` 那边会**先耗尽后收集**，判据变成
-#: 在测那个比值而不是在测触发。40 字节后缀把比值压到 56/44 ≈ 1.27，触发稳稳先到。
-#: （`gc_auto_alpha` 两种都一样过 —— 它另有一条**空间触发**，不靠这个计数器。）
+#: **后缀为什么是 4 字节、而不是当年那个 40**：这一格原先是 40 字节，用来**绕开**时钟的
+#: 缺陷 —— 触发按**请求字节**计，而堆按**块字节**消耗（请求 + 8 字节头、再向上取整到 8）；
+#: 4 字节后缀那个比值是 2，于是计数器攒到 32768 的那一刻 arena 也正好满，`gc_auto` 会
+#: **先耗尽后收集**，判据变成在测那个比值而不是在测触发。**时钟修好之后**（它算的就是分配器
+#: 真正吃掉的那两行 `(sz + 15) & -8`）那个绕开不再需要，于是回到 4 字节 —— 这一版才
+#: **钉得住**这个修复：把时钟改回只数载荷，`gc_auto` 那一只立刻变 132。
+#: （`gc_auto_alpha` 两种后缀都一样过 —— 它另有一条**空间触发**，不靠这个计数器。）
 _CONCAT_ONLY_SRC = (
     "module concatonly\n%s\nchoose runtime\n\n"
     "fn _start() {\n"
     "    let s: str = \"abcd\";\n"
     "    let i: u64 = 0;\n"
     "    while i < 6000 {\n"
-    "        let t: str = str_concat(s, \"0123456789012345678901234567890123456789\");\n"
+    "        let t: str = str_concat(s, \"efgh\");\n"
     "        i = i + 1;\n"
     "    }\n"
     "    syscall4(60, 7, 0, 0);\n"
     "}\n")
 
 
+@test
 def test_a_concat_only_program_still_collects():
     """只靠 `str_concat` 分配的程序也**必须**触发收集（`#367`）—— 两档各一只，退出码 7。
 
@@ -1118,69 +1121,6 @@ def test_gc_alpha_adaptive_bounds_a_large_live_set():
         "固定 32 KiB 触发本该在活集 44 KB 时装不下 arena")
     print(f"      gc_auto 耗尽 (rc={got[0]}，活集 44 KB)；gc_auto_alpha 跑通 (rc={got[1]}) "
           "—— 自适应触发收得下更大的活集")
-
-
-#: 只用 `str_concat` 分配的程序（issue #367）—— 一个 `alloc` 都没有，活集是常数（一个字面量
-#: 加最新那一块）。每一轮 16 B（8 字节载荷 + 8 字节块头），6000 轮 ≈ 94 KiB，而 arena 只有
-#: 64 KiB ⇒ **只有真的收得回来才跑得完**。
-_CONCAT_ONLY_SRC = ("""module concat_only
-choose @@TIER@@
-choose runtime
-
-fn _start() {
-    let s: str = "abcd";
-    let i: u64 = 0;
-    while i < 6000 {
-        let t: str = str_concat(s, "efgh");
-        i = i + 1;
-    }
-    syscall4(60, 0, 0, 0);
-}
-""")
-
-
-@test
-def test_collecting_tiers_run_a_concat_only_program():
-    """**拼接进回收的计时**（issue #367）：纯拼接的程序在两个自动档下都要收得回来。
-
-    **Why**：触发原先挂在 `alloc` 那一支上，而 `str_concat` 是同一个 `alloc_ir` 的**另一个**
-    调用点 ⇒ 拼接分配的字节从不进计数 ⇒ 一个 `alloc` 都没有的程序**一次都不收**，64 KiB
-    填满就 `abort`。这一条把它钉在**行为**上：活着要走完 6000 轮。
-
-    这一条要红，**两件事都得对**，所以两档一起钉（判据替下面的两个缺陷各守一格）：
-
-      * **挂点在拼接那条路上** —— 否则计数永远是 0（`collect` 一次都不进）；
-      * **时钟量的是分配器吃掉的字节**（载荷 + 块头），不是载荷请求 —— 8 字节载荷的块吃 16，
-        时钟只走 8 就慢一倍，而固定档的阈值（32 KiB）离 arena 的 64 KiB 只差一倍：
-        计数越过阈值的那一刻恰好就是 arena 装满的那一刻（实测：3000 轮计数 24000 < 32768，
-        **一次都没收**；6000 轮直接 `abort`）。
-
-    两件事都在**同一个地方**（`alloc_ir` / `emit_alloc_seq` 与它们前面的那条触发），所以
-    一条判据同时守得住；分开写反而会各自被另一件挡住而假绿。
-
-    **证伪**（各自实测）：把触发挪回 `alloc` 那一支 ⇒ 两档都退 132；把时钟改回只数载荷
-    ⇒ `gc_auto` 那一格退 132（alpha 靠空间触发那一格活着，这就是它为什么必须一起钉）。
-    """
-    if not (_clang() and _wsl()):
-        print("      SKIP: 无 clang/WSL")
-        return
-    got = []
-    for tier in ("gc_auto", "gc_auto_alpha"):
-        with tempfile.TemporaryDirectory() as tds:
-            td = Path(tds)
-            src = td / "concat_only.lomt"
-            src.write_text(_CONCAT_ONLY_SRC.replace("@@TIER@@", tier), encoding="utf-8", newline="\n")
-            ll = _ref_ir(src, td)
-            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
-            nat = td / "concat_only.native"
-            nat.write_bytes(blob)
-            got.append((tier, _run_bin(nat, "concat_only", td, timeout=90)[0]))
-    for tier, rc in got:
-        assert rc == 0, (
-            f"`{tier}` 下纯拼接的程序没跑完：退出码 {rc}（期望 0）。6000 轮 × 16 B ≈ 94 KiB 压在一只 "
-            "64 KiB 的 arena 上，只有真的收得回来才活得下来 —— 触发挂点漏在拼接那条路上（issue "
-            "#367），或者时钟只数载荷、不数块头（同一个缺陷的另一半）")
-    print("      纯拼接 6000 轮（≈94 KiB 的分配量）在两档各跑完一遍 —— 挂点在拼接那条路上，时钟也数块头")
 
 
 @test
