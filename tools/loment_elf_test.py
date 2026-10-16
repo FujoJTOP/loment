@@ -2197,6 +2197,41 @@ def test_a_collection_keeps_the_free_list():
           " —— 两档收集之后都还拿得回那片空闲区")
 
 
+@test
+def test_the_runtime_guard_does_not_need_a_windows_binary():
+    """**这一族的闸门是"能不能跑 Linux ELF"，不是"有没有 `wsl` 这个二进制"**（`FujoJTOP/loment#371`）。
+
+    **Why**：`_wsl()` 原先只是 `shutil.which("wsl")`。必需检查跑在 ubuntu runner 上，而那儿
+    **没有**这个二进制（它不是 apt 包，镜像里也没有垫片）—— 于是本文件里**每一条要跑产物的
+    判据**都在 `SKIP: 无 clang/WSL` 那条早退路上返回，而早退在运行器里是一次**正常返回**
+    ⇒ 记成 PASS ⇒ 门禁报 `31/31 通过`。也就是说：**改收集器、改分配器、改两个链接器的产物形状，
+    都能在一条运行期判据都没跑过的情况下过掉必需检查**。跳过的那一族不是抽样，它就是这一族。
+
+    （`#374` 让每一行带上 `N SKIP`、`#382` 让 Linux 上原生跑 —— 这一条钉的是**别再把闸门写回
+    "某个二进制在不在"**：机制改回去了，上面那两件事的账就又会静默。）
+
+    **How to apply**：把 `wsl` 从 `shutil.which` 里藏掉（正是 issue 里那份复现），再看 `_wsl()`：
+      * Linux 上**必须仍然为真** —— 产物本来就是 Linux ELF，该原生跑；
+      * 其它平台上**必须为假** —— 藏掉之后本机确实跑不了，那是实话。
+    两个方向都钉住：只钉 Linux 那一半的话，一个恒真的 `_wsl()` 也能过。
+    这一条**自己不 SKIP** —— 它测的是"闸门怎么判"，两个平台上都判得了。
+    """
+    real = shutil.which
+    try:
+        shutil.which = lambda n: None if n == "wsl" else real(n)
+        got = _wsl()
+    finally:
+        shutil.which = real
+    if sys.platform.startswith("linux"):
+        assert got is True, (
+            "Linux 上把 `wsl` 藏起来之后 `_wsl()` 应当仍为真 —— 否则 runner 上这一族全被"
+            "跳过、而门禁照样报满（`FujoJTOP/loment#371`）")
+    else:
+        assert got is False, (
+            f"非 Linux 上把 `wsl` 藏起来之后 `_wsl()` 应当是假，得到 {got!r} —— 一个恒真的"
+            "闸门会把'跑不了'变成'假装跑过了'，而那正是 `FujoJTOP/loment#371` 的形状")
+
+
 def main() -> int:
     failed = []
     for name, fn in TESTS:
