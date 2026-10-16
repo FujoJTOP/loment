@@ -32,7 +32,15 @@ import struct
 import sys
 from pathlib import Path
 
-ELF_TEXT_VADDR, ELF_DATA_VADDR = 0x400000, 0x600000
+#: **文本段的容量**（`docs/247`，2026-10-16）。与自举侧 `lomelf.lomt` 的 `OUT_CAP`
+#: **同一个数** —— 那边就是代码缓冲的大小。数据段钉在它后面（见 `ELF_DATA_VADDR`），
+#: 所以这个数一旦被文本超过，数据段就会被压住（**不报错**，产物一启动就段错误）。
+#: 越过它的情形由 `compile_ll` 末尾那条判据点名拒 —— 原先没有这条，地板是**没标注的**。
+TEXT_CAP = 4194304                 # 4 MiB = 0x400000
+ELF_TEXT_VADDR = 0x400000
+#: 数据段在**代码缓冲之后**：文本段可用 `0x400000..0x800000`，正好是 `TEXT_CAP`。
+#: 原先钉 `0x600000`（2 MiB 窗口），实测 2026-10-15 `main` 自己已占 99.4%。
+ELF_DATA_VADDR = ELF_TEXT_VADDR + TEXT_CAP
 TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # 当前目标的活动值, PE 目标会改
 SCALAR_SIZE = {"i1": 1, "i8": 1, "i16": 2, "i32": 4, "i64": 8, "ptr": 8}
 
@@ -1108,7 +1116,21 @@ class Emitter:
                 self.asm.emit(push_r(RAX))
             for reg, _a in zip(C_ARG_REGS, args):
                 self.asm.emit(pop_r(reg))
+            # ⚠ **C ABI 要求 `call` 那一刻 `rsp ≡ 0 (mod 16)`**（System V）。我们自己的调用
+            # 约定把实参压栈再弹出，压弹是**平衡**的、但**对齐不是** —— 我们的帧不对齐，于是
+            # 到了这里 rsp 常常是 8（mod 16）。不修的话**任何用到 16 字节 SSE 存的 C 函数都会
+            # 当场 `#GP`**：实测（`FujoJTOP/loment#359`）zlib 的 `compress` 就死在
+            # `movaps %xmm0,-0x70(%rbp)` 上（`si_code=SI_KERNEL`、`si_addr=NULL` —— 那不是
+            # 段越界，是**对不齐**）。
+            #
+            # 用 **RBX** 存原 rsp：它是 SysV 的**被调方保存**寄存器，C 返回时一定还是原值；
+            # 而 Loment 生成的代码**不用 rbx**（`docs/173` 那条"状态基址放 rbx"的注解就是靠
+            # 这一点）。这三条之间**只有这一次 C 调用**（实参早已求值完、压弹已平衡），
+            # 所以嵌套调用也踩不到它 —— 顺序不能反：对齐必须是 `call` 前的最后一步。
+            self.asm.emit(mov_rr(RBX, RSP))
+            self.asm.emit(alu_ri(AND_, RSP, -16))
             self.asm.call(callee[1:])
+            self.asm.emit(mov_rr(RSP, RBX))
             # **返回值照旧落回目标槽** —— 与内部调用同一步。少了这一句, 调用结果**丢掉**,
             # 后面读到的是那个槽的旧值: 症状是"程序能跑、结果是假 0" (实测第一版就是这样:
             # `c_add(3,4) + c_mul(5,6)` 退出码 0 而不是 37)。
@@ -5087,13 +5109,26 @@ class ForeignObject:
                     continue
                 end = raw.index(b"\x00", strt["off"] + nameoff)
                 nm = raw[strt["off"] + nameoff:end].decode("utf-8", "replace")
-                name_of[(si, k)] = nm
                 # **`st_info` 的高 4 位是绑定, 低 4 位是类型** —— `ELF64_ST_INFO(bind, type)`
                 # 就是 `(bind << 4) | type`。原文这里是 `info & 0x0F`, 取到的是**类型**:
                 # 收定义时靠"类型是 FUNC/OBJECT"误打误撞能对, 但一旦要判绑定 (比如"未定义
                 # 的符号是不是全局的") 就整个失效 —— 实测它让归档的固定点选不出成员
                 # (`c_sub` 的 info=0x10, `&0x0F` 得 0 被当成 LOCAL)。
                 bind = info >> 4
+                # ⚠ **局部符号（`bind == 0`）必须按对象改名**（2026-10-15）。理由与上面那条
+                # 节符号**一模一样**，只是 S1f 当时只修了节符号：
+                #   `.LC0` / `.L.str` / `my_version` 这种名字**每个成员里都有**，而下面那张
+                #   标签表是**按名字**查的、而且"先来的为准" —— 不改名时，第二个成员的
+                #   `.LC0` 会解析到**第一个成员的** `.LC0` 上：**静默指错地址**，不报任何错。
+                #   实测（`FujoJTOP/loment#359`）：zlib 的 `deflate.o` 排在 `zutil.o` 之前时，
+                #   `zlibVersion()` 返回的指针就落到 deflate.o 的常量上（`docs/219` §8b 那条
+                #   记了很久的"某个成员的数据/重定位还有残留缺陷"）。改完两边都读回 `1.3.1`。
+                # **只改局部**：跨对象的解析正是靠全局/弱符号，改了它们反而把 C 库拼不起来。
+                # 名字是**内部的**（不进产物 —— 我们的产物没有符号表），所以两侧各取各的形
+                # 也行，只要各自自洽；这里取 `$<对象名>$<原名>`，与节符号那条同一个形状。
+                if bind == 0:
+                    nm = f"${name}${nm}"
+                name_of[(si, k)] = nm
                 if shndx == 0:
                     if bind in (1, 2):                     # GLOBAL / WEAK
                         undefined.append(nm)
@@ -5252,7 +5287,8 @@ def compile_ll(text: str, objects: list | None = None,
         objects = flat
     # **端口门**（2026-10-12 用户定：0.1.4.5 里 libc 不可调用）。带**未定义符号**的外源
     # 对象就是"这份产物有通向世界的端口"（`docs/222` §4 那一维的价），而那条路 —— 真 libc /
-    # 真共享库 —— **还没完工**（`docs/219` §8b 的 S2 还差三件），所以链接器**默认不收**，
+    # 真共享库 —— **还没完工**（`docs/219` §8b 的 S2：静态那一半 2026-10-15 落齐了，
+    # 动态那一半是 #360），所以链接器**默认不收**，
     # 只有显式 `--allow-ports` 才收（开发通道与判据用它；启动器只在 dev 传它）。
     #
     # **自闭合的对象不受影响**：没有未定义符号 ⇒ 走不过这一条。那正是 `docs/173` 一直在发
@@ -5267,7 +5303,8 @@ def compile_ll(text: str, objects: list | None = None,
             raise Unsupported(
                 f"外源对象带了未定义符号（通向世界的端口）：{shown} —— 链接器默认不收。"
                 f"真 libc / 真共享库那条路还没完工（`docs/222` §4 的机制在，"
-                f"`docs/219` §8b 的 S2 还差三件），0.1.4.5 里它是关着的。"
+                f"`docs/219` §8b 的 S2：静态那一半落齐了，动态那一半是 #360），"
+                f"0.1.4.5 里它是关着的。"
                 f"开发通道要它得显式写 `--allow-ports`；"
                 f"自闭合的对象（没有未定义符号）不受这条影响")
     # 全局布局: bytes 在 data, 全零在 bss
@@ -5411,6 +5448,17 @@ def compile_ll(text: str, objects: list | None = None,
                 struct.pack_into("<I", data, site, val & 0xFFFFFFFF)
             applied += 1
     text = em.asm.finalize()
+    # **文本段的容量是明写的**（`docs/247`）：数据段钉在 `TEXT_VADDR + TEXT_CAP`，
+    # 所以文本一旦超过 `TEXT_CAP` 就会盖到数据段上 —— 而**盖上去不报错**，产物一启动就
+    # 段错误（0 字节输出），看起来像编译器坏了。实测 2026-10-15：`main` 自己已占
+    # 2 084 579 / 2 097 152（99.4%），任何一笔中等改动都会顶破。所以这里**点名拒**。
+    # 自举侧 `lomelf.lomt` 同一处、同一个数（那边是 `OUT_CAP`）。
+    if len(text) > TEXT_CAP:
+        raise Unsupported(
+            f"文本段 {len(text)} 字节超过 {TEXT_CAP} —— 链接器把数据段钉在"
+            f" `TEXT_VADDR + {TEXT_CAP}`，再长就会盖住数据段，产物一跑就段错误。"
+            f" 抬 `loment/tools/lomelf.lomt` 的 `OUT_CAP`、和 `tools/lomelf.py` 的"
+            f" `TEXT_CAP` / `ELF_DATA_VADDR`（两个实现同一个数）")
     entry = em.asm.labels["__entry"]
     return build_elf(text, bytes(data), bss, entry), {
         "text": len(text), "data": len(data), "bss": bss, "entry": entry,

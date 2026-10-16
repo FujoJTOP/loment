@@ -61,12 +61,17 @@ const M_OUT: u32 = 8396800;        // 4 MiB 输出 ELF
 const M_GB: u32 = 12591104;        // 1 MiB 全局数据
 const M_TAB: u32 = 13639680;       // 4 MiB 表区
 const M_OBJ: u32 = 17833984;       // 4 MiB 外部目标文件 (.o) 暂存 (docs/173, 一次一个)
-const ARENA: u64 = 22028288;
+// **归档暂存**（`docs/173` 阶段 2，`FujoJTOP/loment#405`）：`.a` 要整包驻留（定点选择要
+// 反复扫它），而成员得拷进 `M_OBJ` 再摆 —— 两块不能是同一块。与 `M_OBJ` 同尺寸：真库
+// （zlib 的 150 KB）离上限很远，上限在这里是给"来的不是库"那种输入一个**响亮的**界。
+const M_AR: u32 = 22028288;        // 4 MiB 归档暂存
+const ARENA: u64 = 26222592;
 
 const IN_CAP: u32 = 4194304;
 const OUT_CAP: u32 = 4194304;
 const GB_CAP: u32 = 1048576;
 const OBJ_CAP: u32 = 4194304;
+const AR_CAP: u32 = 4194304;
 
 // 表区内的格 (相对 M_TAB)
 const C_NG: u32 = 0;
@@ -97,6 +102,8 @@ const C_NEXT: u32 = 96;            // 外部函数 (declare) 个数 (docs/173)
 const C_EXTN: u32 = 100;           // 外部符号名池游标 (相对输入缓冲起点)
 const C_NFREL: u32 = 104;          // 外部目标文件里的重定位条数 (docs/173 阶段 2)
 const C_NOBJ: u32 = 108;           // 已摆好的外部对象个数
+const C_NNEED: u32 = 112;          // 归档定点的**需要集**条数 (docs/173 阶段 2, #405)
+const C_NMEM: u32 = 116;           // 归档**挑中**的成员条数
 
 // 表起址 (相对 M_TAB); 格区 256 字节
 //
@@ -203,16 +210,37 @@ const F2_NLEN: u32 = 20;
 const F2_ADD: u32 = 24;            // 加数 (i32 位型)
 const F2_IN: u32 = 28;             // 0 = 落在**代码**上 (写 txt); 1 = 落在**数据**上 (写 gb)
 
+// **归档那两张表**（`docs/173` 阶段 2，`FujoJTOP/loment#405`）。两张都借 `TB_EXT` 的
+// (起点, 长度) 形状 —— 一样的 8 字节、一样的访问器。
+//
+// 上界**都是点名拒**（`need_add` / `ar_take` 里那条守卫）：真库的需要集是几十个量级、
+// 挑中的成员也是十几个，撞上是"来的不是库"，那种输入该听见名字而不是少挑几个成员。
+const NEED_MAX: u32 = 2048;        // 需要集条数上限
+const TB_NEED: u32 = 2637600;      // stride 8 × NEED_MAX: (名字池起点, 长度)
+const MEM_MAX: u32 = 1024;         // 归档挑中的成员上限
+const TB_MEM: u32 = 2653984;       // stride 8 × MEM_MAX: (在 M_AR 里的起点, 长度)
+
 // ---------------------------------------------------------------- 常量
 
 const TEXT_VADDR: u32 = 4194304;   // 0x400000
-const DATA_VADDR: u32 = 6291456;   // 0x600000
+// **数据段在代码缓冲之后**（`docs/247`，2026-10-16）。原先钉在 `0x600000`，文本段于是
+// 只有 `0x400000..0x600000` 这 2 MiB 可用 —— 而**越界不报错**：多出来的代码盖在数据段上，
+// 产物一启动就段错误（0 字节输出），看起来像编译器坏了。实测 2026-10-15：`main` 自己
+// 已占 2 084 579 / 2 097 152（99.4%），任何一笔中等改动都会顶破它。
+//
+// 现在钉在 `TEXT_VADDR + OUT_CAP`：那个间隔**就是代码缓冲本身的容量**，不是拍出来的数。
+// 于是文本段的容量变成了 `OUT_CAP`，而它**有守卫**（驱动里那段，与 `TB_LBL_MAX` 那几个
+// 同一个纪律：满了就点名退出，不往下写）。
+// **必须与 `tools/lomelf.py` 的 `TEXT_CAP` / `ELF_DATA_VADDR` 同一个数** —— 两边产物要
+// 逐字节相同（`loment_elf_test` 的镜像那几格钉着）。
+const DATA_VADDR: u32 = 8388608;   // 0x800000 = TEXT_VADDR + OUT_CAP
 const NO: u32 = 4294967295;
 const PHI: u64 = 4294967296;
 
 const RAX: u32 = 0;
 const RCX: u32 = 1;
 const RDX: u32 = 2;
+const RBX: u32 = 3;                // 只为 extern 调用点的 `rsp` 对齐 (SysV；见 do_call_extern)
 const RSP: u32 = 4;
 const RBP: u32 = 5;
 const RSI: u32 = 6;
@@ -222,6 +250,8 @@ const R9: u32 = 9;
 
 const ADD: u32 = 0;
 const SUB: u32 = 5;
+const AND_: u32 = 4;               // Group1 的 /4 = and（`and rsp, -16` 那个）
+const LOCAL_PREFIX: u32 = 5;       // `$` + 4 字节对象号（见 `copy_local_name`）
 const CMP: u32 = 7;
 
 fn hi32(v: u64) -> u32 {
@@ -2840,7 +2870,17 @@ fn do_call_extern(tab: ptr, out: ptr, c: u32, t: ptr, lp: u32, rp: u32, nargs: u
         d = em_pop(out, d, c_arg_reg(k));
         k = k + 1;
     }
+    // ⚠ **C ABI 要求 `call` 那一刻 `rsp ≡ 0 (mod 16)`**（System V）—— 与参考实现
+    // `tools/lomelf.py` 的 `_call` 同一处、同三条、同序。不修的话，**任何用到 16 字节 SSE
+    // 存的 C 函数当场 `#GP`**（`si_code=SI_KERNEL`、`si_addr=NULL` —— 那不是段越界，是
+    // **对不齐**）：实测 zlib 的 `compress` 就死在 `movaps %xmm0,-0x70(%rbp)` 上
+    // （`FujoJTOP/loment#359`）。用 RBX 存原 rsp：SysV 的**被调方保存**寄存器，C 返回时
+    // 仍是原值；而 Loment 生成的代码不用 rbx。这三条之间只有这一次 C 调用（实参早已求值完、
+    // 压弹已平衡），所以嵌套调用踩不到它 —— **对齐必须是 `call` 前的最后一步**。
+    d = em_mov_rr(out, d, RBX, RSP, 1);
+    d = em_alu_ri(out, d, AND_, RSP, 4294967280);
     d = em_call_lbl(out, d, tab, cs + 1, ce - cs - 1);
+    d = em_mov_rr(out, d, RSP, RBX, 1);
     // **返回值照旧落回目标槽** —— 与内部调用同一步。少了这一句, 调用结果**丢掉**, 后面
     // 读到的是那个槽的旧值: 症状是"程序能跑、结果是假 0" (参考侧实测第一版就是这样:
     // `c_add(3,4) + c_mul(5,6)` 退出码 0 而不是 37)。
@@ -2854,8 +2894,33 @@ fn do_call_extern(tab: ptr, out: ptr, c: u32, t: ptr, lp: u32, rp: u32, nargs: u
 
 /// 读 `path` 那个 `.o`, 把它的代码节接到代码缓冲之后, 并为它导出的符号立标签。
 /// 返回新的代码缓冲游标。四条边界都是**硬失败** (与参考实现同口径, docs/173 §3)。
-fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr,
-               ap: u32) -> u32 {
+/// 这个节是不是"**要处理的**重定位节"：SHT_RELA、非空、而且**被重定位的那个节不是
+/// 元数据节**。
+///
+/// 元数据节（`.eh_frame` / `.debug*` / `.comment` / `.note`）我们**不摆**，代码也引用不到
+/// 它们 —— 它们上面的重定位**丢掉无损**。这与参考实现 `_META_SEC` 那条一一对应。
+///
+/// ⚠ **不排除的话，自举侧会硬拒任何一个 clang 编出来的 `.o`**：它们都带
+/// `.rela.eh_frame`。参考侧照收、自举侧当场报"重定位指向非代码节" —— 两侧在
+/// "能链什么"上直接分叉（`FujoJTOP/loment#359` 实测到的第二条不一致）。
+///
+/// ⚠ 类型与长度先判、再去读 `sh_info` —— **不靠 `&&` 短路**（自举侧两个操作数都会被求值，
+/// 于是 `sec_name` 会拿着一个非 RELA 节的 `sh_info` 去读名字）。
+fn is_rela_to_lay(raw: ptr, k: u32, ns: u32) -> u32 {
+    if sh_type(raw, k) != 4 { return 0; }
+    if sh_size(raw, k) == 0 { return 0; }
+    let tgt: u32 = sh_info(raw, k);
+    if tgt >= ns { return 1; }              // 越界的目标：留给原来那条错误分支去报
+    if is_meta_sec(raw, sec_name(raw, tgt)) == 1 { return 0; }
+    return 1;
+}
+
+/// 读一个 `--link` 文件进缓冲，返回字节数。**读不了就死在这里**（名字说到 `path` 上）——
+/// 所以返回值永远是"真的读到了这么多"。
+///
+/// 与"这个文件是什么"分开（`peek_vs_obj` / `check_obj`）：归档与目标文件都要先读进来才能
+/// 看魔数，两者读法一模一样。
+fn read_link_file(path: ptr, buf: ptr, cap: u32) -> u32 {
     let fd: i64 = open_ro(path);
     if fd < 0 {
         wstr(2, "lomelf: 打不开外部目标文件: ");
@@ -2863,7 +2928,7 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr,
         wstr(2, "\n");
         return die(1);
     }
-    let rn: u64 = read_all(fd as u64, mem, OBJ_CAP as u64);
+    let rn: u64 = read_all(fd as u64, buf, cap as u64);
     syscall4(3, fd as u64, 0, 0);
     if rn == 0 {
         wstr(2, "lomelf: 外部目标文件为空: ");
@@ -2871,12 +2936,37 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr,
         wstr(2, "\n");
         return die(1);
     }
-    if rn >= (OBJ_CAP as u64) {
+    if rn >= (cap as u64) {
         wstr(2, "lomelf: 外部目标文件超过 4 MiB 上限: ");
         write_cstr(2, path, 0);
         wstr(2, "\n");
         return die(1);
     }
+    return lo32(rn);
+}
+
+/// 这个文件是 `ar` 归档吗 —— 看**内容**不看后缀（`.a`/`.o`/无后缀在各家工具链里并不统一，
+/// 而两个魔数都极短且不可能互串）。参考实现 `load_foreign` 同一条。
+fn is_archive(mem: ptr, n: u32) -> u32 {
+    if n < 8 {
+        return 0;
+    }
+    if load8(mem, 0) != 33 || load8(mem, 1) != 60 {
+        return 0;
+    }
+    if load8(mem, 2) != 97 || load8(mem, 3) != 114 {
+        return 0;
+    }
+    if load8(mem, 4) != 99 || load8(mem, 5) != 104 || load8(mem, 6) != 62 {
+        return 0;
+    }
+    return 1;
+}
+
+/// 直接给的 `.o` 的校验（归档成员不在这里 —— 它们用不了时是**当它不在池子里**，
+/// 那是 `obj_usable` 的事）。三条判据与参考实现 `ForeignObject._load` 抛 `Unsupported`
+/// 的那几处逐字相同。
+fn check_obj(path: ptr, mem: ptr) -> u32 {
     if load8(mem, 0) != 127 || load8(mem, 1) != 69 || load8(mem, 2) != 76
         || load8(mem, 3) != 70 || load8(mem, 4) != 2 || load8(mem, 5) != 1 {
         wstr(2, "lomelf: 不是 ELF64 小端目标文件: ");
@@ -2896,6 +2986,17 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr,
         wstr(2, "\n");
         return die(1);
     }
+    return 0;
+}
+
+/// 摆一个**已经在内存里**的外部对象：代码节接在自己的代码之后、数据节接在数据段之后、
+/// 导出符号立标签、重定位登记下来（应用要等所有对象都摆好，见 `apply_relocs`）。
+///
+/// **归档成员走这里**（`docs/173` 阶段 2）：它们没有自己的文件，字节是从 `.a` 里拷进
+/// `M_OBJ` 的。与"从文件读"那一半（`link_object`）分开，是因为两处**只有读的那一段不同**
+/// —— 校验、摆节、立标签、端口门计数全在这一半里，两侧共用同一份（"逐条镜像"那条纪律：
+/// 多一份就是多一份要同时改的东西）。
+fn link_object_mem(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, ap: u32) -> u32 {
     // **未定义符号在这里不再是错误** (阶段 2): 它可能由**另一个对象**提供 —— 那正是多目标
     // 文件 C 库的形状 (`a.o` 调 `b.o`)。判定推迟到"所有对象都摆好、重定位都应用完"。
     // 之前那两段 (未定义就报错 / 见重定位就报错) 是在没有重定位能力时的硬拒; 现在两条都
@@ -3005,8 +3106,15 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr,
                                 nl = 4;
                                 setcell(tab, C_EXTN, put_secname(t, cur, oi, shndx));
                             } else {
-                                noff = copy_name(tab, t, mem, stro2 + nmoff2);
-                                nl = cstr_len(mem, stro2 + nmoff2);
+                                // **局部**（`bind == 0`）一律**按对象改名** —— 与参考实现
+                                // 同一条、与查找处同一个函数。见 `copy_local_name` 的说明。
+                                if bind == 0 {
+                                    noff = copy_local_name(tab, t, mem, stro2 + nmoff2, oi);
+                                    nl = cstr_len(mem, stro2 + nmoff2) + LOCAL_PREFIX;
+                                } else {
+                                    noff = copy_name(tab, t, mem, stro2 + nmoff2);
+                                    nl = cstr_len(mem, stro2 + nmoff2);
+                                }
                             }
                             if lbl_find(tab, t, noff, nl, 0, 0) == NO {
                                 let val: u32 = lo32(rd64(mem, o2 + 8));
@@ -3022,7 +3130,7 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr,
                     } else if shndx == 0 {
                         // **未定义符号**：数一条。只要有一条，这个对象就带着**通向世界的
                         // 端口**（`docs/222` §4 那一维的价）—— 那条路还没完工
-                        // （`docs/219` §8b 的 S2 还差三件），所以下面**默认拒**。
+                        // （`docs/219` §8b 的 S2），所以下面**默认拒**。
                         // **自闭合的对象走不到这里**：`docs/173` 一直在发的 FFI 形状、
                         // `docs/177` 那 10 个语言，对象里一条未定义符号都没有。
                         if nmoff2 != 0 && (bind == 1 || bind == 2) {
@@ -3052,7 +3160,7 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr,
     // 也拒 —— 本档不摆那些节, 静默算出来的地址是错的。
     let i5: u32 = 0;
     while i5 < ns {
-        if sh_type(mem, i5) == 4 && sh_size(mem, i5) > 0 {
+        if is_rela_to_lay(mem, i5, ns) == 1 {
             let tgt: u32 = sh_info(mem, i5);                  // sh_info = 被重定位的节
             let in_data: u32 = 0;
             if tgt < ns && is_data_sec(mem, tgt) == 1 {
@@ -3098,8 +3206,15 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr,
                     nlen3 = 4;
                     setcell(tab, C_EXTN, put_secname(t, cur, oi, rd16(mem, symoff + 6)));
                 } else {
-                    nlen3 = cstr_len(mem, stro3 + nmoff3);
-                    noff3 = copy_name(tab, t, mem, stro3 + nmoff3);
+                    // **与登记处同一套**：局部符号按对象改名（`bind` 在符号记录的第 4 字节
+                    // 高 4 位）。两处必须一致，否则查不到 —— 见 `copy_local_name`。
+                    if (load8(mem, symoff + 4) as u32) / 16 == 0 {
+                        nlen3 = cstr_len(mem, stro3 + nmoff3) + LOCAL_PREFIX;
+                        noff3 = copy_local_name(tab, t, mem, stro3 + nmoff3, oi);
+                    } else {
+                        nlen3 = cstr_len(mem, stro3 + nmoff3);
+                        noff3 = copy_name(tab, t, mem, stro3 + nmoff3);
+                    }
                 }
                 let fi: u32 = cell(tab, C_NFREL);
                 let fb: u32 = TB_FREL + fi * 32;
@@ -3118,6 +3233,304 @@ fn link_object(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, mem: ptr, path: ptr,
         i5 = i5 + 1;
     }
     return dd;
+}
+
+// ---------------------------------------------------------------- ar 归档 (docs/173 阶段 2)
+
+/// `ar` 归档里挑成员 —— **定点选择**，与参考实现 `Archive.select` 逐条同义
+/// （`docs/219` §8b 的 S2；`FujoJTOP/loment#405`）。
+///
+/// 规则：某成员**定义**了当前需要集里的某个符号就收它，收完把它**未定义**的符号也加进
+/// 需求，重复到不再变化。**不整包收** —— 整包收会把 `gz*` 那些成员的 `fopen`/`printf`
+/// 一并拖进来，于是端口门把**整个库**拒掉。真库里几乎总有那么一两个成员带着无关的 libc
+/// 依赖，所以"多目标文件 C 库"这条判据能不能过，就看这一条选得对不对。
+///
+/// **三件事要按参考实现的那个次序来**（次序不同，产物就不同）：
+///   ① 需要集从一开始就是 `IR 里 declare 的外部符号 ∪ 直接给的 .o 的未定义符号`；
+///   ② 每一趟**按归档顺序**扫还没被收的成员；
+///   ③ 被收下的成员**按收下的次序**排（不是按归档里的次序）。
+///
+/// 名字一律先拷进名字池（`copy_name`）再进需要集：成员的名字活在归档缓冲里，而下一趟
+/// 拷成员进 `M_OBJ` 就会把它盖掉。
+fn need_add(tab: ptr, t: ptr, noff: u32, nlen: u32) {
+    let k: u32 = cell(tab, C_NNEED);
+    if k >= NEED_MAX {
+        // 点名拒（"超限报错退出，绝不静默丢"）。真库的需要集是几十个量级；到这里说明
+        // 来的不是"一个库"，那也不该悄悄少挑几个成员。
+        let _f: u32 = fail("lomelf: 需要集超过上限 (NEED_MAX)");
+    }
+    let base: u32 = TB_NEED + k * 8;
+    store32(tab, base + E_NOFF, noff);
+    store32(tab, base + E_NLEN, nlen);
+    setcell(tab, C_NNEED, k + 1);
+}
+
+/// 两个**不同缓冲**里的名字相等吗。`span_eq` 只在**同一个**缓冲里比，而"需要集"的名字
+/// 住在输入缓冲（名字池）里、"成员"的名字住在 `M_OBJ` 里 —— 两边不同缓冲，拿 `span_eq`
+/// 去比就是拿 `M_OBJ` 的偏移去索引输入缓冲：**实测**它一个成员都挑不出来（症状是
+/// "未定义的标签: compress"，而归档那一段一句话都没说）。
+fn nm_eq(pa: ptr, a: u32, alen: u32, pb: ptr, b: u32, blen: u32) -> u32 {
+    if alen != blen {
+        return 0;
+    }
+    let k: u32 = 0;
+    while k < alen {
+        if load8(pa, a + k) != load8(pb, b + k) {
+            return 0;
+        }
+        k = k + 1;
+    }
+    return 1;
+}
+
+fn need_has(tab: ptr, t: ptr, noff: u32, nlen: u32) -> u32 {
+    let k: u32 = 0;
+    let n: u32 = cell(tab, C_NNEED);
+    while k < n {
+        let base: u32 = TB_NEED + k * 8;
+        if span_eq(t, load32(tab, base + E_NOFF), load32(tab, base + E_NLEN), noff, nlen) == 1 {
+            return 1;
+        }
+        k = k + 1;
+    }
+    return 0;
+}
+
+/// 把一个名字从**别的缓冲**（`p`）拷进名字池再加进需要集 —— 成员的名字都在归档缓冲或
+/// `M_OBJ` 里，两者都会被下一趟覆盖。
+fn need_add_ptr(tab: ptr, t: ptr, p: ptr, off: u32) {
+    let nlen: u32 = cstr_len(p, off);
+    let noff: u32 = copy_name(tab, t, p, off);
+    need_add(tab, t, noff, nlen);
+}
+
+/// 需要集的**起点**：这份 IR 里 `declare` 的那些外部符号（`TB_EXT` 里已经有它们了 ——
+/// 参考实现同一个来源：`{x for x in externs if not x.startswith("llvm.")}`）。
+fn need_from_externs(tab: ptr, t: ptr) {
+    let k: u32 = 0;
+    let n: u32 = cell(tab, C_NEXT);
+    while k < n {
+        let base: u32 = TB_EXT + k * 8;
+        need_add(tab, t, load32(tab, base + E_NOFF), load32(tab, base + E_NLEN));
+        k = k + 1;
+    }
+}
+
+/// 一个成员（或直接给的 `.o`）**能不能用**：与参考实现 `ForeignObject._load` 抛
+/// `Unsupported` 的那几处同一条判据（ELF64 小端、`ET_REL`、有代码节）。用不了的在定点那
+/// 一趟里**当它不在池子里** —— 参考实现就是 `except Unsupported: continue`。
+fn obj_usable(mem: ptr) -> u32 {
+    if load8(mem, 0) != 127 || load8(mem, 1) != 69 || load8(mem, 2) != 76 {
+        return 0;
+    }
+    if load8(mem, 3) != 70 || load8(mem, 4) != 2 || load8(mem, 5) != 1 {
+        return 0;
+    }
+    if rd16(mem, 16) != 1 {
+        return 0;
+    }
+    return has_code(mem);
+}
+
+/// 扫一个对象的符号表：**是否定义了需要集里的某个符号**（定义在代码节里的 GLOBAL/WEAK，
+/// 与参考实现的 `syms` 同一个口径），顺带（`add`）把它的**未定义**符号加进需要集
+/// （GLOBAL/WEAK 且 `shndx == 0`，与 `undefined` 同一个口径）。
+///
+/// 两者放在一趟里，是因为两处在符号表上的走法**逐字相同** —— 分成两个函数就是两份要走偏
+/// 的代码，而这个文件里"两份要走偏的代码"正是判据要挡的东西。
+fn obj_syms(tab: ptr, t: ptr, mem: ptr, add: u32) -> u32 {
+    let ns: u32 = sh_num(mem);
+    let hit: u32 = 0;
+    let i4: u32 = 0;
+    while i4 < ns {
+        if sh_type(mem, i4) == 2 {
+            let link2: u32 = sh_link(mem, i4);
+            if link2 < ns {
+                let stro2: u32 = sh_off(mem, link2);
+                let so2: u32 = sh_off(mem, i4);
+                let cnt2: u32 = sh_size(mem, i4) / 24;
+                let k2: u32 = 0;
+                while k2 < cnt2 {
+                    let o2: u32 = so2 + k2 * 24;
+                    let nmoff2: u32 = load32(mem, o2);
+                    let shndx: u32 = rd16(mem, o2 + 6);
+                    let bind: u32 = (load8(mem, o2 + 4) as u32) / 16;
+                    if nmoff2 != 0 && (bind == 1 || bind == 2) {
+                        if shndx == 0 {
+                            if add == 1 {
+                                let uoff: u32 = copy_name(tab, t, mem, stro2 + nmoff2);
+                                let ulen: u32 = cstr_len(mem, stro2 + nmoff2);
+                                if need_has(tab, t, uoff, ulen) == 0 {
+                                    need_add(tab, t, uoff, ulen);
+                                }
+                            }
+                        } else if shndx < ns {
+                            if sh_type(mem, shndx) == 1
+                                && is_code_sec(mem, sec_name(mem, shndx)) == 1 {
+                                // **只在名字对得上时才拷**：这一趟是热路径上的，
+                                // 每个成员几十条符号。
+                                let dlen: u32 = cstr_len(mem, stro2 + nmoff2);
+                                let k3: u32 = 0;
+                                let nn: u32 = cell(tab, C_NNEED);
+                                while k3 < nn {
+                                    let b3: u32 = TB_NEED + k3 * 8;
+                                    let poff: u32 = load32(tab, b3 + E_NOFF);
+                                    let plen: u32 = load32(tab, b3 + E_NLEN);
+                                    if nm_eq(t, poff, plen, mem, stro2 + nmoff2, dlen) == 1 {
+                                        hit = 1;
+                                    }
+                                    k3 = k3 + 1;
+                                }
+                            }
+                        }
+                    }
+                    k2 = k2 + 1;
+                }
+            }
+        }
+        i4 = i4 + 1;
+    }
+    return hit;
+}
+
+/// `ar` 头：60 字节，长度在 48..58（十进制文本）、以 `` `\n ``（0x60 0x0A）收尾。
+/// 返回 `下一成员头 << 32 | 成员长度`；**走到了尾返回 0**。
+///
+/// 两种"不对"要分开：**尾**（`pos + 60 > n`，返回 0，调用方收工）与**头损坏**（还在中间
+/// 却不以 `` `\n `` 收尾、或长度不是数字）—— 后者**点名拒**，与参考实现
+/// `归档成员头损坏` / `归档成员长度不是数字` 同一处置（静默停下会让"少摆几个成员"以
+/// "未定义的标签"的形式在**别处**冒出来，方向就错了）。
+fn ar_member(mem: ptr, pos: u32, n: u32) -> u64 {
+    if pos + 60 > n {
+        return 0;
+    }
+    if load8(mem, pos + 58) != 96 || load8(mem, pos + 59) != 10 {
+        let _f: u32 = fail("lomelf: 归档成员头损坏（不以 `\\n 收尾）");
+    }
+    // 长度格是十进制文本，填法是空格；**两边的空格都跳**（GNU 右填、别的实现左填），
+    // 与参考实现的 `int(s.strip())` 同一个宽容度。
+    let s0: u32 = pos + 48;
+    let s1: u32 = s0 + 10;
+    let sz: u32 = 0;
+    let nd: u32 = 0;
+    let d: u32 = s0;
+    while d < s1 {
+        let c: u32 = load8(mem, d);
+        if c >= 48 && c <= 57 {
+            sz = sz * 10 + (c - 48);
+            nd = nd + 1;
+        }
+        d = d + 1;
+    }
+    if nd == 0 {
+        let _f: u32 = fail("lomelf: 归档成员长度不是数字");
+    }
+    // 数据按**偶数**对齐：奇数长度补一个字节（ar 的规定，不是我们挑的）。
+    // 打包：高 32 位 = **下一成员头**的位置，低 32 位 = 成员长度（不含那个填充字节）。
+    // 数据起点不放进包里 —— 调用方手里就有 `pos`，`pos + 60` 比解包更省。
+    return ((pos + 60 + sz + (sz % 2)) as u64) * 4294967296 + sz as u64;
+}
+
+/// **挑成员并摆**（`docs/173` 阶段 2，`FujoJTOP/loment#405`）：定点选择，再按**挑中的次序**
+/// 逐个摆。字节已经在 `arb` 里（调用方读过 —— 归档先读进 `M_OBJ` 看魔数，是归档再拷进
+/// `M_AR`：`M_OBJ` 要留给成员自己，每个成员都要拷进去，那一整套 ELF 助手才用得上）。
+fn link_archive(tab: ptr, t: ptr, txt: ptr, gb: ptr, d: u32, objs: ptr, arb: ptr,
+                an: u32, ap: u32) -> u32 {
+    // ---- 定点：反复扫整包，收"定义了需要集里某个符号"的成员，直到一趟收不到新的。
+    // **一趟里按归档顺序收**、被收下的按收下的次序排 —— 与参考实现 `Archive.select` 的
+    // 那两层循环逐条同义（次序不同，产物就不同）。
+    let seen: u32 = 0;
+    let changed: u32 = 1;
+    while changed == 1 {
+        changed = 0;
+        let pos: u32 = 8;
+        let go: u32 = 1;
+        while go == 1 {
+            let pack: u64 = ar_member(arb, pos, an);
+            if pack == 0 {
+                go = 0;
+            } else {
+                seen = seen + 1;
+                let doff: u32 = pos + 60;
+                let dlen: u32 = lo32(pack);
+                if ar_is_elf(arb, doff) == 1 {
+                    if ar_taken(tab, doff) == 0 {
+                        // 成员拷进 `M_OBJ` 再扫 —— 那一整套 ELF 助手都按"对象在缓冲起点"
+                        // 写的，参数化它们要动几十处调用点。
+                        if dlen >= OBJ_CAP {
+                            let _f: u32 = fail("lomelf: 归档成员超过 4 MiB 上限");
+                        }
+                        copy_n(objs, 0, arb, doff, dlen);
+                        if obj_usable(objs) == 1 {
+                            if obj_syms(tab, t, objs, 0) == 1 {
+                                ar_take(tab, doff, dlen);
+                                let _u: u32 = obj_syms(tab, t, objs, 1);
+                                changed = 1;
+                            }
+                        }
+                    }
+                }
+                pos = hi32(pack);
+            }
+        }
+    }
+    // **空归档**是错（参考实现：`归档里没有成员`），而"一个都没挑中"**不是** ——
+    // 那说明这份归档里没有这个程序要的东西，后面按"未定义的标签"报出来，方向才对。
+    if seen == 0 {
+        wstr(2, "lomelf: 归档里没有成员\n");
+        return die(1);
+    }
+    // ---- 按**挑中的次序**摆（`TB_MEM` 里登记的就是那个次序）。
+    let nmem: u32 = cell(tab, C_NMEM);
+    let i: u32 = 0;
+    let nd: u32 = d;
+    while i < nmem {
+        let base: u32 = TB_MEM + i * 8;
+        let doff2: u32 = load32(tab, base + E_NOFF);
+        let dlen2: u32 = load32(tab, base + E_NLEN);
+        if dlen2 >= OBJ_CAP {
+            let _f: u32 = fail("lomelf: 归档成员超过 4 MiB 上限");
+        }
+        copy_n(objs, 0, arb, doff2, dlen2);
+        nd = link_object_mem(tab, t, txt, gb, nd, objs, ap);
+        i = i + 1;
+    }
+    return nd;
+}
+
+fn ar_is_elf(arb: ptr, off: u32) -> u32 {
+    if load8(arb, off) != 127 || load8(arb, off + 1) != 69 {
+        return 0;
+    }
+    if load8(arb, off + 2) != 76 || load8(arb, off + 3) != 70 {
+        return 0;
+    }
+    return 1;
+}
+
+/// 这个成员已经被挑过了吗（`TB_MEM` 里按数据起点查 —— 一趟里同一个起点只可能出现一次）。
+fn ar_taken(tab: ptr, doff: u32) -> u32 {
+    let i: u32 = 0;
+    let n: u32 = cell(tab, C_NMEM);
+    while i < n {
+        let base: u32 = TB_MEM + i * 8;
+        if load32(tab, base + E_NOFF) == doff {
+            return 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn ar_take(tab: ptr, doff: u32, dlen: u32) {
+    let k: u32 = cell(tab, C_NMEM);
+    if k >= MEM_MAX {
+        let _f: u32 = fail("lomelf: 归档挑中的成员超过上限 (MEM_MAX)");
+    }
+    let base: u32 = TB_MEM + k * 8;
+    store32(tab, base + E_NOFF, doff);
+    store32(tab, base + E_NLEN, dlen);
+    setcell(tab, C_NMEM, k + 1);
 }
 
 /// 应用外部目标文件的全部重定位。**必须在所有对象都摆好、标签都立好之后**跑 (docs/173 阶段 2)。
@@ -3176,6 +3589,39 @@ fn apply_relocs(tab: ptr, t: ptr, txt: ptr, gb: ptr) -> u32 {
 }
 
 /// 把外部符号名拷进输入缓冲尾部的名字池, 返回它在 `t` 里的偏移。
+/// 把一个**局部**符号名按对象改名后放进名字池（`$` + 4 字节对象号 + 原名），返回**起点**。
+///
+/// **为什么必须改**（2026-10-15，`FujoJTOP/loment#359`）：`.LC0` / `.L.str` / `my_version`
+/// 这种局部名字**每个成员里都有**，而标签表是**按名字**查的、而且"先来的为准" —— 不改名时，
+/// 第二个成员的 `.LC0` 会解析到**第一个成员的** `.LC0` 上：**静默指错地址**，不报任何错。
+/// 实测：zlib 的 `deflate.o` 排在 `zutil.o` 之前时，`zlibVersion()` 返回的指针就落到
+/// deflate.o 的常量上。与上面那条节符号**同一个道理**（S1f 当时只修了节符号）。
+///
+/// ⚠ **登记处与查找处必须用这同一个函数**（`link_object` 与 `apply_relocs` 各一处）——
+/// 只改一半的症状是"查不到"，与"静默指错"是两种不同的坏。
+///
+/// 前缀是**二进制**（不是十进制文本）：名字池里的条目是**按长度**比的（`lbl_find` 走
+/// `span_eq`），不靠 NUL 结尾，所以这里怎么高效怎么来。前缀 1+4 字节 = `LOCAL_PREFIX`。
+fn copy_local_name(tab: ptr, t: ptr, p: ptr, off: u32, oi: u32) -> u32 {
+    let cur: u32 = cell(tab, C_EXTN);
+    let n: u32 = cstr_len(p, off);
+    if cur + n + LOCAL_PREFIX >= IN_CAP {
+        return fail("输入缓冲没有空间放外部符号名");
+    }
+    store8(t, cur, 36 as u8);
+    store8(t, cur + 1, (oi % 256) as u8);
+    store8(t, cur + 2, ((oi / 256) % 256) as u8);
+    store8(t, cur + 3, ((oi / 65536) % 256) as u8);
+    store8(t, cur + 4, ((oi / 16777216) % 256) as u8);
+    let k: u32 = 0;
+    while k < n {
+        store8(t, cur + LOCAL_PREFIX + k, load8(p, off + k) as u8);
+        k = k + 1;
+    }
+    setcell(tab, C_EXTN, cur + LOCAL_PREFIX + n);
+    return cur;
+}
+
 fn copy_name(tab: ptr, t: ptr, p: ptr, off: u32) -> u32 {
     let cur: u32 = cell(tab, C_EXTN);
     let n: u32 = cstr_len(p, off);
@@ -4248,11 +4694,56 @@ fn run(mem: ptr) -> u32 {
     }
     // 外部目标文件 (docs/173): 代码节接在我们自己的代码之后, **数据节接在数据段之后**,
     // 导出符号立标签。
+    //
+    // **两趟**（`FujoJTOP/loment#405`）。参考实现在 `compile_ll` 里就是这个次序，
+    // 次序不同产物就不同：
+    //   ① **需要集**：这份 IR 里 `declare` 的外部符号 ∪ 直接给的 `.o` 的未定义符号
+    //      —— 归档的定点选择要它（"我的 a.o 引用归档成员里的 b"正是靠这一条接上的）；
+    //   ② 先按参数顺序**摆直接对象**，再按同样顺序**处理归档** —— 参考实现那份是
+    //      `flat = list(direct) + 各归档挑出来的成员`，**直接对象一律排在归档前面**。
     let tobj: ptr = ptr_add(mem, M_OBJ);
+    let arb: ptr = ptr_add(mem, M_AR);
     let got: u32 = 0;
-    while got < nlink {
-        tlen = link_object(tab, inb, txt, gb, tlen, tobj, ptr_add(pbuf, obase + got * 1024), ap);
-        got = got + 1;
+    if nlink != 0 {
+        need_from_externs(tab, inb);
+        while got < nlink {
+            let p0: ptr = ptr_add(pbuf, obase + got * 1024);
+            let ln0: u32 = read_link_file(p0, tobj, OBJ_CAP);
+            if is_archive(tobj, ln0) == 0 {
+                check_obj(p0, tobj);          // 不是归档就得是能用的 `.o`（否则拒在这里）
+                let _u: u32 = obj_syms(tab, inb, tobj, 1);
+            }
+            got = got + 1;
+        }
+        // ① 直接对象
+        got = 0;
+        while got < nlink {
+            let p0: ptr = ptr_add(pbuf, obase + got * 1024);
+            let ln1: u32 = read_link_file(p0, tobj, OBJ_CAP);
+            if is_archive(tobj, ln1) == 0 {
+                check_obj(p0, tobj);
+                tlen = link_object_mem(tab, inb, txt, gb, tlen, tobj, ap);
+            }
+            got = got + 1;
+        }
+        // ② 归档：整包读进 `M_AR`（成员要一个个拷进 `M_OBJ` 再摆），定点挑成员再摆。
+        got = 0;
+        while got < nlink {
+            let ln2: u32 = read_link_file(ptr_add(pbuf, obase + got * 1024), tobj, OBJ_CAP);
+            if is_archive(tobj, ln2) == 1 {
+                copy_n(arb, 0, tobj, 0, ln2);
+                tlen = link_archive(tab, inb, txt, gb, tlen, tobj, arb, ln2, ap);
+            }
+            got = got + 1;
+        }
+    }
+    // **文本段满了就点名退出**（`docs/247`，2026-10-16）。数据段钉在 `TEXT_VADDR + OUT_CAP`，
+    // 所以文本一旦超过 `OUT_CAP` 就会盖到数据段上 —— 而原先**盖上去不报错**：产物一启动
+    // 就段错误（0 字节输出），看起来像编译器坏了。与 `TB_LBL_MAX` / `TB_FIX_MAX` / `IN_CAP`
+    // 那几条守卫同一个纪律：**满了就说出来，不往下写**。参考实现 `tools/lomelf.py` 的
+    // `compile_ll` 末尾同一条、同一个数（那边的常量叫 `TEXT_CAP`）。
+    if tlen > OUT_CAP {
+        let _f: u32 = fail("文本段满了 — 抬 OUT_CAP (loment/tools/lomelf.lomt) 与 tools/lomelf.py 的 TEXT_CAP/ELF_DATA_VADDR");
     }
     // **bss 的地址与标签必须等到这里**（`docs/219` §8b 第 1 条）—— 位置见 `place_bss`。
     // **TLS 块**（`docs/219` S2）：接在对象数据之后、与参考实现同一处、同样 256 字节。
