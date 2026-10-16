@@ -2523,7 +2523,7 @@
   },
   {
    "path": "tools/loment_ffi_test.py",
-   "sha256": "2d70504a26a3db35b6b8b496cd0f088a6173205a983cb8fd8d1efc4f2690bc5d"
+   "sha256": "3ddcc584ecd3f7fc4586a2b091cf0c9101f29ef96ce82053f95a8fc5fd5af24c"
   },
   {
    "path": "tools/loment_hosted_test.py",
