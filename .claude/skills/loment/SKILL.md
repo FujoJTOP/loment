@@ -303,13 +303,13 @@ fn _start() {
 
 Running it should print `42 10 9 6 2 3` and `TOUR RESULT: PASS`.
 
-> **On a machine with only the package, `tour` does not link today** - and the reason is **not**
-> the one this note used to give. By-value `struct` / `enum` arguments compile and run fine now
-> (measured: a two-field struct passed by value builds and returns the right answer). What stops
-> it is the **`capability` declaration**: a unit that declares a capability fails in
-> `loment-lomelf` with `Illegal instruction`, while `loment check` and `loment ir` pass. That is
-> a defect in the linker, not a rule of the language, and it means the one feature Loment adds
-> cannot currently produce an executable (6.3).
+> **`tour` links and runs on the packaged toolchain** (measured 2026-10-16, `0.1.4.5-quickfix`:
+> `loment build tour.lomt`, then run the ELF) - it prints `42 10 9 6 2 3` and
+> `TOUR RESULT: PASS`, exit 0. Two linker defects used to stop it: a 64-bit global crashed
+> `loment-lomelf` with `Illegal instruction`, and a multi-line case table made the backfill table
+> spin until it reported a "capacity" error. Both are fixed, and each has its own criterion. On
+> an **older** package `check` and `ir` pass and the build still fails - that is the old build,
+> not your program.
 >
 > **The `hello` skeleton above uses scalars, a string and syscalls only, so it runs inside the
 > package** - use it to confirm your environment before going further.
@@ -636,7 +636,7 @@ fn _start() {
 | `host` | The host side (needs syscalls): files, directories, argv, stat, logging | `fs` `io` `dir` `argv` `stat` `log` |
 
 - **One name-form `use` per unit is the limit today** - a second one fails, with a message that
-  names no file and no line (6.3.22). To pull in several modules, use the **path** form
+  names no file and no line (6.3.20). To pull in several modules, use the **path** form
   (`use "<prefix>/share/lompi/store/std/0.1.0/text.lomt"`), which has no such limit. **Take the
   modules one at a time; do not write a facade.**
 - `use std` exists but drags all 127 modules into **one unit**, and measured today it takes
@@ -733,7 +733,8 @@ are different things, and it is worth knowing which one you are looking at.
 
 1. **A `match` arm body is a block, not an expression.** `Kind::A => 0,` is not accepted; write
    `Kind::A => { return 0; }`. (At this commit the *checker* no longer rejects the expression
-   form, and what you get instead is a build failure from an unrelated linker limit - see 6.3.21.)
+   form, and what you get instead is a build failure from the linker - it stops on the value the
+   codegen emits for it, not on the `match`. Both implementations refuse it; write the block.)
 2. **Generic enum patterns use the monomorphised name.** When the matched value is
    `Result<i64, u32>`, `Result::Ok(v)` gives `E8 与主体枚举 Result_i64_u32 不符` (*does not match
    the subject enum*); the answer is **`Result_i64_u32::Ok(v)`**. Non-generic enums are written
@@ -841,28 +842,20 @@ are different things, and it is worth knowing which one you are looking at.
 These are defects rather than language rules, and each one is here because meeting it without
 knowing costs half a day.
 
-20. **A `capability` declaration alone stops `loment build`.** `check` passes, `ir` passes, and
-    the build fails inside `loment-lomelf` with `Illegal instruction` and no diagnostic of its
-    own. Measured on a five-line file whose only content is `module` + `capability slots :
-    disk[0..4] revocable` + a trivial `_start`. This is why the `tour` example in section 1 does
-    not link.
-21. **`lomelf`'s backfill table overflows on small programs**, with a message that tells the
-    reader to edit the compiler source: `loment: the backfill table is full -- raise TB_FIX_MAX
-    in loment/tools/lomelf.lomt`. A twelve-line enum plus `match` is enough to hit it.
-22. **A unit can carry only one name-form `use`.** The second one fails with
+20. **A unit can carry only one name-form `use`.** The second one fails with
     `loment: cannot open <garbage>` where the "path" is a fragment of your own
-    source - exit 1, no line. The path form `use "…/text.lomt"` has no such limit,
+    source - exit 1, no file name, no line. The path form `use "…/text.lomt"` has no such limit,
     so that is the workaround. A unit that carries imports also loses most of its string-literal
     capacity: measured, **eight ~34-byte literals** are enough to bring the compiler down with
     the same message, while a unit with no imports takes forty of them. The length of the store
     path matters too (five imports compile from a 90-character store root and fail at 91).
-23. **About 400 levels of nested blocks crash the compiler** with SIGSEGV and print nothing (200
+21. **About 400 levels of nested blocks crash the compiler** with SIGSEGV and print nothing (200
     levels are fine; the same file flattened into 400 sequential statements, which is bigger,
     compiles). A generated parser table or a long `if`/`else if` chain can reach that by accident.
-24. **A `.lomt` file with no `module` declaration crashes the compiler driver** with SIGSEGV and
+22. **A `.lomt` file with no `module` declaration crashes the compiler driver** with SIGSEGV and
     no diagnostic. (A *missing* file, by contrast, gets a clear message - it is the broken unit
     that gets the silent crash.)
-25. **`use std` takes 18 minutes and then dies.** See 3.1.
+23. **`use std` takes 18 minutes and then dies.** See 3.1.
 
 ## 7. Two openings: your own extension, your own `loment` command
 
