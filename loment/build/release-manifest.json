@@ -811,7 +811,7 @@
   },
   {
    "path": "tools/loment_tools_test.py",
-   "sha256": "b82a2e9e9215b5805264327800bad627de71161aeb0557b612f3131c4ca89732"
+   "sha256": "cbe162e5743ad7d0f2c040e0fd52b5ce8d4f7d8c1ef240ee9d64ee0d97bbb941"
   },
   {
    "path": "tools/loment_boot.py",
@@ -875,7 +875,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "2e9dc72720b02d57e6923d12b05386e893f9160016b38dfeced677e0d9dac838"
+   "sha256": "fd89745f50a8438250d89ab156ae8af2b4d3d4de3d9a153402c9a73d49f0af1f"
   },
   {
    "path": "tools/loment_suite.py",
