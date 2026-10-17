@@ -799,11 +799,11 @@
   },
   {
    "path": "tools/loment_publish.py",
-   "sha256": "438926202bfeb76a07121fda59178b5bbe9dd4c93bd91999e964f10a15cbe6b2"
+   "sha256": "9e868ae7d9b12930c599187e1a19a0911db57974b04db05e2b3fb162bacc84ea"
   },
   {
    "path": "tools/lompicheck_test.py",
-   "sha256": "710adf5538424678378bdf042418ae111febc229711dfcd86f606a6e270c934a"
+   "sha256": "21da4c1de95e4603e78f6a2cb09025c45670875dc5d45d4209c4b7a7eac24828"
   },
   {
    "path": "tools/loment_register_test.py",
@@ -1311,7 +1311,7 @@
   },
   {
    "path": "loment/tools/lompicheck.lomt",
-   "sha256": "0921333d79765453c7169b63cf5248cae60a75f4ad5911f9153e11b5aea5e0ae"
+   "sha256": "bb7168e4fb9d5c3262fcbc3a6e8170a8b94289e3873eff8051560ad724c8deee"
   },
   {
    "path": "loment/tools/lompkg.lomt",
@@ -1379,7 +1379,7 @@
   },
   {
    "path": "editors/vscode/package.json",
-   "sha256": "4cd2ac57a631d5bee87a8d5e67a3f60d03bde99b2d39cd64b86403d12c91808b"
+   "sha256": "0b8e91241f13a0e03ff487ca0629cb95a1d6d14e740c0534c59292199af55a61"
   },
   {
    "path": "editors/vscode/language-configuration.json",
@@ -1391,7 +1391,7 @@
   },
   {
    "path": "editors/vscode/LICENSE",
-   "sha256": "1ffc3c55d5115fdfc52265d5ca499e081ff0ab1cff527fbbec82b5b4136d6f45"
+   "sha256": "c59612f6ab420c52cffed7913df6850ec47f4b289b21fff796bad80b54fc32e0"
   },
   {
    "path": "editors/vscode/loment-icon.png",
@@ -1399,7 +1399,7 @@
   },
   {
    "path": "editors/vscode/README.md",
-   "sha256": "f9252c0c254f5f6275536eae90ab0182e4879608caca1ad39ac6239e66d4cb3d"
+   "sha256": "34342d249b5dafe8ca3d4557390c45717bfd82c6677316cfa97334ff0c175108"
   },
   {
    "path": "editors/vscode/src/build-cmd.js",
@@ -2087,7 +2087,7 @@
   },
   {
    "path": "docs/171-loment-publish-outlets.md",
-   "sha256": "20981f3ea2a6add8ae74e774b9ec8e8a94d76c6185ac20f9ec39b0b4f4a9b04f"
+   "sha256": "b511bd23b3895de4a0eb92fab7fe8cf7caa034e644cfa0084f3886095f7839af"
   },
   {
    "path": "docs/172-loment-014-pre1.md",
@@ -2424,6 +2424,10 @@
   {
    "path": "docs/253-loment-memory-safety.md",
    "sha256": "018765774c84e22600ff3a2fb2b77bd23aba397e4372b0c3eb7ab66ac5524cbb"
+  },
+  {
+   "path": "docs/255-org-loment-lang.md",
+   "sha256": "db23eb6658fa8bf41d08fb692f0d1a5d7c6d5efb406f9bfa7185075a5ec6ac7d"
   },
   {
    "path": "docs/manual/index.md",
