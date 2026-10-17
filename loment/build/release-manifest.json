@@ -15,11 +15,11 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "d7688c3ad12724e6907b431169388fd59d5354d90544e676ad2c6fe69106bd55"
+   "sha256": "7d618629169f46232ff6d0b565a76bad492fccb0c945a585a058626bc193bf1d"
   },
   {
    "path": "tools/lomentc_test.py",
-   "sha256": "55b04f3d0cbe454a7feb8e191b1b3b942bf6a7c4ea38def98a8e59eeaa22d7a5"
+   "sha256": "4dd1163ef9622144e5dba10f73d4d2de39015b42054480653eb42b3f25047c77"
   },
   {
    "path": "tools/potato.py",
@@ -56,22 +56,6 @@
   {
    "path": "tools/lomfmt.py",
    "sha256": "57bd141d9c127d195886b7d8966d15e490d625e1752b5199b16087ad5304d0f9"
-  },
-  {
-   "path": "tools/lomf.py",
-   "sha256": "796f452cea51a35628e75f9302481c962cf71314b8068b2913a71a1011eff013"
-  },
-  {
-   "path": "loment/patches/0001-runtime-refusal-is-its-own-code.lomf",
-   "sha256": "1e433c6f0fad974a300df9a943512b324bf34d07774fde76d67eb19140e1d4b9"
-  },
-  {
-   "path": "loment/patches/0002-literal-index-is-a-language-rule.lomf",
-   "sha256": "0459ce79ff5b4fc4fd9a2de54e631e88f898f52c685303518b59298bc345e9ad"
-  },
-  {
-   "path": "loment/patches/0003-capacities-speak.lomf",
-   "sha256": "b462d5c29dc4cb42bb4fa15f28fe921b27da0c8440daacef1710a058156ea4e1"
   },
   {
    "path": "tools/lomdoc.py",
@@ -119,11 +103,11 @@
   },
   {
    "path": "tools/loment_caps.py",
-   "sha256": "9ae5cd98a71adb7661c0bfea057df5f4525064274a81738dd9f7da8eb8bfbd20"
+   "sha256": "42473d8bdb707912410cbace9be374fb45bc602063f91e80b70bf83ef2145c11"
   },
   {
    "path": "tools/loment_caps_test.py",
-   "sha256": "645d73c5100e021d9ccd1a4a99a4bc24c31a8ebd7e26d0a63c9c6a6002f22287"
+   "sha256": "39501854cee5c3eb75c05f2c24b5fc0e51f07ecfa8fd70384593c5e913a8cdea"
   },
   {
    "path": "tools/loment_err_test.py",
@@ -827,7 +811,7 @@
   },
   {
    "path": "tools/loment_diag.py",
-   "sha256": "8f8694248df2828d6e76d07b433e4bf6ee7a2030425b1de8bdd2509f32fb576e"
+   "sha256": "671317c63034ec3972a631e5f59df16cb7df80eceeebfaff4689924b05568f7e"
   },
   {
    "path": "tools/loment_build.py",
@@ -839,7 +823,7 @@
   },
   {
    "path": "tools/loment_tools_test.py",
-   "sha256": "ecf2bd2537b21071b2f8c5a6b4beb4f33329ba4bfb0abb63dda9af6ca9bd9634"
+   "sha256": "f8710479298dd9674c692d99185423f7414a9ba1fd447b88081117ee1cff375f"
   },
   {
    "path": "tools/loment_boot.py",
@@ -1247,7 +1231,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "58b4fc6eb2a2c99fa8bdda88c66dd5c3fe703b560e522e1fa76f48afc2f42339"
+   "sha256": "f203e6808556237875a8f2e42704990ff1d0ba3d38ef46c39e3b64cafa4c4c68"
   },
   {
    "path": "loment/build/genesis/SHA256SUMS",
@@ -1343,7 +1327,7 @@
   },
   {
    "path": "loment/tools/lomrel.lomt",
-   "sha256": "1206ca313636082d73fb5ca0acb109c63e7bda48c809f84c2fe37b03d5c8e4a9"
+   "sha256": "6f6d9d1560f2ffc3be5dd8b51eb09c7f60de26cb540cbbd064115947a3a528c5"
   },
   {
    "path": "loment/tools/lomstatus.lomt",
@@ -1383,7 +1367,7 @@
   },
   {
    "path": "loment/tools/surface_data.lomt",
-   "sha256": "5d0bc70ceefd0e086f06b2312df48fab753c2ab09be55190c166a27bc3ca8c40"
+   "sha256": "d2bde1ec5791dc876f30ba22564f7c591df4b2282c9ba0baf7f3786638ed814b"
   },
   {
    "path": "loment/tools/win_shim_data.lomt",
@@ -1843,11 +1827,11 @@
   },
   {
    "path": "loment/selfhost/checker.lomt",
-   "sha256": "8badfdc49baaf066538633fd9af6c69c45c1a38e182a35978db741a20bca4ac2"
+   "sha256": "8f819f26ceb277d1fc49566c0371d29ccba9487a1d6c87af9225f1f25fbe54ba"
   },
   {
    "path": "loment/selfhost/codegen.lomt",
-   "sha256": "c2e6a7f9ebd9ed04995446de574232d484b28f2997548778196ca09f733562ff"
+   "sha256": "58949af0baa8e25f255d67b90b14810243f25678d16c045ce681dc9934103e25"
   },
   {
    "path": "loment/selfhost/comefor.lomt",
@@ -1855,7 +1839,7 @@
   },
   {
    "path": "loment/selfhost/driver.lomt",
-   "sha256": "1f2a1be4918925d240b7ff9d0ee9b4c9b65c25b332602b28ece19cb119577fb2"
+   "sha256": "7e35cd57464b94ea95ee58e66138934f03ad045bb1d83390b1677bab168e2a2c"
   },
   {
    "path": "loment/selfhost/interp.lomt",
@@ -1979,7 +1963,7 @@
   },
   {
    "path": "docs/144-loment-native-backend.md",
-   "sha256": "7a63b48cf70cf59c4dc73806d22a06186fd2a3257a78445f80a068302aca8718"
+   "sha256": "6397a2932ed4e5eef1949d46c8c866ea3a389cac1d215b3c549df4e8665b97dd"
   },
   {
    "path": "docs/145-loment-100-milestones.md",
@@ -2227,7 +2211,7 @@
   },
   {
    "path": "docs/205-loment-015-alpha1-target.md",
-   "sha256": "fe76770c651ca5d8887fa9813d354b44a1c7389518d437083126274e1e708d9d"
+   "sha256": "f2714fc8863d23084f8dd62b73846c2cdb5f36e21d83f72efcc94129640d2448"
   },
   {
    "path": "docs/206-loment-ownership-boundary.md",
@@ -2315,7 +2299,7 @@
   },
   {
    "path": "docs/227-loment-runtime-dimension.md",
-   "sha256": "257cc9d8931082e70a13bf3f4125b568e7358b993ccb8bf838fb78f7f4e9b617"
+   "sha256": "8356fcc7ba28b26d1d01046a7c828affa096724dfd7a6ae88b2de48f088388fe"
   },
   {
    "path": "docs/228-grammar-semantics-audit.md",
@@ -2431,7 +2415,7 @@
   },
   {
    "path": "docs/251-capacities.md",
-   "sha256": "de4a3ec94d265d410f5570142ffeafe848f2d1c61d3ae7c7a30e33fd440186d9"
+   "sha256": "9a58aa203ec0740fb43c05f694c004151b1bcb18dd2ba0b8d5679c64cc6308e6"
   },
   {
    "path": "docs/252-lomelf-mirror-globals-and-switch.md",
@@ -2450,16 +2434,8 @@
    "sha256": "20ad398ebab275ed3c7f690fdffcb4fa3fe65b85a0ba2773d408adef9f8ddea1"
   },
   {
-   "path": "docs/256-loment-modification-files.md",
-   "sha256": "34cb3ea7fc88d1ec2f21e41ce14d6e5ceb8aaae22fd755fdb668974a7c3a3bdc"
-  },
-  {
-   "path": "docs/257-compiler-capacity-decision.md",
-   "sha256": "ae92f020e7504d3874ef118505c34413bd7d2fe7205d6b1e9fe97592d47f880b"
-  },
-  {
    "path": "docs/manual/index.md",
-   "sha256": "7892f20050c02512ef1b4653a6f56870f5f8854f12096f023af682319f621cb4"
+   "sha256": "86d88f9f5c39e64e35f8e73eca1f28c692fc99b4e5451cbac821f9f93cec0c6c"
   },
   {
    "path": "docs/manual/api/ahci.md",
@@ -2683,7 +2659,7 @@
   },
   {
    "path": "tools/loment_release.py",
-   "sha256": "334332019658d2787b089c390afc3ef192a0599e645f7d756654f313f1d7d7f7"
+   "sha256": "65841234c4110e40ae3b7cbe79d9763e70204174c5ae537e3f80bf6b0d4485bd"
   },
   {
    "path": "tools/loment_status.py",
