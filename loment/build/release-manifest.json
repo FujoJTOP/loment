@@ -2442,12 +2442,12 @@
    "sha256": "571b41ae55c42bc2a295ec6f45682cebb75d190858974270e127e494ee50683c"
   },
   {
-   "path": "docs/254-loment-modification-files.md",
-   "sha256": "7e1e4ac6d937f24a5f21e30c2c338393a5a5ea9f5a196d56093ec94d831b8fbf"
+   "path": "docs/255-loment-modification-files.md",
+   "sha256": "adf3a5ec13d9762dfa8989f84bad391f87b40ff8b1e9596e17e4ec161d589f4b"
   },
   {
-   "path": "docs/255-compiler-capacity-decision.md",
-   "sha256": "4c66fac6a48c5181eb7f8fa7b6e6f1338e687143b95e7a46a702c3c3bb996c4e"
+   "path": "docs/256-compiler-capacity-decision.md",
+   "sha256": "e96aa18e4da69559b7cf84e3e252becdf91b719047d89a8992b77ca73a75536b"
   },
   {
    "path": "docs/manual/index.md",
