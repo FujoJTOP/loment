@@ -1328,7 +1328,8 @@ MAXDEPTH = 8
 #:   * `gc`      —— `gc_manual` / `gc_auto` / `gc_auto_alpha`：回收由谁做（`docs/175` §3.4）；
 #:   * `runtime` —— `runtime` / `no_runtime`：产物里**有没有运行期**（`docs/175` §3.6）；
 #:   * `port`    —— `sealed` / `hosted`：产物**通不通着世界**（`docs/222` §4）；
-#:   * `vm`      —— `vm` / `no_vm`：**要哪种执行模型**（`docs/231`）。
+#:   * `vm`      —— `vm` / `no_vm`：**要哪种执行模型**（`docs/231`）；
+#:   * `lms`     —— `close` / `open`：**要不要内存安全**（`docs/253`）。
 #:
 #: `runtime` 的取值**刻意只说"有没有"**，不说"里面装了什么"：装的东西会随年份长
 #: （今天是收集器，明天可能是线程、宿主服务），把它钉进值名里，两年后加能力就得回头
@@ -1357,17 +1358,33 @@ CORE_DIMS: dict[str, tuple[str, ...]] = {
     # **它今天不提供任何东西**（没有字节码、没有解释器，`docs/231` §1.3），所以被**渠道闸**
     # 关在发行版外面（`_vm_gate` 那一段）：写得出、却什么也拿不到，比写不出来更坏。
     "vm": ("vm", "no_vm"),
+    # **内存安全**（`docs/253`，用户 2026-10-15 定第六维）。与 `gc` **正交** ——
+    # `gc` 管"谁归还"（生命周期的**内向可达**），这一维管"谁能碰"（许可的**外向**）；
+    # `docs/210` §6.2 那句"箭头反了"说的就是这两条是同一张图上的相反方向。
+    #
+    # `lms_close`（关）= 今天的形状，也是**默认** —— 默认档不许改变任何现有程序的行为。
+    # `lms_open`（开）= 检查器发 E024–E026，保障器**按站点分配**发内联界检查。
+    #
+    # **它不引入运行期组件**（`docs/253` §11.2）：四格落的都是**指令**
+    # （一条 `cmp` / 一个 `llvm.trap`），没有表、没有位图 —— 所以它与 `no_runtime`
+    # **不冲突**，`CORE_CONFLICTS` 里因此没有它。
+    # 取值**刻意不带机制名**：今天是边界检查，明天可能是派生指针追踪 ——
+    # 与 `runtime` / `vm` 同一条纪律，装的东西不进值名。
+    # **但带维名前缀**（`lms_*`，照 `gc_manual`/`gc_auto` 的先例）：`open` / `close`
+    # 单独太泛，而 `CORE_WORDS` 还兼管表层语法的 `choose` 行摘取。
+    "lms": ("lms_close", "lms_open"),
 }
 #: 冲突**两两查**时的维序。**写死的** —— 报错文本里两个取值的先后由它决定，
 #: 而两个实现比的是字节，所以它不能是集合迭代顺序。
-CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm")
+#: `lms` 排在最后：它**没有冲突对**，追加在尾部不会改动任何既有配对的先后。
+CORE_DIM_ORDER: tuple[str, ...] = ("mode", "gc", "runtime", "port", "vm", "lms")
 #: 所有核心模式的取值 —— "这一个 `choose` 是核心模式还是开关"就看它在不在这里面。
 CORE_WORDS = frozenset(w for _ws in CORE_DIMS.values() for w in _ws)
 #: 取值 → 属于哪一维（报错要说清是**哪一维**写了两次）。
 CORE_DIM_OF = {w: d for d, ws in CORE_DIMS.items() for w in ws}
 #: 每一维**不写**时的取值 —— 默认档，且默认**不改变任何现有程序的行为**。
 CORE_DEFAULTS = {"mode": "std", "gc": "gc_manual", "runtime": "no_runtime",
-                 "port": "sealed", "vm": "no_vm"}
+                 "port": "sealed", "vm": "no_vm", "lms": "lms_close"}
 #: 维的**人话**名字。报错要说清是**哪一维**写了两次 —— `gc` 对用户不是一个词，
 #: 而"核心模式只能声明一次"在有两维之后就**说不清是哪一维**了。
 CORE_DIM_ZH = {
@@ -1376,6 +1393,7 @@ CORE_DIM_ZH = {
     "runtime": "运行期（`runtime` / `no_runtime`）",
     "port": "对外端口（`sealed` / `hosted`）",
     "vm": "执行模型（`vm` / `no_vm`）",
+    "lms": "内存安全（`lms_close` / `lms_open`）",
 }
 #: **互相冲突的取值对**（`docs/175` §3.4 ⚠）。键是取值，值 = (和它冲突的取值, 为什么)。
 #: 报错要**点名这两档为什么冲突**，不能泛泛说"非法组合"（判据见 `docs/175` §3.4）。
@@ -2957,8 +2975,13 @@ def _check_borrows(args: list, line: int, errs: list[str]) -> None:
 
 
 def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[str, Struct],
-               errs: list[str], enums: dict[str, EnumDecl] | None = None) -> None:
-    """结构性问题 (未声明变量 / 未知函数 / 结构体字段 / 枚举变体) 的递归报告。"""
+               errs: list[str], enums: dict[str, EnumDecl] | None = None,
+               lms: bool = False) -> None:
+    """结构性问题 (未声明变量 / 未知函数 / 结构体字段 / 枚举变体) 的递归报告。
+
+    `lms`（`docs/253`）是**唯一一个"档"参数**：它开着时，`Index` 那一支多报一条 E028。
+    与 `enums` 同一条路数 —— 由 `check()` 从**根单元**的 `choose` 里读出来，一路传下去。
+    """
     enums = enums or {}
     if isinstance(e, (IntLit, BoolLit, StrLit)):
         return
@@ -2985,10 +3008,10 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             pt = ed.payloads[e.variant]
             if at is not None and at != pt:
                 errs.append(f"{e.line}: 载荷类型 {at}，声明为 {pt}")
-        _walk_expr(e.arg, scope, funcs, structs, errs, enums)
+        _walk_expr(e.arg, scope, funcs, structs, errs, enums, lms)
         return
     if isinstance(e, Cast):
-        _walk_expr(e.expr, scope, funcs, structs, errs, enums)
+        _walk_expr(e.expr, scope, funcs, structs, errs, enums, lms)
         st = expr_type(e.expr, scope, funcs, structs)
         if st == "ptr" and e.type in ("u64", "i64"):  # M67: 指针转整数
             return
@@ -3011,7 +3034,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
         errs.append(f"{e.line}: ? 只能用于 let 绑定 (let x: T = e?;)")
         return
     if isinstance(e, MethodCall):
-        _walk_expr(e.obj, scope, funcs, structs, errs, enums)
+        _walk_expr(e.obj, scope, funcs, structs, errs, enums, lms)
         ot = expr_type(e.obj, scope, funcs, structs)
         fn = funcs.get(f"{ot}_{e.name}") if ot else None
         if fn is None:
@@ -3019,7 +3042,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
         elif len(e.args) + 1 != len(fn.params):
             errs.append(f"{e.line}: 方法 {e.name} 需要 {len(fn.params) - 1} 个实参，得到 {len(e.args)}")
         for a in e.args:
-            _walk_expr(a, scope, funcs, structs, errs, enums)
+            _walk_expr(a, scope, funcs, structs, errs, enums, lms)
         return
     if isinstance(e, Call):
         if e.name == "slice_len":  # M3: 切片长度
@@ -3030,7 +3053,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                 if at is not None and not (_is_slice(at) or _is_array(at)):
                     errs.append(f"{e.line}: slice_len 实参 {at} 不是数组或切片")
             for a in e.args:
-                _walk_expr(a, scope, funcs, structs, errs, enums)
+                _walk_expr(a, scope, funcs, structs, errs, enums, lms)
             return
         if e.name in BUILTINS:
             want_t, _ret = BUILTINS[e.name]
@@ -3091,7 +3114,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                     else:
                         errs.append(f"{e.line}: {e.name} 实参类型 {at}，期望 {p.type}")
         for a in e.args:
-            _walk_expr(a, scope, funcs, structs, errs, enums)
+            _walk_expr(a, scope, funcs, structs, errs, enums, lms)
         return
     if isinstance(e, StructLit):
         st = structs.get(e.name)
@@ -3106,13 +3129,13 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             elif fn in got:
                 errs.append(f"{e.line}: 结构体 {e.name} 字段 {fn} 重复初始化")
             got.add(fn)
-            _walk_expr(fe, scope, funcs, structs, errs, enums)
+            _walk_expr(fe, scope, funcs, structs, errs, enums, lms)
         for fn in want:
             if fn not in got:
                 errs.append(f"{e.line}: 结构体 {e.name} 缺字段 {fn}")
         return
     if isinstance(e, FieldAccess):
-        _walk_expr(e.obj, scope, funcs, structs, errs, enums)
+        _walk_expr(e.obj, scope, funcs, structs, errs, enums, lms)
         ot = expr_type(e.obj, scope, funcs, structs)
         st = structs.get(ot) if ot else None
         if st is None:
@@ -3125,7 +3148,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             errs.append(f"{e.line}: 数组字面量不能为空")
         ts = []
         for it in e.items:
-            _walk_expr(it, scope, funcs, structs, errs, enums)
+            _walk_expr(it, scope, funcs, structs, errs, enums, lms)
             ts.append(expr_type(it, scope, funcs, structs))
         concrete = {t for t in ts if t is not None}
         if len(concrete) > 1:
@@ -3134,25 +3157,39 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             errs.append(f"{e.line}: 数组字面量元素类型不一致 (整型字面量混入 {sorted(concrete)[0]})")
         return
     if isinstance(e, Index):
-        _walk_expr(e.obj, scope, funcs, structs, errs, enums)
-        _walk_expr(e.idx, scope, funcs, structs, errs, enums)
+        _walk_expr(e.obj, scope, funcs, structs, errs, enums, lms)
+        _walk_expr(e.idx, scope, funcs, structs, errs, enums, lms)
         ot = expr_type(e.obj, scope, funcs, structs)
         if ot is None or not (_is_array(ot) or _is_slice(ot)):
             errs.append(f"{e.line}: 对非数组/切片类型取下标")
         it = expr_type(e.idx, scope, funcs, structs)
         if it is not None and it not in INT_TYPES:
             errs.append(f"{e.line}: 下标类型 {it}，应为整型")
+        # **E028**（`docs/253` §5.1）：`lms` 开着时，**字面量下标越过定长数组的界**当场拒。
+        # 这一格今天**没有任何东西管** —— 实测（`docs/253` §4.4）：`let x: u32 = a[10]`
+        # 配 `[u32; 4]` 发出来的是 `getelementptr inbounds [4 x i32], ptr %a.addr,
+        # i32 0, i32 10`，而 `inbounds` 在 LLVM IR 里**恰是"越界即 UB"的标记**。
+        # ⇒ **不是新需求**：`docs/205` §1.1 C5 那句「越界访问在**字面量**时编译期拒」
+        #   早就写下了 —— 它只是**只覆盖 `guard` 那一格**。
+        # ⚠ **码号是 E028，不是 E024**：`docs/253` 初稿按旧检出写的 E024–E026，
+        #   而 origin/main 上那三个已被命令声明那批占了（`docs/223`），现行最高 E027。
+        # 只对**定长数组**成立：切片 `[T]` 的长度是运行期的，界不是编译期常量。
+        if lms and ot is not None and _is_array(ot) and isinstance(e.idx, IntLit):
+            n = _array_len(ot)
+            if e.idx.value >= n:
+                errs.append(f"{e.line}: E028: 下标 {e.idx.value} 越过定长数组的界"
+                            f"（{ot} 的长度是 {n}）")
         return
     if isinstance(e, Un):
-        _walk_expr(e.expr, scope, funcs, structs, errs, enums)
+        _walk_expr(e.expr, scope, funcs, structs, errs, enums, lms)
         if e.op in ("&", "&mut"):
             inner = expr_type(e.expr, scope, funcs, structs)
             if inner is None or not _is_array(inner):
                 errs.append(f"{e.line}: {e.op} 只能作用于数组 (得到 {inner})")
         return
     if isinstance(e, Bin):
-        _walk_expr(e.left, scope, funcs, structs, errs, enums)
-        _walk_expr(e.right, scope, funcs, structs, errs, enums)
+        _walk_expr(e.left, scope, funcs, structs, errs, enums, lms)
+        _walk_expr(e.right, scope, funcs, structs, errs, enums, lms)
         return
 
 
@@ -3884,6 +3921,12 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     # (`_dep_pass` 挡住递归)。
     mod, deps = prepare(mod, deps)  # M6 单态化
     errs: list[str] = []
+    # **LMS（`docs/253`）**：第 1 级检查器开不开。⚠ **只取根单元**的取值 —— 与 Potato 里
+    # 那个 `lms` 字段、以及自举侧扫 token 的那一支 **同一个来源**。
+    # 它管**合法性**（外向许可），与 `gc_*`（生命周期、内向可达）**正交**（`docs/210` §6.2）。
+    # ⚠ 这一条**长在检查器里，不长在发射器里**：自举侧的 `codegen.lomt` **根本没有报错
+    #   通道**（那边所有编译错误都出自 `checker.lomt`）—— 放到发射器里两边就不同构了。
+    lms = mod.chooses.get("lms", CORE_DEFAULTS["lms"]) == "lms_open"
     funcs = dict(ext_funcs or {})
     deps = deps or []
 
@@ -4300,7 +4343,7 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
         def walk(stmts: list, fscope: dict[str, str]) -> None:
             for s in stmts:
                 if isinstance(s, Let):
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lms)
                     if not _type_ok(s.type, known):
                         errs.append(f"{s.line}: let {s.name} 类型 {s.type} 未声明")
                     if _is_array(s.type) and isinstance(s.expr, ArrayLit):
@@ -4314,8 +4357,8 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                         errs.append(f"{s.line}: let {s.name}: {s.type} = 表达式类型 {t}")
                     fscope[s.name] = s.type
                 elif isinstance(s, Assign):
-                    _walk_expr(s.target, fscope, funcs, structs, errs, enums)
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.target, fscope, funcs, structs, errs, enums, lms)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lms)
                     tt = expr_type(s.target, fscope, funcs, structs)
                     et = expr_type(s.expr, fscope, funcs, structs)
                     if isinstance(s.target, Index):
@@ -4329,21 +4372,21 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                     if tt is not None and et is not None and tt != et:
                         errs.append(f"{s.line}: 赋值 {tt} = 表达式类型 {et}")
                 elif isinstance(s, If):
-                    _walk_expr(s.cond, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.cond, fscope, funcs, structs, errs, enums, lms)
                     ct = expr_type(s.cond, fscope, funcs, structs)
                     if ct is not None and ct != "bool":
                         errs.append(f"{s.line}: if 条件类型 {ct}，应为 bool")
                     walk(s.then, fscope)
                     walk(s.otherwise, fscope)
                 elif isinstance(s, While):
-                    _walk_expr(s.cond, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.cond, fscope, funcs, structs, errs, enums, lms)
                     ct = expr_type(s.cond, fscope, funcs, structs)
                     if ct is not None and ct != "bool":
                         errs.append(f"{s.line}: while 条件类型 {ct}，应为 bool")
                     walk(s.body, fscope)
                 elif isinstance(s, Guard):  # P4: 能力域检查
                     cap = next((c for c in mod.caps if c.name == s.cap), None)
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lms)
                     if cap is None:
                         errs.append(f"{s.line}: guard 引用了未声明的能力 {s.cap}")
                     elif isinstance(s.expr, IntLit) and not (cap.lo <= s.expr.value <= cap.hi):
@@ -4351,8 +4394,8 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                             f"{s.line}: 能力 {s.cap} 域 [{cap.lo}..{cap.hi}]，索引 {s.expr.value} 越界"
                         )
                 elif isinstance(s, For):
-                    _walk_expr(s.lo, fscope, funcs, structs, errs, enums)
-                    _walk_expr(s.hi, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.lo, fscope, funcs, structs, errs, enums, lms)
+                    _walk_expr(s.hi, fscope, funcs, structs, errs, enums, lms)
                     lt = expr_type(s.lo, fscope, funcs, structs)
                     ht = expr_type(s.hi, fscope, funcs, structs)
                     for bt, bw in ((lt, "下界"), (ht, "上界")):
@@ -4362,7 +4405,7 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                     body_scope[s.var] = lt or ht or "u32"
                     walk(s.body, body_scope)
                 elif isinstance(s, Match):
-                    _walk_expr(s.subject, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.subject, fscope, funcs, structs, errs, enums, lms)
                     st = expr_type(s.subject, fscope, funcs, structs)
                     ed = enums.get(st) if st else None
                     if ed is None:
@@ -4403,15 +4446,15 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                                 f"{s.line}: match 不穷尽，缺 {', '.join(missing)}（或加 _ 通配）"
                             )
                 elif isinstance(s, Return):
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lms)
                     t = expr_type(s.expr, fscope, funcs, structs)
                     if t is not None and t != f.ret:
                         errs.append(f"{s.line}: return 类型 {t}，函数 {f.name} 声明 {f.ret}")
                 elif isinstance(s, ExprStmt):
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lms)
 
         walk(f.body, scope)
-        errs.extend(_move_check(f, funcs, structs, enums))  # M13 移动检查
+        errs.extend(_move_check(f, funcs, structs, enums, lms))  # M13 移动检查 + E029
         # **非 `()` 的函数不许从末尾掉出去**（`#22`）。`check` 通过 = "这份程序不会 trap"
         # 是这条命令给人的唯一保证，而"掉出末尾"在发射之后是一条**非法指令**
         # （`SIGILL`）—— 只在**真走到那一支**时才发生，所以静态检查是唯一能在事前说这句
@@ -4481,16 +4524,25 @@ def _is_copy_type(t: str, structs: dict, enums: dict) -> bool:
     return not (t in structs or _is_array(t))
 
 
-def _move_check(f: Func, funcs: dict, structs: dict, enums: dict) -> list[str]:
+def _move_check(f: Func, funcs: dict, structs: dict, enums: dict,
+                lms: bool = False) -> list[str]:
     errs: list[str] = []
     scope: dict[str, str] = {p.name: p.type for p in f.params}
     params = {p.name for p in f.params}
     moved: set[str] = set()
+    #: **已经 `free` 过的块**（`docs/253` §5.1 的 E029）。**与 `moved` 分开两张表**：
+    #: 移走是**所有权**的事（E006），释放是**合法性**的事（E029）—— 两回事。
+    #: ⚠ 这一格今天**没有任何东西管**：`docs/210` §2.8 给 `free` 加的那五条检查管的是
+    #: **`free` 自己那一端**（这块是不是真块、有没有重复释放），管不了"**之后再用**"——
+    #: 那正是 use-after-free 的经典形状。
+    freed: set[str] = set()
 
     def use(e) -> None:
         if isinstance(e, Ident):
             if e.name in moved:
                 errs.append(f"{e.line}: 变量 {e.name} 已被移动, 不能再用")
+            elif lms and e.name in freed:
+                errs.append(f"{e.line}: E029: 变量 {e.name} 指向的块已经被 `free`，不能再用")
         elif isinstance(e, Bin):
             use(e.left)
             use(e.right)
@@ -4515,6 +4567,11 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict) -> list[str]:
                     moved.add(a.name)  # 非 Copy 传参 = 移动
                 else:
                     use(a)
+            # **E029**：`free(p)` 之后 `p` 指向的块没了 —— 记下来，之后再用到 `p` 就报。
+            # ⚠ **登记放在循环之后**：`use(a)` 在上面已经把 `free` 自己那个实参走过一遍了，
+            # 而**那一次是合法的**（清掉再报就成了"`free` 自己都不能调"）。
+            if lms and e.name == "free" and e.args and isinstance(e.args[0], Ident):
+                freed.add(e.args[0].name)
         elif isinstance(e, Index):
             use(e.obj)
             use(e.idx)
@@ -4538,11 +4595,13 @@ def _move_check(f: Func, funcs: dict, structs: dict, enums: dict) -> list[str]:
                         and not _is_copy_type(sc[s.expr.name], structs, enums):
                     moved.add(s.expr.name)
                 sc[s.name] = s.type
+                freed.discard(s.name)      # 重新绑定 = 这个名字不再指那块死掉的块
             elif isinstance(s, Assign):
                 use(s.expr)
                 if isinstance(s.target, Ident):
                     if s.target.name in moved:
                         errs.append(f"{s.line}: 变量 {s.target.name} 已被移动, 不能赋值")
+                    freed.discard(s.target.name)   # 重新赋值同理
                     if isinstance(s.expr, Ident) and s.expr.name in sc \
                             and not _is_copy_type(sc[s.expr.name], structs, enums):
                         moved.add(s.expr.name)
@@ -5307,7 +5366,7 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 是编译错误，所以发行版发的对象里 `vm` **恒为** `no_vm`。
         # v14 = v13 + **联网站点的宽度组成** `net_ladder`（`docs/237`）：四档各领走几个站点。
         # 与 `gc_ladder` 同形，多一条交叉：`total_net` 必须等于 `surfaces.net`。
-        "potato": "v14",
+        "potato": "v15",
         "unit": mod.name,
         "language": "loment",
         # **表层语法**（`docs/188` §2）—— 与 `language` 分工不同, 别混:
@@ -5336,6 +5395,10 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
         # 空白的第一格）。发行版里它恒为 `no_vm`（渠道闸）。**它今天不承诺性能**：
         # 没有字节码、没有解释器，`choose vm` 的产物与 `no_vm` **逐字节相同**。
         "vm": mod.chooses.get("vm", CORE_DEFAULTS["vm"]),
+        # **内存安全**（`docs/253`，用户 2026-10-15 定第六维）：`close` / `open`。
+        # 与 `gc` **正交** —— 同一张图上相反的两个方向（`docs/210` §6.2）。同一条纪律：
+        # **必填**，于是"这份产物开没开内存安全"是**不读源码可判的**。
+        "lms": mod.chooses.get("lms", CORE_DEFAULTS["lms"]),
         # 开关取值 (用户 2026-09-17: **"开关的取值是要进 Potato 的"**, docs/182 §1)。
         # **永远是显式的数组**（可为空）—— 与 `mode` 同一条纪律: 不存在"缺这项"的形态,
         # 所以"这台机器上这个开关开没开"是**可回放**的, 不是"看当时的源码猜"。
@@ -5441,6 +5504,65 @@ def emit_potato(mod: Module, lom_root: Path, deps: list[Module] | None = None) -
 #: 一份"有根没堆"的单元（典型的：alpha 把 `alloc` 全 L0 提走、只剩下指针局部）会发出
 #: **引用未定义全局**的产物（实测：`gc_auto` 只带一个 `fn f(p: ptr)` 也会）。所以根表
 #: **跟着 `gc_any` 发**，收集器**跟着堆发** —— 两件事不再绑死。
+# ---------------------------------------------------------------- LMS 第 3 级入口 A
+#
+# `docs/253` §5.3 的**入口 A**（内存用尽）：「`alloc` 真的分配不出时，**先试着拉回**，
+# 拉不回来才死」。今天 `_IR_HEAP` 的 `boom` 是**直接 `abort`** —— 那是"运行期灾难"；
+# 本文要的是"**先收一次再试**"。
+#
+# **为什么是变换、不是另抄一份**：那 200 行分配器在两处实现里必须同源。`hosted` 那一份
+# 就是这么来的（`_arena_indirect`，见 `_IR_GC_HOSTED`）—— 手抄必漂。
+# 三处**局部**改写，每一处都先 `assert` 命中：改不动就**当场炸**，不静默漂。
+_LMS_RETRY_DECL = "@__loment_lms_retry = internal global i1 false\n"
+
+
+def _heap_with_lms_rescue(text: str) -> str:
+    lines = text.split("\n")
+    i = next(k for k, l in enumerate(lines)
+             if l.startswith("define internal ptr @__loment_alloc"))
+    j = next(k for k in range(i + 1, len(lines)) if lines[k] == "}")
+    body = lines[i:j + 1]
+    # (1) `floop` 的两个 phi 各加一条入边（从 `rescue` 回来）。**只改这一个函数体**
+    # —— 同一个文件里的 `__loment_free` 也有一个同名形状的 phi 循环，碰不得。
+    k = body.index("floop:")
+    assert body[k + 1] == "  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ]"
+    assert body[k + 2] == "  %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ]"
+    body[k + 1] = "  %cur = phi i32 [ %head, %entry ], [ %nxt, %fnext ], [ %head2, %rescue ]"
+    body[k + 2] = "  %prev = phi i32 [ 0, %entry ], [ %cur, %fnext ], [ 0, %rescue ]"
+    # (2) `boom` 不再直接 abort。**只许重来一次** —— 否则一份没有垃圾的程序会
+    # 收了又收、永远出不去。
+    k = body.index("boom:")
+    assert body[k + 1] == "  call void @__loment_abort()"
+    assert body[k + 2] == "  unreachable"
+    body[k + 1:k + 3] = [
+        "  ; ---- LMS 第 3 级入口 A（docs/253 §5.3）：先拉回，拉不回来才死 ----",
+        "  %lmsdone = load i1, ptr @__loment_lms_retry",
+        "  br i1 %lmsdone, label %dead, label %rescue",
+        "rescue:",
+        "  store i1 true, ptr @__loment_lms_retry",
+        "  call void @__loment_collect()",
+        "  %head2 = load i32, ptr @__loment_freehead",
+        "  br label %floop",
+        "dead:",
+        "  call void @__loment_abort()",
+        "  unreachable",
+    ]
+    # (3) **每一条成功返回**前清掉重试标记（`_IR_HEAP` 两条、`_IR_HEAP_HOSTED` 三条）。
+    # 不清的话，"这一次"用掉的那一次重试会留给下一次分配 —— 那是**假的能力**。
+    idx = [k for k, l in enumerate(body) if l.startswith("  ret ptr ")]
+    assert len(idx) >= 2, idx
+    for k in reversed(idx):
+        body.insert(k, "  store i1 false, ptr @__loment_lms_retry")
+    return _LMS_RETRY_DECL + "\n".join(lines[:i] + body + lines[j + 1:])
+
+
+_IR_HEAP_LMS = _heap_with_lms_rescue(_IR_HEAP)
+_IR_HEAP_LMS_HOSTED = _heap_with_lms_rescue(_IR_HEAP_HOSTED)
+#: **`extern fn` 那一份也要救**（`docs/253` §5.3）。`_ffi_grown` 只是"**不是** alpha"，
+#: 所以它可以与 `gc_auto` 同时成立 —— 那一档下产物里有收集器，第 3 级入口 A 就有东西
+#: 可拉。漏掉这一份，`extern fn` + `gc_auto` + `lms_open` 会**静默没有**先拉回这一步。
+_IR_HEAP_LMS_FFI = _heap_with_lms_rescue(_IR_HEAP_FFI)
+
 _IR_ROOTS = '''; ---- 自动回收（`choose gc_auto`）---------------------------------------------------
 @__loment_roots = internal global [1024 x i64] zeroinitializer
 @__loment_rootn = internal global i32 0'''
@@ -8236,6 +8358,13 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
     # **`gc_auto`**：自动那一档（`docs/210` §2.1 / §2.4）—— 编译器发精确根表 + 在每个分配点
     # 问一句"该收了没有"，收集器在运行期里。与 `gc_alpha` **互斥**（两档不同时成立）。
     gc_auto = mod.chooses.get("gc", CORE_DEFAULTS["gc"]) == "gc_auto"
+    # **LMS 第 3 级入口 A**（`docs/253` §5.3）：`alloc` 分配不出时**先收一次再试**，
+    # 而不是直接 abort。⚠ **两个条件缺一不可**：
+    #   * `lms` 开着 —— 它属于 LMS 第 3 级，不是回收档的事；
+    #   * **这份产物里真的有收集器**（`gc_auto` / `gc_auto_alpha`）—— `gc_manual` 下
+    #     没有东西可收，"拉回"在那里是一句空话。这是这一级**明写的边界**。
+    _lms_rescue = (mod.chooses.get("lms", CORE_DEFAULTS["lms"]) == "lms_open"
+                   and (gc_auto or gc_alpha))
     # **运行期维**（`docs/217` / `docs/175` §3.6）。两个方向各一句话：
     #   * `runtime`    ⇒ 产物里**一定**有那段运行期 —— 这里的 `rt_on` 无条件发 `_IR_RUNTIME`；
     #   * `no_runtime` ⇒ 产物里**一定没有** —— 那条**不在这里**：它在 `check()` 里拒
@@ -8379,15 +8508,15 @@ def emit_llvm(mod: Module, lom_root: Path, deps: list[Module] | None = None,
             out.append(f"; loment-heap: platform {HOSTED_ARENA_BYTES}")
             if "malloc" not in seen_ext:  # 用户自己 `declare` 过就让他那份说了算
                 out.append("declare ptr @malloc(i64)")
-            out.append(_IR_HEAP_HOSTED)
+            out.append(_IR_HEAP_LMS_HOSTED if _lms_rescue else _IR_HEAP_HOSTED)
         elif _ffi_grown:
             out.append(f"; loment-heap: ffi {FFI_ARENA_BYTES}")
-            out.append(_IR_HEAP_FFI)
+            out.append(_IR_HEAP_LMS_FFI if _lms_rescue else _IR_HEAP_FFI)
         else:
             if _ffi_heap:
                 # 上面那个例外：说了才不是静默。
                 out.append("; loment-heap: static 65536")
-            out.append(_IR_HEAP)
+            out.append(_IR_HEAP_LMS if _lms_rescue else _IR_HEAP)
     # **根表跟着 `gc_any` 发**（见 `_IR_ROOTS`）：`gc_auto` / `gc_auto_alpha` 只要函数里有
     # 指针槽就会往根表写 —— 而收集器**跟着堆发**。两件事解绑，才能让"有根没堆"的单元
     # （alpha 把 alloc 全 L0 提走那种）不至于发出引用未定义全局的产物。**次序是 HEAP→ROOTS→GC**。
