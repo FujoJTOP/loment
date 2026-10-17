@@ -333,8 +333,8 @@ fn wdiag_file(fd: i64, scr: ptr, file: ptr, fnam: u32, code: u32, msgp: ptr, msg
 
 /// 会把运行期拖进产物的构造 → **人话**（issue #321）。照抄参考实现 `tools/lomentc.py`
 /// 的 `_RUNTIME_SITES` —— 报文的正文要的是"除法 `/`"这一句，不是那一格 token 原文，而两边
-/// 要逐字节一致。不是那八个之一就回空串：调用方据此判断"这条 E022 是不是运行期那一类"
-/// （E022 还有别的起因，不能一律改写）。
+/// 要逐字节一致。不是那八个之一就回空串（**判据**：那说明这一格的 token 不在名单里，
+/// 报文才退回 token 原文；`E031` 这一档的正常输入永远命得中）。
 fn rt_phrase(slot: ptr, toks: ptr, tk: u32) -> str {
     if tok_is(slot, toks, tk, "/") { return "除法 `/`"; }
     if tok_is(slot, toks, tk, "%") { return "取模 `%`"; }
@@ -347,8 +347,9 @@ fn rt_phrase(slot: ptr, toks: ptr, tk: u32) -> str {
     return "";
 }
 
-/// 运行期那一类 E022 的**结构化**诊断 —— 正文是**一句话**，不是 token（issue #321）。
-/// 与参考实现 `check()` 里那条 f-string 逐字节同形：`{line}: 声明了 …—— {name}（…）。`
+/// `E031`（默认档下用了会拖运行期的构造）的**结构化**诊断 —— 正文是**一句话**，不是
+/// token（issue #321）。与参考实现 `check()` 里那条 f-string 逐字节同形：
+/// `{line}: 声明了 …—— {name}（…）。`
 /// +（`nsites > 1` 时）`这一类构造本单元另有 {nsites-1} 处。` + `要运行期就在根单元写 …`。
 /// 分段直接写 fd（**不另开缓冲**：`scr` 那块排得很密，没有 200 字节的连续空位）。
 fn wdiag_rt(fd: u64, scr: ptr, file: ptr, fnam: u32, line: u32, ph: str, nsites: u32) -> u64 {
@@ -356,7 +357,7 @@ fn wdiag_rt(fd: u64, scr: ptr, file: ptr, fnam: u32, line: u32, ph: str, nsites:
     let _b: u64 = wjson_str(fd, file, fnam);
     let _c: u64 = wstr(fd, ",\"line\":");
     let _d: u64 = wdec(fd, scr, line);
-    let _e: u64 = wstr(fd, ",\"col\":0,\"code\":\"E022\",\"message\":\"");
+    let _e: u64 = wstr(fd, ",\"col\":0,\"code\":\"E031\",\"message\":\"");
     let _f: u64 = wdec(fd, scr, line);
     let _g: u64 = wstr(fd, ": 声明了 `no_runtime`，但它会让产物带上运行期 —— ");
     let _h: u64 = write_all(fd, str_ptr(ph), str_len(ph) as u64);
@@ -756,6 +757,12 @@ fn dir_of(path: ptr, n: u32, dst: ptr, cap: u32) -> u32 {
 /// **PE 垫片每次只返回一条记录** (Linux 一次一批), 所以循环按"读一批走一批"写。
 fn subdirs_of(dirp: ptr, dl: u32, dst: ptr, scr: ptr) -> u32 {
     let dent: ptr = ptr_add(scr, DENT_OFF);
+    // **目录路径比槽大 ⇒ 说出来**（`#345` 的 (a)）。原来这条循环只是**停**：截断过的路径
+    // 会去 `openat` 一个不存在的目录，用户看到的是"这个 `use` 找不到"（`docs/188` 的
+    // "宁拒勿猜"：宁可报错，也不要让一个截断过的输入伪装成一个查无此物）。
+    if dl >= DIR_CAP - 1 {
+        return fail("a directory path is longer than 1024 bytes (the project root / tool dir / version-name limit) -- move the project closer to the filesystem root");
+    }
     let i: u32 = 0;
     while i < dl && i < DIR_CAP - 1 {
         store8(scr, i, load8(dirp, i) as u8);
@@ -868,6 +875,11 @@ fn is_dir_at(dirp: ptr, dl: u32, dent: ptr, nm: u32, scr: ptr) -> u32 {
         store8(w, e, load8(dent, nm + j) as u8);
         e = e + 1;
         j = j + 1;
+    }
+    // 循环是三个条件里哪一个停的？**`e` 撞上沿**就是路径被截断 —— 那时下面这次 `openat`
+    // 找的是一个不存在的路径，而调用方只知道"这个名字不是目录"（`#345` 的 (a)）。
+    if e >= SUBP_CAP - 1 && load8(dent, nm + j) != 0 {
+        return fail("a subpath is longer than 1472 bytes (one slot per source level) -- shorten the path");
     }
     store8(w, e, 0 as u8);
     let fd: i64 = syscall4(257, (0 as u64) - 100, w as u64, 65536);
@@ -1296,6 +1308,11 @@ fn cfg_source_ext(dirp: ptr, dl: u32, dst: ptr, scr: ptr, buf: ptr, toks: ptr) -
         store8(dst, q, ch);
         q = q + 1;
     }
+    // 同 `SUBP_CAP` 那条：`q` 撞上沿而字符串里还有字节 ⇒ 后缀被截断（`#345` 的 (a)）。
+    // 静默截断的后果比"配错了"更难查：截出来的后缀**可能正好又叫中另一个词法档**。
+    if q >= EXT_CAP - 1 && q < sl - 2 {
+        return fail("the source extension in loment.conf is longer than 256 bytes");
+    }
     store8(dst, q, 0 as u8);
     // 不以 `.` 开头、或带转义的, 一律当没配。转义那条是对着参考实现钉的: 这里拷的是**原始
     // 字节**(`\t` 两个字节), 参考实现的词法器给的却是**解码后**的值 —— 只在这一处会分叉,
@@ -1505,6 +1522,13 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
     }
     let raw_n: u64 = read_all(fd as u64, slot, SLOT as u64);
     syscall4(3, fd as u64, 0, 0);
+    // **读满了槽 ≠ 文件就这么大**（`#345` 的 (a)：每一个固定容量越界时都要**有话**）。
+    // 槽原先静默截断：一份大于 512 KiB 的源会**少一截**，用户看到的是一串与被截断位置
+    // 无关的解析错 —— 那是本仓最不肯让的形状（`docs/188` 的"宁拒勿猜"）。
+    // 判据只需一次比较：读满 `SLOT` 就说明**至少**这么大，下面那句把这个事实说出来。
+    if raw_n >= SLOT as u64 {
+        return fail("this source file is 512 KiB or larger -- the per-file slot cannot hold it, and cutting it short yields parse errors unrelated to where it was cut: split the facade") as u64;
+    }
     let nb: u32 = strip_cr(slot, raw_n as u32);
     // 声明说的是"**怎么读**"，不是那份源的一部分 —— **在 `lex` 之前抹掉**（`docs/188` §1）。
     // 与参考实现的 `potato_from.strip_grammar_decl` 同一件事；放在这儿（而不是 token 层）
@@ -1568,7 +1592,7 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
             // 那是另一轮的事。
             //
             // **保证本身不受影响**：依赖的**代码**照样进合并流，于是"依赖里有除法而根写着
-            // `no_runtime`"这一条**自举侧判得住**（合并流上的 E022），而且判得比参考实现
+            // `no_runtime`"这一条**自举侧判得住**（合并流上的 E031），而且判得比参考实现
             // **更宽**（它连深度 > 1 的依赖也看得见）。两边只在"依赖声明了一个它**用不上**的
             // 核心模式"这一格上不同 —— 那一格不影响产物。
             blank_tok(slot, toks, i);
@@ -2029,11 +2053,12 @@ fn _start() -> u32 {
             wstr(2, ": ");
             let st: u32 = load32(toks2, tk * 20 + 4);
             let ln: u32 = load32(toks2, tk * 20 + 8);
-            // 运行期那一类的 E022：正文写成**那句话**，不是那一格 token（issue #321）。
-            // `rt_phrase` 回空串就说明这条 E022 是别的起因，照旧走 token。
+            // `E031`（这一档是 `no_runtime`，而这个构造要运行期）：正文写成**那句话**，
+            // 不是那一格 token（issue #321）。码是**专属**的（不再与 `choose` 共用 E022），
+            // `str_len(ph) > 0` 只是"那格 token 在名单里"的兜底，照旧走 token 原文。
             let ph: str = rt_phrase(unit, toks2, tk);
             let isrt: u32 = 0;
-            if code == 22 && str_len(ph) > 0 {
+            if code == 31 && str_len(ph) > 0 {
                 isrt = 1;
             }
             let take: u32 = 24;
@@ -2095,7 +2120,10 @@ fn _start() -> u32 {
     let cg: ptr = cgv as ptr;
     let m: u32 = emit_module(unit, toks2, ir, cg);
     if m == 0 {
-        let msg: str = "more functions than the codegen table holds -- split the facade";
+        // **两张表共用这一格，所以两张都点名**（`#345` 的 (a)）：发射器对 `CG_MAXFN` 与
+        // `CG_MAXENUM` 都只 `return 0`，从驱动这一端看不出是哪一张撞的 —— 那就别猜，
+        // 把两个名字一起写出来（原先只写函数数，于是枚举爆掉时用户会去删函数）。
+        let msg: str = "more functions (or more enum variants) than the codegen tables hold -- split the facade";
         wdiag_file(dfd, scr, ap, an, 33, str_ptr(msg), str_len(msg));
         return fail(msg);
     }

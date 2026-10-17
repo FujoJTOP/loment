@@ -168,14 +168,30 @@ RULES = [
     #   * "只能声明一次" -> "**这一维**只能声明一次"（有两维之后，"哪一维"必须说出来）；
     #   * 多一条"两档不能同时选"（`no_std` + `gc_auto`）。
     # 2026-10-09 `runtime` 维**兑现**（`docs/217`）：这一维从"只声明"变成"有保证"，
-    # 多出两条消息，**并进 E022 而不是开一个新码** —— 按"码按修法分"的口径，
-    # 这一条的修法与既有那几条同族：**去改那一行 `choose`**（写 `choose runtime`），
-    # 或者把那个拖运行期的构造换掉。开一个新码就还要多一张 zh/en 说明卡、一行自举码表、
-    # 四条"键集相等"的判据，而用户要做的事一个字没变。
+    # 多出两条消息，当时**并进 E022 而不是开一个新码** —— 理由是"码按修法分"，
+    # 这一条的修法与既有那几条同族：**去改那一行 `choose`**（写 `choose runtime`）。
+    #
+    # 2026-10-16 **改判**（issue #321）：那两条**移出去**，另立 **E030**。原先那条理由
+    # 数错了读者：报的是用户写的**那个构造**（`/`、`alloc` …），而他那一行 `choose`
+    # **没有问题** —— 而 E022 的标题说的正是"`choose` / `addin` 写错了"。于是码把人
+    # **指向错的子系统**：他去看 `choose`，翻来翻去都是对的。实测（issue #321）：
+    # `message: /` 之外，`why:` 要先读完三条无关的（核心模式 / 开关 / 声明规则）才轮到
+    # 适用的那一条。**码是用户最先读到的那个词，指错地方就是误导，不是简短。**
+    # 代价当初列得很准（一张 zh/en 说明卡、一行自举码表、四条"键集相等"的判据），
+    # 照付。
+    ("E031", r"声明了 `no_runtime`|用了会把运行期拖进产物的构造",
+     "这一档是 `no_runtime`，而这个构造要运行期",
+     "这一段会被编成**运行期的一部分**（除法与取模要一个除零陷阱、`alloc` 与 `free` 要"
+     "分配器和堆全局、`str_concat` 与 `str_eq` 要它们的运行期辅助、`panic` 要一个 abort、"
+     "`guard` 要域检查），"
+     "而这一档声明的是「**产物里没有运行期**」—— 那不是一句期望，是一条保证"
+     "（`docs/217`）。**修法二选一**：在**根单元**写一行 `choose runtime`（产物从此带上"
+     "那段运行期），或者把这个构造换掉。"
+     "**注意：报的是那个构造和它的位置** —— 你写的 `choose` 那一行没有问题。"),
     ("E022", r"核心模式只能声明一次|核心模式这一维只能声明一次|模式只能是|"
              r"不能同时选|库不许 `choose`|未定义的开关|"
              r"发行版不含 VM|发行版不含对外端口|"
-             r"声明了 `no_runtime`|依赖 `.*` 要求 |依赖 `.*` 用了会把运行期拖进产物的构造|"
+             r"依赖 `.*` 要求 |"
              r"开关 .* 写了两次|`choose` 有 .* 条, 超过上限|`addin` 有 .* 条, 超过上限|"
              r"不许写在另一个开关体里|库不许 `addin`|`addin` 单元不许声明核心模式|"
              r"`addin` 嵌套超过|`addin` 拉进来的单元里只能写 choose 相关代码|"
@@ -202,13 +218,11 @@ RULES = [
      "**开关**（`set choose <名字> { … }` + `choose <名字>` / "
      "`choose close <名字>`）可以有很多（上限见 `MAX_CHOOSE`），但**同名只许写一次**，"
      "而且取值前要先用 `set choose` 定义。"
-     "**`runtime` 维是一句保证**（`docs/217`）：`no_runtime`（默认）说的是"
-     "「产物里没有运行期」，所以凡是会把那段运行期拖进产物的构造（除法、`alloc`、"
-     "`str_concat`、`panic`、`guard` …）在**这一档下编译期点名拒** —— "
-     "要运行期就在**根单元**写一行 "
-     "`choose runtime`。**库**可以声明它的需求（`choose runtime`），但根的取值必须与它一致；"
-     "库用了拖运行期的构造却什么都没写，也要报 —— 库该声明它的**需求**"
-     "（`docs/168`），由项目决定。见 `docs/143` §3.2、`docs/182` §1 与 `docs/217`。\n"
+     "**`runtime` 维**（`docs/217`）：`no_runtime`（默认）是一句**保证**；"
+     "**库**可以声明它的需求（`choose runtime`），但根的取值必须与它一致 —— "
+     "库该声明它的**需求**（`docs/168`），由项目决定。"
+     "**用了会拖运行期的构造报的是 E030，不是这一码。**"
+     "见 `docs/143` §3.2、`docs/182` §1 与 `docs/217`。\n"
      "**`addin <名字>`** 是同一个语法的另一半（`docs/182` §1.4）：它拉进来的**不是库**，"
      "而是**一份开关设定** —— 所以那里面**正是**要写 `choose`，反过来**别的一律不许**"
      "（`fn`/`struct`/`use` 都拒），而且只有**根单元**能写 `addin`（库和 addin 单元都不行）。"
@@ -375,6 +389,7 @@ ASCII_ONE_LINER: dict[int, str] = {
     28: "index past the end of a fixed-size array - the index is a literal and the length "
         "is known at compile time",
     29: "use after free - this block was already passed to `free`",
+    31: "this construct would drag the runtime in, but this tier is `no_runtime`",
     30: "unknown type - no type by that name; Loment has no floating point",
     31: "cannot read the input file - missing, a directory, unreadable, or empty",
     32: "cannot write the output file - its directory is missing, or it is not writable",
@@ -423,6 +438,7 @@ TITLE_EN: dict[int, str] = {
     27: "control flow: this function may fall off the end of its body",
     28: "index past the end of a fixed-size array",
     29: "use after free",
+    31: "this construct needs the runtime",
     30: "unknown type",
     31: "cannot read this input file",
     32: "cannot write the output file",
@@ -755,21 +771,18 @@ CARDS: dict[int, Card] = {
             "② **开关**是“打开才编进去的代码”，"
             "可以有很多条，但**同名只许写一次**、**取值前必须先 `set choose` 定义**。"
             "库不许 `choose` —— 库要表达需要就声明**能力需求**，由项目决定开不开。"
-            "③ **`runtime` 那一维是一句保证**（`docs/227`）：`no_runtime`（默认）说的是"
-            "“产物里没有运行期”，所以凡是会把那段运行期拖进产物的构造（除法、`alloc`、"
-            "`str_concat`、`panic`、`guard` …）在**这一档下**编译期点名拒。",
+            "③ `runtime` 那一维**不在这里**：用了会拖运行期的构造（除法、`alloc` …）报的是 "
+            "**E030**（`docs/227`）—— 那一码说的是那个构造，这一码说的是 `choose` 自己。",
         fixes=(
             "核心模式**每一维只写一次**，而且只在入口那一份：`choose std` / `choose gc_auto` / "
             "`choose runtime` / `choose hosted` / `choose no_vm`（五维各自独立，不写就是那一维的默认档）。",
-            "报的是 `no_runtime`：要运行期就在**根单元**写一行 `choose runtime`（产品里就带上那段）；"
-            "不要就把那个构造换掉。",
             "开关先定义再取值：`set choose verbose { … }` 然后 `choose verbose`（或 `choose close verbose`）。",
             "定义在别的单元就把它拉进来：入口写 `addin chooseset`，那份 `chooseset.lomt` 里写 `set choose`。",
             "报的是“依赖要求 X 而根不满足”：在根单元写一行同样的 `choose X` —— 依赖的声明是**需求**。",
             "声明别嵌在另一个开关体里 —— 预扫看不见它，那会让“开没开”变成鸡生蛋。",
         ),
         yes="五维核心模式（`mode` / `gc` / `runtime` / `port` / `vm`），每维取值见上；单文件最多 500 条开关；`addin` 跨文件带开关设定（只有根单元能写）；空体开关（只驱动编译器行为）；库声明能力域；库声明核心模式（视作需求，根须满足）",
-        no="同一维写两次、或写在根单元之外不一致；两维取值互相矛盾（`gc_auto` 与 `no_runtime`）；发行版里写 `choose vm`、或让路径带对外端口（渠道闸）；取值前没定义；同名两个取值；嵌套声明；库用了会拖运行期的构造却不声明；**默认档**下用除法/`alloc`/`str_concat` 而不写 `choose runtime`",
+        no="同一维写两次、或写在根单元之外不一致；两维取值互相矛盾（`gc_auto` 与 `no_runtime`）；发行版里写 `choose vm`、或让路径带对外端口（渠道闸）；取值前没定义；同名两个取值；嵌套声明；库用了会拖运行期的构造却不声明",
     ),
     23: Card(
         what="你写的东西语法和语义都对 —— 是**这一版的编译器后端还没做这块**。",
@@ -859,18 +872,26 @@ CARDS: dict[int, Card] = {
     28: Card(
         what="一个字面量下标越过了**定长数组**的界（声明是 `[u32; 4]`，却写了 `a[10]`）。",
         why="这里两边的数**都是编译期已知的** —— 所以它不是一个「运行期的一种可能」，"
-            "而是**一个编译期事实**（`docs/253` §5.1）。`lms` 关着时它有两种下场，而且"
-            "**都不报错**：走 clang 是 UB（`docs/253` §4.4 实测过，IR 里直接长出 "
-            "`getelementptr inbounds … i32 10`），走仓内 `lomelf` 是静默踩相邻字节。"
-            "能在这里说死，是 `lms` 第 1 级唯一要做的事。",
+            "而是**一个编译期事实**，`docs/205` §1.1 C5 把这条写成了语言规则："
+            "「越界访问在**字面量**时编译期拒」。**它不看 `lms`**（2026-10-16 起，"
+            "issue #18）—— 在这个日子之前它只在 `choose lms_open` 时发，而 `lms` 是"
+            "开发通道的中间态、不进发行版，于是发行版的用户拿不到这条。同一件事在"
+            "`guard` 那一格早就是编译错误（`docs/146` §3），两个构造两个答案正是那个"
+            "issue 点名的不一致。说死它值当：实测（`docs/253` §4.4）不拒的时候走 clang "
+            "是 UB（IR 里直接长出 `getelementptr inbounds … i32 10`），走仓内 `lomelf` "
+            "是静默踩相邻字节。",
         fixes=(
             "把下标改回 `0..len-1` 之内。",
             "数组确实该更长的话，把**声明**改长（`[u32; 16]` 之类）。",
-            "下标是**算出来的**（不是字面量）时这条发不出来 —— 那种情况改用定长数组配"
-            "一个显式的 `if` 判界。",
+            "下标是**算出来的**（不是字面量）时这条发不出来 —— 那种情况自己挡：定长数组"
+            "配一个显式的 `if i >= 4 { … }`，切片用 `slice_len(x)`（运行期的下标默认不检查，"
+            "见下面 `no` 那一行）。",
+            "想让它自动挡（开发通道）：根单元写一行 `choose lms_open` —— 那时保障器会按站点"
+            "发内联界检查（`docs/253` §5.2）。它不进发行版。",
         ),
-        yes="下标是字面量、且落在界内；下标是变量或表达式（这条不发）",
-        no="`lms` 关着（那时不发 —— 下场的两种可能见 `why`）",
+        yes="下标是字面量、且落在界内",
+        no="下标是变量或表达式（这一条只能在编译期判已知的两个数，算出来的界不是它能管的）；"
+           "切片 `[T]` 的下标（长度是运行期的）",
     ),
     29: Card(
         what="一个变量指向的块**已经被 `free`**，之后又用到了它。",
@@ -888,6 +909,30 @@ CARDS: dict[int, Card] = {
         ),
         yes="`free(p)` 之后没有再读/写 `p`；`free` 之后 `p` 被重新赋值",
         no="`free` 之前的使用；`free` 之后重新赋值再使用",
+    ),
+    31: Card(
+        what="用了一个**会把运行期拖进产物**的构造，而这一档是 `no_runtime`（默认档）。",
+        why="`no_runtime` 说的不是「我们希望产物里没有运行期」，而是「**产物里没有运行期**」"
+            "（`docs/217`）—— 一条**保证**，不是一句期望。所以凡是会把它拖进去的构造都在"
+            "编译期点名拒。名单是**具体的那几个**：除法 `/` 与取模 `%`（要一个除零陷阱）、"
+            "`alloc` 与 `free`（要分配器与堆全局）、`str_concat` 与 `str_eq`（要它们的运行期"
+            "辅助）、`panic`（要一个 abort）、`guard`（要域检查）。"
+            "**这一条与你写的 `choose` 无关** —— 报的是那个构造和它的位置。"
+            "（分码的来路见 `#321`：从前它并进 E022「`choose` 写错了」，而用户那一行 "
+            "`choose` 是对的。）",
+        fixes=(
+            "要运行期：在**根单元**（入口那一份）写一行 `choose runtime` —— 产物从此带上那段"
+            "运行期，所有这一类构造一起放行。",
+            "不要运行期：把那个构造换掉 —— 比如把 `/ 2` 写成一次 `>> 1`（仅当除数是 2 的幂"
+            "且被除数无符号），把 `alloc` 换成一块固定大小的栈数组。",
+            "是**依赖**报了这条：那个库要用运行期，就在**根单元**写 `choose runtime`；"
+            "不想让你这个程序带上运行期，就换一个不拖运行期的库。",
+            "拿不准是哪一处：看报文的行号 —— 它锚在**第一个**这样的构造成员上，"
+            "消息里还会写「这一类构造本单元另有 N 处」。",
+        ),
+        yes="`choose runtime` 的单元里用 `/`、`%`、`alloc`、`free`、`str_concat`、`str_eq`、"
+            "`panic`、`guard`；`runtime` + `gc_manual`（要运行期、内存自己管的合法档）",
+        no="默认档（不写 `runtime`）下用上面那八个构造；依赖用了却不声明 `choose runtime`",
     ),
     30: Card(
         what="一个**类型位置**上写了这门语言没有的类型（`let x: f64`、形参、返回类型、"
@@ -1393,16 +1438,13 @@ CARDS_EN: dict[int, Card] = {
             "when it is on\". There can be many switches, but **one name may be written once**, "
             "and a value may only be set after `set choose` declared it. A library may not "
             "`choose`: to express a need, a library declares a **capability requirement** and the "
-            "project decides. (3) **The `runtime` dimension is a guarantee** (`docs/227`): "
-            "`no_runtime` (the default) says \"this artifact carries no runtime\", so every "
-            "construct that would drag that runtime in - division, `alloc`, `str_concat`, `panic`, "
-            "`guard` ... - is refused at compile time **in that tier**.",
+            "project decides. (3) The `runtime` dimension is **not** managed here: a construct "
+            "that would drag the runtime in (division, `alloc`, ...) is reported as **E030** "
+            "(`docs/227`) - that code is about the construct, this one is about `choose` itself.",
         fixes=(
             "Write **each dimension** of the core mode once, in the entry unit only: `choose std` / "
             "`choose gc_auto` / `choose runtime` / `choose hosted` / `choose no_vm` (the five are "
             "independent; omitting one leaves it at that dimension's default).",
-            "If the message names `no_runtime`: write `choose runtime` in the **root unit** (the "
-            "artifact then carries that runtime), or replace the construct it named.",
             "Declare a switch before setting it: `set choose verbose { ... }` then `choose "
             "verbose` (or `choose close verbose`).",
             "The declaration lives in another unit: pull it in with `addin chooseset` in the entry "
@@ -1421,8 +1463,7 @@ CARDS_EN: dict[int, Card] = {
            "values contradict (`gc_auto` with `no_runtime`); `choose vm`, or a path carrying an "
            "outward port, in a release build (the channel gate); setting a value before declaring "
            "it; two settings for one name; nested declarations; a library that uses a "
-           "runtime-dragging construct without declaring it; division / `alloc` / `str_concat` in "
-           "the **default tier** without `choose runtime`",
+           "runtime-dragging construct without declaring it",
     ),
     23: Card(
         what="What you wrote is syntactically and semantically right - **this version of the "
@@ -1554,22 +1595,34 @@ CARDS_EN: dict[int, Card] = {
         what="A literal index runs past the end of a **fixed-size array** (declared "
              "`[u32; 4]`, written `a[10]`).",
         why="Both numbers here are **known at compile time**, so this is not \"one "
-            "possible runtime outcome\" - it is **a compile-time fact** (`docs/253` "
-            "section 5.1). With `lms` off it has two endings and **neither reports "
-            "anything**: through clang it is UB (measured in `docs/253` section 4.4 - "
-            "the IR literally grows a `getelementptr inbounds ... i32 10`), and through "
-            "the in-repo `lomelf` it silently writes into the neighbouring bytes. Being "
-            "able to say it here is the whole job of `lms` level 1.",
+            "possible runtime outcome\" - it is **a compile-time fact**, and `docs/205` "
+            "section 1.1 C5 makes it a language rule: \"an out-of-range access is "
+            "refused at compile time **when the index is a literal**\". **It does not "
+            "look at `lms`** (since 2026-10-16, issue #18) - before that date it only "
+            "fired under `choose lms_open`, and `lms` is a development-channel "
+            "intermediate that does not ship, so a released user never got it. The same "
+            "mistake on a capability domain has always been a compile error "
+            "(`docs/146` section 3); two constructs giving two answers is exactly the "
+            "inconsistency that issue names. Saying it here is worth it: when it is not "
+            "refused, clang gets UB (`docs/253` section 4.4 - the IR literally grows a "
+            "`getelementptr inbounds ... i32 10`) and the in-repo `lomelf` silently "
+            "writes into the neighbouring bytes.",
         fixes=(
             "Put the index back inside `0..len-1`.",
             "If the array really should be longer, lengthen the **declaration** "
             "(`[u32; 16]`).",
             "When the index is **computed** rather than a literal this rule cannot fire - "
-            "use a fixed-size array plus an explicit `if` bound check instead.",
+            "guard it yourself: a fixed-size array plus an explicit `if i >= 4 { ... }`, "
+            "and `slice_len(x)` for slices (a runtime index is not checked by default - "
+            "see the `no` line below).",
+            "To have it checked automatically (development channel): write `choose "
+            "lms_open` in the root unit and the guarantor emits an inline bounds check "
+            "per site (`docs/253` section 5.2). It does not ship.",
         ),
-        yes="the index is a literal and is inside the bounds; the index is a variable or "
-            "an expression (this rule stays silent)",
-        no="`lms` is off (nothing is reported - see `why` for the two endings)",
+        yes="the index is a literal and is inside the bounds",
+        no="the index is a variable or an expression (this rule can only compare two "
+           "compile-time-known numbers); an index into a slice `[T]` (its length is a "
+           "runtime value)",
     ),
     29: Card(
         what="A variable points at a block that **was already passed to `free`**, and is "
@@ -1593,6 +1646,37 @@ CARDS_EN: dict[int, Card] = {
         yes="`p` is not read or written after `free(p)`; `p` is reassigned after the "
             "`free`",
         no="use before the `free`; reassignment followed by use after the `free`",
+    ),
+    31: Card(
+        what="A construct that would **drag the runtime into the artifact** is used, and this "
+             "tier is `no_runtime` (the default).",
+        why="`no_runtime` does not say \"we hope the artifact carries no runtime\", it says "
+            "**\"the artifact carries no runtime\"** (`docs/217`) - a **guarantee**, not a "
+            "hope. So every construct that would drag one in is refused at compile time. The "
+            "list is those specific ones: division `/` and remainder `%` (they need a "
+            "divide-by-zero trap), `alloc` / `free` (the allocator and the heap globals), "
+            "`str_concat` / `str_eq` (their runtime helpers), `panic` (an abort), `guard` (a "
+            "domain check). **This has nothing to do with the `choose` you wrote** - what is "
+            "reported is the construct and where it is. (Why it has its own code: see `#321` - "
+            "it used to be folded into E022 \"bad `choose`\", while the user's `choose` line "
+            "was correct.)",
+        fixes=(
+            "You want the runtime: write `choose runtime` in the **root unit** (the entry "
+            "one) - the artifact then carries that runtime and all of these are let through.",
+            "You do not want it: replace the construct - e.g. write `/ 2` as `>> 1` (only "
+            "when the divisor is a power of two and the dividend is unsigned), or replace an "
+            "`alloc` with a fixed-size array on the stack.",
+            "It is a **dependency** that reported this: that library needs the runtime, so "
+            "write `choose runtime` in the **root unit**; if you would rather your program "
+            "carry no runtime, use a library that does not drag one in.",
+            "Not sure which site it is: read the line in the message - it is anchored on the "
+            "**first** such construct, and the message also says \"this unit has N more of "
+            "this kind\".",
+        ),
+        yes="the eight constructs inside a unit that wrote `choose runtime`; `runtime` + "
+            "`gc_manual` (a legal tier: runtime on, memory managed by you)",
+        no="any of those eight in the default tier (no `runtime` written); a dependency using "
+           "them without declaring `choose runtime`",
     ),
     30: Card(
         what="A **type position** names a type this language does not have - a `let` "

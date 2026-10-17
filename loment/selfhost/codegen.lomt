@@ -7318,7 +7318,7 @@ fn gc_auto_tier(src: ptr, toks: ptr) -> u32 {
 ///
 /// 与 `gc_alpha_tier` 同形：codegen 不知道档位，但整条 token 流在手，而核心模式只由
 /// **根单元**声明，扫那一行就够。`no_runtime` 那一半（"一定不带"）**不在这里** ——
-/// 它在检查器里拒（`checker.lomt` 的 E022），发射器只管"带"。
+/// 它在检查器里拒（`checker.lomt` 的 E031），发射器只管"带"。
 fn rt_tier(src: ptr, toks: ptr) -> u32 {
     let i: u32 = 0;
     while tok_kind(toks, i) != 4 {

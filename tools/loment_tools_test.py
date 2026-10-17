@@ -1701,6 +1701,99 @@ def test_gate_only_reports_a_stale_skip_for_a_suite_it_ran():
     print("      只点「跑了却没跳」的条目（没跑的套件不点）")
 
 
+@test
+def test_lomf_patches_in_the_tree_are_applied():
+    """树里的每一份 `.lomf` 都**已经套用**了 —— 补丁是这一笔的**记录**，源是**事实**。
+
+    **Why**：`.lomf` 不参与编译（编译器不认这个后缀），所以它唯一的价值就是"这一笔改了什么"
+    的那份**可核对**记录。若允许"补丁放着、源另说"，它就会立刻腐烂成一份没人对得上的说明书
+    —— 那比没有更坏。这条判据把两者钉在一起：**每一处 `old` 都必须 0 次、`new` 都必须
+    正好 `expect` 次**（也就是 `lomf.DONE`）。
+
+    **How to apply**：套用器分得清"待套用"与"已套用"，所以这一条能问得很准。新增补丁要
+    在**同一个 PR 里**套用；套用器报"待套用"就是这条红。
+    """
+    import lomf
+    pats = sorted((ROOT / "loment" / "patches").glob("*.lomf"))
+    assert pats, ("`loment/patches/` 下一份修改件都没有 —— 这条判据自己先失效了"
+                  "（那时它无法证明任何事）")
+    bad = []
+    for p in pats:
+        _slug, _about, edits = lomf.load(p)
+        for e in edits:
+            st, old_n, new_n = e.state()
+            if st != lomf.DONE:
+                bad.append(f"{p.name}: {e.path}（旧={old_n} 新={new_n} 期望={e.expect}）")
+    assert not bad, (
+        f"这些修改件在树里**没有套用**（或只套了一半）：{bad} —— `.lomf` 与源必须一致，"
+        "否则它就成了一份对不上的说明书")
+    print(f"      {len(pats)} 份修改件都已在树里套用")
+
+
+@test
+def test_lomf_never_applies_on_a_guess():
+    """对不上就**一处也不改**，互为子串就**拒收**（`.lomf` 的两条硬规矩）。
+
+    **Why**：修改件不按行号、按逐字节片段定位，所以"对不上"是**必然会发生**的事（别人改过
+    同一段、或者这一笔只落了一半）。那一时刻只有两种选择：猜，或者停。猜的后果是**静默改错
+    文件**，而这类改动住在运行时 IR 里 —— 猜错的地方不会报错，只会在很久以后表现为一个
+    莫名的回收行为。所以：**对不上报错、一处不动**。
+
+    "互为子串"那条更隐蔽：套用是**幂等**的（靠「旧 0 次、新 expect 次」认"已经套过"），
+    而插入式替换天然让 `old` 成为 `new` 的子串 —— 那种补丁套第二次会**再插一遍**，
+    且套用器无从分辨。所以那条形状在**解析期**就被拒。
+    """
+    import lomf
+    with tempfile.TemporaryDirectory() as t:
+        tmp = Path(t)
+        target = tmp / "x.txt"
+        pat = tmp / "p.lomf"
+
+        def write_patch(body: str) -> None:
+            pat.write_text("lomf 1\nmod t\nabout 试\n\n" + body,
+                           encoding="utf-8", newline="\n")
+
+        old_root = lomf.ROOT
+        lomf.ROOT = tmp
+        try:
+            # ① 次数对不上（期望 2、实际 1）—— 必须报错，且**不动盘**
+            target.write_bytes(b"aaa\n")
+            write_patch("edit x.txt expect 2\nold <<<\naaa\n>>>\nnew <<<\nbbb\n>>>\n")
+            rc = lomf.cmd_apply(pat, write=True)
+            assert rc == 1, f"次数对不上却返回 {rc}（期望 1）"
+            assert target.read_bytes() == b"aaa\n", "次数对不上却动了盘"
+
+            # ② 次数多出来也一样（期望 1、实际 2）
+            target.write_bytes(b"aaa\naaa\n")
+            write_patch("edit x.txt expect 1\nold <<<\naaa\n>>>\nnew <<<\nbbb\n>>>\n")
+            rc = lomf.cmd_apply(pat, write=True)
+            assert rc == 1, f"次数多出来却返回 {rc}（期望 1）"
+            assert target.read_bytes() == b"aaa\naaa\n", "次数多出来却动了盘"
+
+            # ③ 插入式（old 是 new 的子串）—— 解析期就拒
+            write_patch("edit x.txt expect 1\nold <<<\naaa\n>>>\nnew <<<\naaa\nccc\n>>>\n")
+            try:
+                lomf.load(pat)
+            except lomf.LomfError as e:
+                assert "互为子串" in str(e), f"拒了，但报文不对：{e}"
+            else:
+                raise AssertionError("插入式替换（old 是 new 的子串）应该被拒 —— "
+                                     "它套第二次会再插一遍")
+
+            # ④ 好的一笔：逐字节替换 + 幂等（第二次说"已经套用"，一个字节都不改）
+            target.write_bytes(b"aaa\n")
+            write_patch("edit x.txt expect 1\nold <<<\naaa\n>>>\nnew <<<\nbbb\n>>>\n")
+            assert lomf.cmd_apply(pat, write=True) == 0, "该套用的没套上"
+            assert target.read_bytes() == b"bbb\n", f"落盘字节不对：{target.read_bytes()!r}"
+            assert lomf.cmd_apply(pat, write=True) == 0, "重复套用应当无害"
+            assert target.read_bytes() == b"bbb\n", "重复套用改了盘（该是幂等）"
+            _slug, _about, edits = lomf.load(pat)
+            assert edits[0].state()[0] == lomf.DONE, "套过之后状态应当是「已套用」"
+        finally:
+            lomf.ROOT = old_root
+    print("      对不上就报错、一处不动；插入式在解析期被拒；套用与重复套用都幂等")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "loment_tools_test")
 
