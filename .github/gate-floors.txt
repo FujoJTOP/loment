@@ -12,7 +12,7 @@
 # 合计 909 条判据 / 74 个套件。
 
 lomc_test 24
-lomentc_test 152
+lomentc_test 153
 potato_test 11
 loment_ct_test 2
 loment_comefor_test 12

@@ -27,7 +27,7 @@
 module surface_data
 choose runtime
 
-pub fn n_codes() -> u32 { return 29; }
+pub fn n_codes() -> u32 { return 30; }
 
 /// 报错器自己的版本（`lomenterr version` 打的就是它）。真源：`tools/loment_release.py`。
 pub fn lomenterr_version() -> str { return "0.1.2"; }
@@ -92,6 +92,8 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 57 { return "越界：字面量下标越过定长数组的界"; }
     if k == 58 { return "use after free"; }
     if k == 59 { return "用完再放：这块内存已经被 `free`，不能再用"; }
+    if k == 60 { return "unknown type"; }
+    if k == 61 { return "未知类型"; }
     return "";
 }
 
@@ -155,6 +157,8 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 57 { return "一个字面量下标越过了**定长数组**的界（声明是 `[u32; 4]`，却写了 `a[10]`）。"; }
     if k == 58 { return "A variable points at a block that **was already passed to `free`**, and is used again afterwards."; }
     if k == 59 { return "一个变量指向的块**已经被 `free`**，之后又用到了它。"; }
+    if k == 60 { return "A **type position** names a type this language does not have - a `let` annotation, a parameter, a return type, a struct field, an enum payload, or an array/slice element."; }
+    if k == 61 { return "一个**类型位置**上写了这门语言没有的类型（`let x: f64`、形参、返回类型、结构体字段、枚举载荷、数组/切片元素都算）。"; }
     return "";
 }
 
@@ -218,6 +222,8 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 57 { return "这里两边的数**都是编译期已知的** —— 所以它不是一个「运行期的一种可能」，而是**一个编译期事实**（`docs/253` §5.1）。`lms` 关着时它有两种下场，而且**都不报错**：走 clang 是 UB（`docs/253` §4.4 实测过，IR 里直接长出 `getelementptr inbounds … i32 10`），走仓内 `lomelf` 是静默踩相邻字节。能在这里说死，是 `lms` 第 1 级唯一要做的事。"; }
     if k == 58 { return "After `free(p)` that block has gone back to the allocator, so using `p` again is a use-after-free. It **does not necessarily crash** - the block may keep its old bytes until some later `alloc` reuses it (`docs/253` section 5.1), so it is the kind of bug that ships quietly and then blows up when an allocation finally lands on it. The five checks `free` gained in `docs/210` section 2.8 cover **`free`'s own end** (is this really a block, was it already freed); they cannot cover \"used again afterwards\". Separate from E006: moving is an **ownership** matter, freeing is a **legality** one."; }
     if k == 59 { return "`free(p)` 之后那块内存已经还回分配器，再用 `p` 就是 use-after-free。它**不一定会崩** —— 块可能还留着旧字节，一直到最后被下一次 `alloc` 复用（`docs/253` §5.1），所以症状是那种「上线很久、某次分配把它盖掉」才炸的问题。`docs/210` §2.8 给 `free` 加的那五条检查管的是 **`free` 自己那一端**（是不是真块、有没有重复释放），管不了「之后再用」。与 E006 分开：移走是**所有权**的事，释放是**合法性**的事。"; }
+    if k == 60 { return "Loment's type table is **fixed**: `u8`..`u64`, `i8`..`i64`, `bool`, `ptr`, `str`, `()`, plus the `struct` / `enum` you declare and arrays/slices of those - no generic containers, and **no floating point** (`loment types` prints the whole list). So this is not \"that name was not declared\"; it is \"**this language has no such type**\". That is also why it is separate from E002: E002 is fixed by declaring the name, this one by naming a type that exists."; }
+    if k == 61 { return "Loment 的类型表是**固定的**：`u8`..`u64`、`i8`..`i64`、`bool`、`ptr`、`str`、`()`，加上你声明的 `struct` / `enum` 与它们的数组/切片 —— 没有泛型容器，**也没有浮点**（`loment types` 打出来就是全部）。所以这一条说的不是\"这个名字没声明\"，而是\"**这门语言没有这种类型**\"。它与 E002 分开的理由也在这里：E002 的修法是声明那个名字，这一条的修法是换一个真有的类型。"; }
     return "";
 }
 
@@ -281,6 +287,8 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 57 { return "下标是字面量、且落在界内；下标是变量或表达式（这条不发）"; }
     if k == 58 { return "`p` is not read or written after `free(p)`; `p` is reassigned after the `free`"; }
     if k == 59 { return "`free(p)` 之后没有再读/写 `p`；`free` 之后 `p` 被重新赋值"; }
+    if k == 60 { return "`u32` / `i64` / `bool` / `ptr` / `str` / `()`; a `struct`/`enum` you declared; arrays and slices of those, `[T; N]` / `[T]`"; }
+    if k == 61 { return "`u32` / `i64` / `bool` / `ptr` / `str` / `()`；你声明的 `struct`/`enum` 名；它们的数组与切片 `[T; N]` / `[T]`"; }
     return "";
 }
 
@@ -344,6 +352,8 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 57 { return "`lms` 关着（那时不发 —— 下场的两种可能见 `why`）"; }
     if k == 58 { return "use before the `free`; reassignment followed by use after the `free`"; }
     if k == 59 { return "`free` 之前的使用；`free` 之后重新赋值再使用"; }
+    if k == 60 { return "`f32` / `f64` (there is no floating point); a generic container name; an identifier that is not a type (a variable name, say)"; }
+    if k == 61 { return "`f32` / `f64`（没有浮点）；泛型容器名；不是类型的标识符（如变量名）"; }
     return "";
 }
 
@@ -377,6 +387,7 @@ pub fn code_ascii(c: u32) -> str {
     if c == 27 { return "a non-() function may fall off the end of its body - every path must return"; }
     if c == 28 { return "index past the end of a fixed-size array - the index is a literal and the length is known at compile time"; }
     if c == 29 { return "use after free - this block was already passed to `free`"; }
+    if c == 30 { return "unknown type - no type by that name; Loment has no floating point"; }
     return "";
 }
 
@@ -599,6 +610,12 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 465 { return "别 `free` —— 让 LGC 管这块（`gc_auto` / `gc_auto_alpha` 下 `alloc` 发的块本来就由回收器管）。"; }
     if k == 467 { return "确实要提前还：`free(p)` 之后把 `p` 重新赋成新块，别再用旧值。"; }
     if k == 469 { return "把 `free` 挪到**最后一个使用点之后** —— 也就是 `p` 的生命周期真结束的地方。"; }
+    if k == 480 { return "Name a type that is in the table (`loment types` prints all of them - the one people reach for is `f32`/`f64`)."; }
+    if k == 482 { return "To carry a fraction, **scale to integers**: `let x: u32 = 314;` for 3.14, with the point handled by arithmetic you write (`docs/228`)."; }
+    if k == 484 { return "If you truly need floating point, keep the value on the C ABI side and pass it through `extern fn` (`docs/173`) - floats are legal in the ABI, not in the language's type table."; }
+    if k == 481 { return "把类型换成表里真有的一个（`loment types` 列全部；最常要换掉的是 `f32`/`f64`）。"; }
+    if k == 483 { return "要表示小数就**放大成整数**：`let x: u32 = 314;` 表示 3.14，定点运算自己做（`docs/228`）。"; }
+    if k == 485 { return "非得用浮点：把那个值留在 C ABI 那一侧，用 `extern fn` 传进传出（`docs/173`）—— ABI 上浮点是合法的，语言里的类型不是。"; }
     return "";
 }
 
@@ -634,6 +651,7 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 27 { return 3; }
     if c == 28 { return 3; }
     if c == 29 { return 3; }
+    if c == 30 { return 3; }
     return 0;
 }
 
