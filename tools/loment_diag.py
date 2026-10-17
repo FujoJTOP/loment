@@ -74,6 +74,21 @@ RULES = [
      "**没有名字规则**；后端的 `native M23`（struct 字段暂只支持标量）也还没放行它们。"
      "**换一种写法绕开**（改成编译器认得名字的形状）；绕不开就报告（附上这条消息）。"
      "进度见 `docs/147` §2「命名层」与 `docs/145` 的里程碑表。"),
+    # E030 = **类型位置上的未知名**（`#323`）。**与 E002 分开**，理由与上面那条 E024/E025/E026
+    # 同一条：码按**修法**分。E002 的修法是"先声明这个名字 / 改拼写 / 补 `use`"；而
+    # `let a: f64 = 1;` 里用户要被告知的是"**这门语言没有浮点**"（`loment types` 只列
+    # `u8..u64 i8..i64 bool ptr str` 与聚合）—— 那是"这门语言没有"，不是"你写错了"。
+    #
+    # **0.1.4.5 的实测形状**：`error[E002]: undeclared name` + 一张讲"没有类型推断 /
+    # 先定义后使用 / 跨模块要 `pub`"的建议表，三条一条都不适用。用户会去找拼写错误。
+    #
+    # **排在最前**（在 E002 之前）：本码的字面就是"未知类型"，比 E002 的 `类型 .*未声明`
+    # 更专有 —— 按"更专有的排前面"的老规矩放这里，将来谁给 E002 加分支也不会把它抢走。
+    ("E030", r"未知类型 ",
+     "未知类型",
+     "把类型换成语言真有的一个（`loment types` 列全部）。**最常撞的是浮点**：Loment "
+     "没有 `f32` / `f64` —— 要么把标度放大成整数（`let x: u32 = 314;` 表示 3.14），"
+     "要么把值留在 C ABI 那边用 `extern fn` 传（`docs/173`）。"),
     # E002 必须排在 E001 前面: `载荷类型 Foo 未声明` / `结构体 S.a 类型 Foo 未声明` 里
     # 既有"类型"又有"未声明" —— 用户要做的事是"先声明 Foo"(E002), 不是"检查两侧类型"。
     ("E002", r"未定义的函数|未声明的变量|未声明$|未知结构体|未知枚举|类型 .*未声明|没有方法",
@@ -323,6 +338,7 @@ ASCII_ONE_LINER: dict[int, str] = {
     28: "index past the end of a fixed-size array - the index is a literal and the length "
         "is known at compile time",
     29: "use after free - this block was already passed to `free`",
+    30: "unknown type - no type by that name; Loment has no floating point",
 }
 
 
@@ -366,6 +382,7 @@ TITLE_EN: dict[int, str] = {
     27: "control flow: this function may fall off the end of its body",
     28: "index past the end of a fixed-size array",
     29: "use after free",
+    30: "unknown type",
 }
 
 
@@ -826,6 +843,26 @@ CARDS: dict[int, Card] = {
         ),
         yes="`free(p)` 之后没有再读/写 `p`；`free` 之后 `p` 被重新赋值",
         no="`free` 之前的使用；`free` 之后重新赋值再使用",
+    ),
+    30: Card(
+        what="一个**类型位置**上写了这门语言没有的类型（`let x: f64`、形参、返回类型、"
+             "结构体字段、枚举载荷、数组/切片元素都算）。",
+        why="Loment 的类型表是**固定的**：`u8`..`u64`、`i8`..`i64`、`bool`、`ptr`、`str`、"
+            "`()`，加上你声明的 `struct` / `enum` 与它们的数组/切片 —— 没有泛型容器，"
+            "**也没有浮点**（`loment types` 打出来就是全部）。所以这一条说的不是"
+            "\"这个名字没声明\"，而是\"**这门语言没有这种类型**\"。"
+            "它与 E002 分开的理由也在这里：E002 的修法是声明那个名字，这一条的修法是"
+            "换一个真有的类型。",
+        fixes=(
+            "把类型换成表里真有的一个（`loment types` 列全部；最常要换掉的是 `f32`/`f64`）。",
+            "要表示小数就**放大成整数**：`let x: u32 = 314;` 表示 3.14，"
+            "定点运算自己做（`docs/228`）。",
+            "非得用浮点：把那个值留在 C ABI 那一侧，用 `extern fn` 传进传出（`docs/173`）—— "
+            "ABI 上浮点是合法的，语言里的类型不是。",
+        ),
+        yes="`u32` / `i64` / `bool` / `ptr` / `str` / `()`；你声明的 `struct`/`enum` 名；"
+            "它们的数组与切片 `[T; N]` / `[T]`",
+        no="`f32` / `f64`（没有浮点）；泛型容器名；不是类型的标识符（如变量名）",
     ),
 }
 
@@ -1466,6 +1503,30 @@ CARDS_EN: dict[int, Card] = {
         yes="`p` is not read or written after `free(p)`; `p` is reassigned after the "
             "`free`",
         no="use before the `free`; reassignment followed by use after the `free`",
+    ),
+    30: Card(
+        what="A **type position** names a type this language does not have - a `let` "
+             "annotation, a parameter, a return type, a struct field, an enum payload, or an "
+             "array/slice element.",
+        why="Loment's type table is **fixed**: `u8`..`u64`, `i8`..`i64`, `bool`, `ptr`, "
+            "`str`, `()`, plus the `struct` / `enum` you declare and arrays/slices of those "
+            "- no generic containers, and **no floating point** (`loment types` prints the "
+            "whole list). So this is not \"that name was not declared\"; it is \"**this "
+            "language has no such type**\". That is also why it is separate from E002: E002 "
+            "is fixed by declaring the name, this one by naming a type that exists.",
+        fixes=(
+            "Name a type that is in the table (`loment types` prints all of them - the one "
+            "people reach for is `f32`/`f64`).",
+            "To carry a fraction, **scale to integers**: `let x: u32 = 314;` for 3.14, with "
+            "the point handled by arithmetic you write (`docs/228`).",
+            "If you truly need floating point, keep the value on the C ABI side and pass it "
+            "through `extern fn` (`docs/173`) - floats are legal in the ABI, not in the "
+            "language's type table.",
+        ),
+        yes="`u32` / `i64` / `bool` / `ptr` / `str` / `()`; a `struct`/`enum` you declared; "
+            "arrays and slices of those, `[T; N]` / `[T]`",
+        no="`f32` / `f64` (there is no floating point); a generic container name; an "
+           "identifier that is not a type (a variable name, say)",
     ),
 }
 
