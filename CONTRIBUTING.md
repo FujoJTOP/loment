@@ -218,9 +218,10 @@ Several tracked files are produced from others. They split in two, and the split
   Their every line belongs to some other file, so a pull request that carries them collides with
   every other open pull request that carries them too: two people adding different docs write
   *adjacent lines of the same ledger* (the `docs/` entries are one contiguous run) and git's
-  merge context is three lines. They are recomputed **on `main`, after every merge**, and landed
-  as one rolling pull request. Background, the measurement, and the alternatives that were
-  rejected: [docs/254](docs/254-the-artifacts-are-not-a-shared-register.md).
+  merge context is three lines. They are recomputed **on `main`, after every merge**, by a job
+  that runs alongside the gate and pushes the result straight to `main`. Background, the
+  measurement, and the alternatives that were rejected:
+  [docs/254](docs/254-the-artifacts-are-not-a-shared-register.md).
 
 The two that stay yours change exactly when the source they are derived from changes — so a
 conflict on them is a real overlap between two changes, not an artefact of a shared file.

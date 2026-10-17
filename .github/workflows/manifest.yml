@@ -324,39 +324,65 @@ jobs:
           # 推回的目标由上面那一步决定：普通 push 是本仓的分支，fork 的 PR 是**人家**的分支
           # （后者要求 PR 勾了 "Allow edits by maintainers"，已在 guard 里查过）。
           git push "https://x-access-token:${GH_TOKEN}@${REMOTE}.git" "HEAD:${BRANCH}"
-
   # ---------------------------------------------------------------- main 上的单一写者
   #
   # **与 `gate` 同时起跑**：两者都由同一次 `push: main` 触发，这里既没有 `needs:` 也没有
   # 走 `workflow_run` —— 那两种写法都会把重算排在门禁**后面**，于是"合并一次多等一轮"。
   # 重算本身是独立的、只读树 + 写生成物，没有理由等门禁。
   #
-  # **它为什么只碰生成物**：白名单守卫与 `emit` 是同一个形状。它动的每一个路径都不在
-  # 任何人手写的 PR 里 ⇒ 它与任何 PR 都不重叠 ⇒ 那个滚动 PR 永远不冲突。
+  # **为什么是直推 `main`，不是开一个 PR**（2026-10-16 定）：
+  #
+  #   * 开 PR 这条路**在 GitHub 上不成立** —— 用 `GITHUB_TOKEN` 开的 PR 与它推的分支
+  #     **都不触发** `pull_request` / `synchronize`（官方规则：`GITHUB_TOKEN` 触发的事件
+  #     不新建 workflow run，只有 `workflow_dispatch` / `repository_dispatch` 例外）。
+  #     于是那个 PR 拿不到门禁、必需检查永远不报 ⇒ auto-merge 永远不落。本仓 `docs/159`
+  #     已经撞过这个形状的亲戚（"机器人推送会把必需检查挂成 `action_required`"）。
+  #   * 直推就没有那一串：重算完几秒就落，**不等任何门禁**。`main` 的 `push` 门禁随后
+  #     照样会在这一笔上跑一遍（只是**不阻塞**它）。
+  #
+  # **它凭什么推得动 `main`**：分支保护里 `enforce_admins` 是 `false`（2026-10-16 用 API
+  # 核实过），所以**属主 PAT** 能绕过必需检查。`GITHUB_TOKEN` 不行（它不是 admin）——
+  # 那正是上面那条替代路走不通的第二个理由。用 `secrets.MANIFEST_TOKEN`，**且只有这个 job
+  # 引用它**：`emit` 那一路跑在 `pull_request_target` 上（树是别人的），既拿不到也不需要它。
   emit-main:
     name: main 上的生成物（单一写者）
-    # `github-actions[bot]` 那一条是**回环守卫**：这个 job 自己开的滚动 PR 合并之后
-    # 会再来一次 `push: main`，而那时树本来就是最新的 —— 直接不跑，省一轮。
+    # **回环守卫**：这个 job 自己推上去的那一笔会再来一次 `push: main`，而那时树本来就是
+    # 最新的。按**提交信息**判 —— 推它的是属主 PAT，`github.actor` 是属主而不是
+    # `github-actions[bot]`，所以按 actor 判的老守卫在这里**不成立**。
     #
-    # `workflow_dispatch` 也收（手动点一次 = "现在就把 main 上的生成物对齐"），
-    # 但 `pull_request_target` 不收 —— 那个事件的 `github.ref` **恰好也是**
+    # `workflow_dispatch` 也收（手动点一次 = "现在就把 main 上的生成物对齐"）；
+    # `pull_request_target` 不收 —— 那个事件的 `github.ref` **恰好也是**
     # `refs/heads/main`，而它检出的树是**别人的**，拿它去写生成物是错的。
     if: >-
-      github.actor != 'github-actions[bot]' &&
       github.ref == 'refs/heads/main' &&
+      !startsWith(github.event.head_commit.message, '[生成物]') &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: write
-      pull-requests: write
+      contents: read
     # **`cancel-in-progress: true`**（与 `emit` 不同）：这个 job 每次都从**当前的 main 尖**上
     # 重算，所以旧的那一轮被取消没有任何损失，而串行排队会让生成物越落越远。
     concurrency:
       group: manifest-main
       cancel-in-progress: true
     steps:
-      # 全量取 —— 改号那一步要 `HEAD~1` 上看号（见下面「改号」）。
+      # **密钥不在就直接红**，不静默跳过：跳过的后果是生成物**永远**不再刷新，而门禁里
+      # 没有任何判据会发现（`loment_tools_test` 钉的是这个 job 的**存在与形状**，
+      # 不是"它跑成功了" —— 见 `docs/254` §5 第 3 条）。
+      - name: 密钥在不在
+        env:
+          TOKEN: ${{ secrets.MANIFEST_TOKEN }}
+        run: |
+          set -e
+          if [ -z "$TOKEN" ]; then
+            echo "::error::没有 MANIFEST_TOKEN —— main 上的生成物没人推得上去。"
+            echo "::error::建一个**细粒度 PAT**（只给这个仓，Contents: Read and write），存成这个仓的 secret MANIFEST_TOKEN。"
+            echo "::error::为什么不用 GITHUB_TOKEN：它不是 admin，推 main 会被分支保护拒掉（enforce_admins 是 false，属主 PAT 能绕过）。"
+            exit 1
+          fi
+
+      # 全量取 —— 改号那一步要在前一个 main 上看号（见下面「改号」）。
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -366,101 +392,82 @@ jobs:
           python-version: "3.11"
 
       # 顺序是硬的：**改号 -> 种子 -> surface -> 手册 -> 清单 -> 校验和**。
-      # 清单算的是**那一刻的树**，顺序错了记进去的就是过期那一份的哈希。
-      - name: 重算生成物
-        run: |
-          set -e
-          # **改号**：两条线同时取一个号，各自看 `origin/main` 都是空的，于是都取到 254，
-          # 两边都合进来 —— `main` 上就有了重号，而 `loment_docs_test` 会因此红（新红 ⇒
-          # 这个滚动 PR 自己就合不进去）。这里以**前一个 main** 为 base：只有这一次合并
-          # **新带进来**的那一份会被挪号，已经在 base 上的一个不动（`loment_docs.py` §1）。
-          rc=0
-          python tools/loment_docs.py --fix --base HEAD~1 || rc=$?
-          case "$rc" in
-            0) : ;;
-            1) echo "::error::改号之后 docs/ 仍有重号"; exit 1 ;;
-            *) echo "::notice::这一轮没改号（rc=$rc）" ;;
-          esac
-          python tools/loment_seed.py --emit
-          python tools/loment_diag.py --dump-surface loment/tools/surface_data.lomt
-          python tools/loment_manual.py --emit docs/manual
-          python tools/loment_release.py --emit
-          python tools/loment_release.py --checksums loment/build/SHA256SUMS
-          echo "--- 重算之后工作树里动了什么 ---"
-          git status --porcelain
-
-      # 白名单守卫 —— 与 `emit` 同一个形状，只是这里多两件（手册与台账）。
-      # `docs/**` 那一支比 `emit` 那边宽：改号会**重写全路径引用** `docs/NNN-slug`，
-      # 那些引用散在整个仓的 `.md` 里（`loment_docs.rewrite_full_refs`）。
-      - name: 白名单守卫（只许动生成物）
-        run: |
-          set -e
-          stray=$(git diff HEAD --name-only | cut -c1- \
-            | grep -v -E '^loment/build/(selfhost_driver\.ll|release-manifest\.json|SHA256SUMS)$|^loment/tools/surface_data\.lomt$|^docs/manual/|^docs/.*\.md$' || true)
-          if [ -n "$stray" ]; then
-            echo "::error::重算动了**生成物白名单之外**的已跟踪文件 —— 拒绝提交。这通常意味着生成物命令坏了："
-            echo "$stray"
-            exit 1
-          fi
-          echo "只动了允许的那几处。"
-
-      - name: 推到滚动分支
-        id: push
+      # 清单算的是**那一刻的树**，所以基点必须是**刚落下的那个 main 尖**，而不是本 job
+      # 开头 checkout 的那个（两者之间有一个窗口）。所以整套重算放在循环里：**每一次尝试
+      # 都重新落在最新的 main 上重来**，推不上去就再来一轮（最多三次）。
+      #
+      # **推的不是 force**：这是在 main 尖上长出来的一笔，本来就该是 fast-forward；
+      # 被拒只说明这一轮算的基点已经旧了（有人在这几秒里合了新的），重来一轮就好。
+      - name: 在最新的 main 上重算，然后推上去
         env:
-          GH_TOKEN: ${{ github.token }}
-          BRANCH: bot/generated-artifacts
+          TOKEN: ${{ secrets.MANIFEST_TOKEN }}
           REPO: ${{ github.repository }}
         run: |
           set -e
-          if [ -z "$(git status --porcelain)" ]; then
-            echo "生成物本来就是最新的 —— 什么都不做。"
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add loment/build/selfhost_driver.ll loment/tools/surface_data.lomt \
-                  loment/build/release-manifest.json loment/build/SHA256SUMS docs/manual docs
-          git commit -m "[生成物] 只有生成物：种子 + surface_data + 手册 + 发布清单 + SHA256SUMS（main 上重算）"
-          # **force**：这个分支是一个**滚动**分支，每次都要正好等于"当前 main + 生成物"，
-          # 不是一条要保住历史的线。它的内容每次都从 main 重算，所以覆盖没有丢失。
-          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${REPO}.git" \
-            "HEAD:refs/heads/${BRANCH}"
+          URL="https://x-access-token:${TOKEN}@github.com/${REPO}.git"
+          git config user.name  "loment-artifacts"
+          git config user.email "artifacts@users.noreply.github.com"
 
-      - name: 开 / 更新滚动 PR，并开 auto-merge
-        if: steps.push.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          BRANCH: bot/generated-artifacts
-        run: |
-          set -euo pipefail
-          # PR 正文用**逐行 echo 追加**，不用 heredoc —— `<<'EOF'` 要求 `EOF` 顶在列 0，
-          # 而这里整段在 YAML 块标量里缩进着，顶到列 0 会把块标量截断。
-          body=$(mktemp)
-          {
-            echo '`main` 上的全树生成物（手册 / 发布清单 / SHA256SUMS / 种子 / surface_data）。'
-            echo
-            echo '**这一笔由 `manifest` workflow 在 `push: main` 上自动重算，与 `gate` 同时起跑。**'
-            echo '它只碰生成物，所以与任何人的 PR 都不重叠 —— 这也是它永远不冲突的原因。'
-            echo
-            echo '判据见 `tools/loment_tools_test.py`：PR 侧不许再提交整树生成物；'
-            echo 'main 侧的重算作业必须存在、由 `push` 触发、且**不排在门禁后面**。'
-            echo
-            echo '背景与实测见 `docs/254-the-artifacts-are-not-a-shared-register.md`。'
-          } > "$body"
+          # git 出错时会把**整条 URL（含 token）**打进 stderr。GitHub 会遮密钥，
+          # 但这里再遮一层：那条日志是要被人读的。
+          redact() { sed "s|${TOKEN}|<MANIFEST_TOKEN>|g" "$1"; }
 
-          num=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // ""')
-          if [ -z "$num" ]; then
-            gh pr create --base main --head "$BRANCH" \
-              --title "[生成物] main 上的全树生成物（自动重算）" --body-file "$body" >/dev/null
-            num=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number')
-            echo "开了一个新的滚动 PR：#$num"
-          else
-            # force-push 已经把内容更新了；正文也刷一遍，免得它指着旧设计说话。
-            gh pr edit "$num" --body-file "$body" >/dev/null
-            echo "滚动 PR #$num 已经开着 —— force-push 已更新"
-          fi
-          # **auto-merge 每一次都重开**：force-push 之后不保证还挂着（而且它可能被谁关过）。
-          gh pr merge "$num" --squash --auto
-          echo "auto-merge 已开：门禁一绿就落"
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            echo "=== 第 $attempt 次尝试 ==="
+            log=$(mktemp)
+            if ! git fetch -q "$URL" main >"$log" 2>&1; then
+              redact "$log"; exit 1
+            fi
+            # **落在当前 main 的尖上再算**：清单记的是那一刻的树，基点旧了记进去就是错的。
+            git checkout -q --detach FETCH_HEAD
+
+            # **改号**：两条线同时取一个号，各自看 `origin/main` 都是空的，于是都取到 254、
+            # 两边都合进来 —— main 上就有了重号，而 `loment_docs_test` 会因此红。这里以
+            # **前一个 main** 为 base：只有这一次合并**新带进来**的那一份会被挪号，已经在
+            # base 上的一个不动（`loment_docs.py` §1）。
+            rc=0
+            python tools/loment_docs.py --fix --base HEAD~1 || rc=$?
+            case "$rc" in
+              0) : ;;
+              1) echo "::error::改号之后 docs/ 仍有重号"; exit 1 ;;
+              *) echo "::notice::这一轮没改号（rc=$rc）" ;;
+            esac
+
+            python tools/loment_seed.py --emit
+            python tools/loment_diag.py --dump-surface loment/tools/surface_data.lomt
+            python tools/loment_manual.py --emit docs/manual
+            python tools/loment_release.py --emit
+            python tools/loment_release.py --checksums loment/build/SHA256SUMS
+
+            # **白名单守卫**：生成物命令只许动这些路径。动了别处 = 那几条命令坏了 = 该红，
+            # 而不是把一个来历不明的改动当成"生成物"推上 main。
+            # `docs/.*\.md` 那一支比 `emit` 那边宽：改号会**重写全路径引用**
+            # `docs/NNN-slug`，那些引用散在整个仓的 `.md` 里（`loment_docs.rewrite_full_refs`）。
+            stray=$(git diff HEAD --name-only | cut -c1- \
+              | grep -v -E '^loment/build/(selfhost_driver\.ll|release-manifest\.json|SHA256SUMS)$|^loment/tools/surface_data\.lomt$|^docs/manual/|^docs/.*\.md$' || true)
+            if [ -n "$stray" ]; then
+              echo "::error::重算动了**生成物白名单之外**的已跟踪文件 —— 拒绝提交。这通常意味着生成物命令坏了："
+              echo "$stray"
+              exit 1
+            fi
+
+            if [ -z "$(git status --porcelain)" ]; then
+              echo "生成物本来就是最新的 —— main 上什么都不用改。"
+              exit 0
+            fi
+
+            git add loment/build/selfhost_driver.ll loment/tools/surface_data.lomt \
+                    loment/build/release-manifest.json loment/build/SHA256SUMS docs/manual docs
+            git commit -q -m "[生成物] 只有生成物：种子 + surface_data + 手册 + 发布清单 + SHA256SUMS（main 上重算）"
+
+            if git push "$URL" HEAD:main >"$log" 2>&1; then
+              echo "推上去了：$(git log --oneline -1)"
+              exit 0
+            fi
+            echo "::warning::推被拒了（main 又动了）—— 重新落在最新的 main 上再算一轮"
+            redact "$log"
+            attempt=$((attempt + 1))
+          done
+          echo "::error::连试 3 轮都没推上去（main 一直在动）—— 这一轮生成物没刷新"
+          exit 1

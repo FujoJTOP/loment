@@ -278,7 +278,13 @@ def test_main_writer_is_not_behind_the_gate():
     added = _add_list(job)
     missing = [a for a in WHOLE_TREE_ARTIFACTS if a not in added]
     assert not missing, f"`emit-main` 没有把整树生成物收进提交：{missing}"
-    print("      main 侧单一写者：五件按硬顺序重算、与门禁并行、整树生成物收全")
+    # **推得动 `main` 的那个前提**：属主 PAT。`GITHUB_TOKEN` 不是 admin，推 `main` 会被分支
+    # 保护拒掉（`enforce_admins` 是 false）—— 于是重算出来的东西**永远落不到 `main` 上**，
+    # 而除了这一条，没有别的判据会发现（`docs/254` §3.2 与 §5 第 3 条）。
+    assert "secrets.MANIFEST_TOKEN" in job, (
+        "`emit-main` 推 `main` 用的不是 `secrets.MANIFEST_TOKEN` —— `GITHUB_TOKEN` 推不动"
+        "（它不是 admin，会撞分支保护），而它推不动这件事本身不会报错到任何人面前")
+    print("      main 侧单一写者：五件按硬顺序重算、与门禁并行、整树生成物收全、用属主 PAT 推")
 
 
 # ---------------------------------------------------------------- M55 格式化
