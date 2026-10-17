@@ -293,10 +293,67 @@ def test_field_access_on_non_struct_rejected():
     assert any("非结构体" in x for x in e), e
 
 
+#: `#323`：类型位置上的未知名 —— 六个位置各一份（第三项是消息里该出现的**定位**）。
+#: 它们原先**全走 E002「符号未声明」**，用户拿到的建议是"改拼写 / 补 `use` / 补类型标注"，
+#: 三条一条都不适用（`f64` 不是拼错，是这门语言没有浮点）。
+#: `array-elem` 那一格还额外量到**自举侧一条都不报**（`check_type` 见到 `[` 直接返回）。
+_UNTYPED_SITES: tuple[tuple[str, str, str], ...] = (
+    ("let", "module m\nfn f() -> u32 {\n    let a: f64 = 0;\n    return 0;\n}\n",
+     "let a 的类型"),
+    ("param", "module m\nfn f(p: f64) -> u32 {\n    return 0;\n}\n", "参数 p 的类型"),
+    ("return", "module m\nfn f() -> f64 {\n    return 0;\n}\n", "返回类型"),
+    ("field", "module m\nstruct S {\n    x: f64,\n}\n\nfn f() -> u32 {\n    return 0;\n}\n",
+     "结构体 S.x 的字段类型"),
+    ("payload", "module m\nenum E {\n    A(f64),\n}\n\nfn f() -> u32 {\n    return 0;\n}\n",
+     "枚举 E::A 的载荷类型"),
+    ("array-elem", "module m\nfn f() -> u32 {\n    let a: [f64; 4] = [0, 0, 0, 0];\n"
+                   "    return 0;\n}\n", "[f64; 4]"),
+)
+
+
 @test
-def test_unknown_type_in_signature_rejected():
-    e = errs('module m\nfn f(p: Foo) -> u32 { return 0; }\n')
-    assert any("未声明" in x for x in e), e
+def test_an_unknown_type_is_not_reported_as_an_undeclared_name():
+    """`#323`：`let a: f64 = 0;` 要说「**未知类型**」，不是「符号未声明」。
+
+    **为什么值得一个独立的码**（E030，理由写在 `loment_diag` 那张表的那一条上）：按
+    "码按修法分"，E002 的修法是"声明那个名字 / 改拼写 / 补 `use`"，而这一条的修法是
+    "**这门语言没有这个类型**"。0.1.4.5 把两者并成一个码，于是最常撞的那一格（浮点）
+    拿到的是三条一条都不适用的建议 —— 用户会去找一个不存在的拼写错误。
+
+    判据量的是**参考实现的形状**（码 + 那句定位）。"两边码集相等"由
+    `loment_rule_parity` 的同名探针管 —— 那一条只证**一致**，这一条证**对**。
+    """
+    for name, src, role in _UNTYPED_SITES:
+        e = errs(src)
+        codes = {loment_diag.classify(x)[0] for x in e}
+        assert codes == {"E030"}, (name, e)
+        assert any("未知类型" in x and role in x for x in e), (name, e)
+
+
+@test
+def test_the_runtime_refusal_names_the_construct_and_the_reason():
+    """`#321`：默认档（`no_runtime`）拒用运行期构造时，正文要**说清是哪一格、为什么**。
+
+    0.1.4.5 给的是 `message: /` —— 正文是一个 token。用户读到的码是 ``E022 bad `choose` ``，
+    而他的 `choose` 一行都没写错；真正的原因（`runtime` 那一维是一句**保证**）排在六条
+    `why` 的第三条，要读完才知道。修好之后正文是一句话，本判据钉住那句话里必须有三样：
+
+    * 那份保证的来历（`no_runtime`）；
+    * 被拒的**构造本身**（``除法 `/` `` / ``取模 `%` `` / `` `alloc` ``）；
+    * 以及"为什么"（`保证` —— 产物里不许出现那段运行期）。
+
+    **这一条此前根本不存在**：措辞的修复（PR #398）只被"两边码集相等"盖着，而码集相等
+    既看不出正文是 token 还是句子，也看不出它有没有说错话。
+    """
+    for src, site in (
+        ("module m\nfn f() -> u32 {\n    let a: u32 = 10;\n    return a / 2;\n}\n", "除法 `/`"),
+        ("module m\nfn f() -> u32 {\n    let a: u32 = 10;\n    return a % 3;\n}\n", "取模 `%`"),
+        ("module m\nfn f() -> ptr {\n    return alloc(8);\n}\n", "`alloc`"),
+    ):
+        e = errs(src)
+        hit = [x for x in e if "no_runtime" in x and site in x]
+        assert hit, (site, e)
+        assert all("保证" in x and len(x) > 60 for x in hit), (site, hit)
 
 
 @test
@@ -464,7 +521,7 @@ def test_payload_type_mismatch_rejected():
 @test
 def test_unknown_payload_type_rejected():
     e = errs("module m\nenum S { C(Foo) }\nfn f() -> u32 { return 0; }\n")
-    assert any("载荷类型 Foo 未声明" in x for x in e), e
+    assert any("未知类型 Foo（枚举 S::C 的载荷类型）" in x for x in e), e
 
 
 @test

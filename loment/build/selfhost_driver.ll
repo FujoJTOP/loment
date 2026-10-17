@@ -1757,8 +1757,8 @@ setprev:
 @.str.is_base_type.9 = private unnamed_addr constant [3 x i8] c"\73\74\72"
 @.str.is_base_type.10 = private unnamed_addr constant [3 x i8] c"\70\74\72"
 @.str.is_builtin.0 = private unnamed_addr constant [176 x i8] c"\73\74\72\5F\6C\65\6E\20\73\74\72\5F\65\71\20\73\74\72\5F\63\6F\6E\63\61\74\20\73\74\72\5F\62\79\74\65\20\73\6C\69\63\65\5F\6C\65\6E\20\70\61\6E\69\63\20\61\6C\6C\6F\63\20\66\72\65\65\20\6C\6F\61\64\38\20\73\74\6F\72\65\38\20\61\74\6F\6D\69\63\5F\61\64\64\20\69\6E\62\20\6F\75\74\62\20\67\65\74\5F\62\69\74\73\20\73\65\74\5F\62\69\74\73\20\73\74\72\5F\70\74\72\20\70\74\72\5F\61\64\64\20\70\74\72\5F\73\75\62\20\73\79\73\63\61\6C\6C\34\20\73\79\73\63\61\6C\6C\36\20\73\79\73\63\61\6C\6C\37\20\74\68\72\65\61\64\5F\73\70\61\77\6E"
-@.str.check_type.0 = private unnamed_addr constant [1 x i8] c"\5B"
-@.str.check_type.1 = private unnamed_addr constant [3 x i8] c"\6D\75\74"
+@.str.check_type.0 = private unnamed_addr constant [3 x i8] c"\6D\75\74"
+@.str.check_type.1 = private unnamed_addr constant [1 x i8] c"\5B"
 @.str.chk_find_paren.0 = private unnamed_addr constant [1 x i8] c"\28"
 @.str.chk_find_paren.1 = private unnamed_addr constant [1 x i8] c"\7B"
 @.str.chk_skip_type.0 = private unnamed_addr constant [3 x i8] c"\6D\75\74"
@@ -41698,74 +41698,85 @@ entry:
   %t1 = load ptr, ptr %src.addr
   %t2 = load ptr, ptr %t.addr
   %t3 = load i32, ptr %i.addr
-  %t4 = getelementptr inbounds [1 x i8], ptr @.str.check_type.0, i64 0, i64 0
+  %t4 = getelementptr inbounds [3 x i8], ptr @.str.check_type.0, i64 0, i64 0
   %t5 = insertvalue { ptr, i64 } undef, ptr %t4, 0
-  %t6 = insertvalue { ptr, i64 } %t5, i64 1, 1
+  %t6 = insertvalue { ptr, i64 } %t5, i64 3, 1
   %t7 = call i1 @chk_tok_is(ptr %t1, ptr %t2, i32 %t3, { ptr, i64 } %t6)
-  br i1 %t7, label %L2_sc_short, label %L1_sc_rhs
-L1_sc_rhs:
+  br i1 %t7, label %L1_then, label %L2_else
+L1_then:
   %t8 = load ptr, ptr %src.addr
   %t9 = load ptr, ptr %t.addr
-  %t10 = load i32, ptr %i.addr
-  %t11 = getelementptr inbounds [3 x i8], ptr @.str.check_type.1, i64 0, i64 0
-  %t12 = insertvalue { ptr, i64 } undef, ptr %t11, 0
-  %t13 = insertvalue { ptr, i64 } %t12, i64 3, 1
-  %t14 = call i1 @chk_tok_is(ptr %t8, ptr %t9, i32 %t10, { ptr, i64 } %t13)
-  br label %L3_sc_end
-L2_sc_short:
-  br label %L3_sc_end
-L3_sc_end:
-  %t15 = phi i1 [ %t14, %L1_sc_rhs ], [ true, %L2_sc_short ]
-  br i1 %t15, label %L4_then, label %L5_else
+  %t10 = load ptr, ptr %s.addr
+  %t11 = load i32, ptr %n.addr
+  %t12 = load i32, ptr %i.addr
+  %t13 = add i32 %t12, 1
+  %t14 = load ptr, ptr %p.addr
+  %t15 = load i32, ptr %o.addr
+  %t16 = call i64 @check_type(ptr %t8, ptr %t9, ptr %t10, i32 %t11, i32 %t13, ptr %t14, i32 %t15)
+  ret i64 %t16
+L2_else:
+  br label %L3_end
+L3_end:
+  %t17 = load ptr, ptr %src.addr
+  %t18 = load ptr, ptr %t.addr
+  %t19 = load i32, ptr %i.addr
+  %t20 = getelementptr inbounds [1 x i8], ptr @.str.check_type.1, i64 0, i64 0
+  %t21 = insertvalue { ptr, i64 } undef, ptr %t20, 0
+  %t22 = insertvalue { ptr, i64 } %t21, i64 1, 1
+  %t23 = call i1 @chk_tok_is(ptr %t17, ptr %t18, i32 %t19, { ptr, i64 } %t22)
+  br i1 %t23, label %L4_then, label %L5_else
 L4_then:
-  %t16 = load i32, ptr %i.addr
-  %t17 = zext i32 %t16 to i64
-  %t18 = mul i64 %t17, 4294967296
-  %t19 = load i32, ptr %o.addr
-  %t20 = zext i32 %t19 to i64
-  %t21 = add i64 %t18, %t20
-  ret i64 %t21
+  %t24 = load ptr, ptr %src.addr
+  %t25 = load ptr, ptr %t.addr
+  %t26 = load ptr, ptr %s.addr
+  %t27 = load i32, ptr %n.addr
+  %t28 = load i32, ptr %i.addr
+  %t29 = add i32 %t28, 1
+  %t30 = load ptr, ptr %p.addr
+  %t31 = load i32, ptr %o.addr
+  %t32 = call i64 @check_type(ptr %t24, ptr %t25, ptr %t26, i32 %t27, i32 %t29, ptr %t30, i32 %t31)
+  ret i64 %t32
 L5_else:
   br label %L6_end
 L6_end:
-  %t22 = load ptr, ptr %src.addr
-  %t23 = load ptr, ptr %t.addr
-  %t24 = load i32, ptr %i.addr
-  %t25 = call i1 @is_base_type(ptr %t22, ptr %t23, i32 %t24)
-  br i1 %t25, label %L7_then, label %L8_else
+  %t33 = load ptr, ptr %src.addr
+  %t34 = load ptr, ptr %t.addr
+  %t35 = load i32, ptr %i.addr
+  %t36 = call i1 @is_base_type(ptr %t33, ptr %t34, i32 %t35)
+  br i1 %t36, label %L7_then, label %L8_else
 L7_then:
-  %t26 = load i32, ptr %i.addr
-  %t27 = zext i32 %t26 to i64
-  %t28 = mul i64 %t27, 4294967296
-  %t29 = load i32, ptr %o.addr
-  %t30 = zext i32 %t29 to i64
-  %t31 = add i64 %t28, %t30
-  ret i64 %t31
+  %t37 = load i32, ptr %i.addr
+  %t38 = zext i32 %t37 to i64
+  %t39 = mul i64 %t38, 4294967296
+  %t40 = load i32, ptr %o.addr
+  %t41 = zext i32 %t40 to i64
+  %t42 = add i64 %t39, %t41
+  ret i64 %t42
 L8_else:
   br label %L9_end
 L9_end:
-  %t32 = load ptr, ptr %t.addr
-  %t33 = load i32, ptr %i.addr
-  %t34 = call i32 @chk_tok_kind(ptr %t32, i32 %t33)
-  %t35 = icmp eq i32 %t34, 0
-  br i1 %t35, label %L10_then, label %L11_else
+  %t43 = load ptr, ptr %t.addr
+  %t44 = load i32, ptr %i.addr
+  %t45 = call i32 @chk_tok_kind(ptr %t43, i32 %t44)
+  %t46 = icmp eq i32 %t45, 0
+  br i1 %t46, label %L10_then, label %L11_else
 L10_then:
-  %t36 = load ptr, ptr %src.addr
-  %t37 = load ptr, ptr %t.addr
-  %t38 = load ptr, ptr %s.addr
-  %t39 = load i32, ptr %n.addr
-  %t40 = load i32, ptr %i.addr
-  %t41 = call i32 @chk_lookup_slot(ptr %t36, ptr %t37, ptr %t38, i32 %t39, i32 %t40)
-  %t42 = icmp ne i32 %t41, 0
-  br i1 %t42, label %L13_then, label %L14_else
+  %t47 = load ptr, ptr %src.addr
+  %t48 = load ptr, ptr %t.addr
+  %t49 = load ptr, ptr %s.addr
+  %t50 = load i32, ptr %n.addr
+  %t51 = load i32, ptr %i.addr
+  %t52 = call i32 @chk_lookup_slot(ptr %t47, ptr %t48, ptr %t49, i32 %t50, i32 %t51)
+  %t53 = icmp ne i32 %t52, 0
+  br i1 %t53, label %L13_then, label %L14_else
 L13_then:
-  %t43 = load i32, ptr %i.addr
-  %t44 = zext i32 %t43 to i64
-  %t45 = mul i64 %t44, 4294967296
-  %t46 = load i32, ptr %o.addr
-  %t47 = zext i32 %t46 to i64
-  %t48 = add i64 %t45, %t47
-  ret i64 %t48
+  %t54 = load i32, ptr %i.addr
+  %t55 = zext i32 %t54 to i64
+  %t56 = mul i64 %t55, 4294967296
+  %t57 = load i32, ptr %o.addr
+  %t58 = zext i32 %t57 to i64
+  %t59 = add i64 %t56, %t58
+  ret i64 %t59
 L14_else:
   br label %L15_end
 L15_end:
@@ -41773,18 +41784,18 @@ L15_end:
 L11_else:
   br label %L12_end
 L12_end:
-  %t49 = load i32, ptr %i.addr
-  %t50 = zext i32 %t49 to i64
-  %t51 = mul i64 %t50, 4294967296
-  %t52 = load ptr, ptr %src.addr
-  %t53 = load ptr, ptr %t.addr
-  %t54 = load ptr, ptr %p.addr
-  %t55 = load i32, ptr %o.addr
-  %t56 = load i32, ptr %i.addr
-  %t57 = call i32 @sym_pub(ptr %t52, ptr %t53, ptr %t54, i32 %t55, i32 2, i32 %t56)
-  %t58 = zext i32 %t57 to i64
-  %t59 = add i64 %t51, %t58
-  ret i64 %t59
+  %t60 = load i32, ptr %i.addr
+  %t61 = zext i32 %t60 to i64
+  %t62 = mul i64 %t61, 4294967296
+  %t63 = load ptr, ptr %src.addr
+  %t64 = load ptr, ptr %t.addr
+  %t65 = load ptr, ptr %p.addr
+  %t66 = load i32, ptr %o.addr
+  %t67 = load i32, ptr %i.addr
+  %t68 = call i32 @sym_pub(ptr %t63, ptr %t64, ptr %t65, i32 %t66, i32 30, i32 %t67)
+  %t69 = zext i32 %t68 to i64
+  %t70 = add i64 %t62, %t69
+  ret i64 %t70
 }
 ; chk_find_paren -> u32
 define i32 @chk_find_paren(ptr %src, ptr %t, i32 %i) {
