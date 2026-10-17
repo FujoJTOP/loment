@@ -2642,34 +2642,6 @@ def _time_bin(elf: Path, name: str, td: Path, runs: int = 5, timeout: int = 120)
         return -1
 
 
-def _time_two(a: Path, b: Path, name: str, td: Path, runs: int = 5,
-              timeout: int = 300) -> tuple[int, int]:
-    """**交替**给两条二进制计时，各取最小，回 (a, b) 微秒。
-
-    **为什么不各跑各的 5 遍**：那样一时的负载尖峰只会落在其中一条身上，比值就被顶起来 ——
-    实测同一对被测体在 Windows 上 3.18×、在 WSL 里 4.10×，而界是 5×，于是在共享 runner 上
-    这条判据会**偶发**地红（CI 上确实红过一次）。交替跑之后尖峰同时打到两边，比值就稳了。
-
-    一次 shell 里跑完（理由同 `_time_bin`：一次 `wsl` 启动就够淹掉被测时间）。
-    """
-    na, nb = f"{_T}lomelf_{name}_a.bin", f"{_T}lomelf_{name}_b.bin"
-    script = (
-        f"rm -f {na} {nb} && cp {_wsl_path(a)} {na} && cp {_wsl_path(b)} {nb} && "
-        f"chmod +x {na} {nb} && ba=999999999999 && bb=999999999999 && "
-        f"for i in $(seq {runs}); do "
-        f"s=$(date +%s%N); {na} >/dev/null 2>&1; e=$(date +%s%N); "
-        f"d=$(( (e - s) / 1000 )); if [ $d -lt $ba ]; then ba=$d; fi; "
-        f"s=$(date +%s%N); {nb} >/dev/null 2>&1; e=$(date +%s%N); "
-        f"d=$(( (e - s) / 1000 )); if [ $d -lt $bb ]; then bb=$d; fi; "
-        f"done; echo -n $ba $bb")
-    r = _sh(script, timeout, text=True)
-    try:
-        x, y = r.stdout.strip().split()
-        return int(x), int(y)
-    except ValueError:
-        return -1, -1
-
-
 @test
 def test_the_generational_barrier_has_a_measured_cost():
     """**分代写屏障的墙钟代价**（`FujoJTOP/loment#365`，`docs/210` §2.7/§7）—— 有上界的测量。
@@ -2683,11 +2655,18 @@ def test_the_generational_barrier_has_a_measured_cost():
     循环里一次 `alloc` 都没有 ⇒ 两个档的差别**只有**屏障那一次调用，没有收集器掺进来），
     编两遍 —— `choose gc_auto`（**不发**屏障）与 `choose gc_auto_alpha`（每站发一次）——
     各自**一次 shell 里跑 5 遍取最小**（见 `_time_bin`：一次 `wsl` 启动就能淹掉被测时间）。
-    两个断言：
+    三个断言，而**确定性的那个才是这条判据的意图**：
+
       * 两只**都跑完**（rc = 7）—— 否则"更快"可能只是崩得早；
-      * alpha / auto **不超过 3 倍**。界取得宽是有意的：这条要抓的是**形状变了**
-        （例如屏障变成每字一次、或跟着堆大小走），不是抓几个百分点 —— 那几个百分点由
-        IR 的 1.37 倍那条确定性的判据管。实测比值印在 `PASS` 行上，供 §7 记数。
+      * `gc_auto` 的 IR 里**一条屏障都没有**（那一档不发）；
+      * `gc_auto_alpha` 的 IR 里屏障函数定义 **1** 次、**调用次数 == 源里 `store8` 站点数**
+        （每站一次）。这三条与机器快慢无关，抓的正是"形状变了"：每字一次会让调用数变成
+        8 倍，跟着堆大小走则会随负载漂。
+
+    **墙钟只报不判**（`FujoJTOP/loment#442`）：同一个比值在判据作者那台是 3.2×、本机 4.13×、
+    CI runner 5.4×（两次相差 0.5%，不是抖动），而界原先定在 5.0 —— **分开的是机器，不是形状**：
+    它在 CI 上恒红、在别的机器上恒绿，与那棵树对不对无关。要让它重新变成门禁，得让它跟
+    **同一次运行里、紧接着的对照**比，而不是跟一个绝对比值比。比值仍打印出来，供 `docs/210` §7 记数。
     """
     if not _wsl():
         print("      SKIP: 无 clang/WSL")
@@ -2712,26 +2691,39 @@ def test_the_generational_barrier_has_a_measured_cost():
             "    syscall4(60, 7, 0, 0);\n}\n")
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
-        ns = {}
+        got = {}
+        irs: dict[str, str] = {}
         for tag, tier in (("auto", "choose gc_auto"), ("alpha", "choose gc_auto_alpha")):
             src = td / f"{tag}.lomt"
             src.write_text(body % tier, encoding="utf-8", newline="\n")
             ll = _ref_ir(src, td)
-            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            irs[tag] = ll.read_text(encoding="utf-8")
+            blob, _info = lomelf.compile_ll(irs[tag])
             nat = td / f"{tag}.native"
             nat.write_bytes(blob)
             rc, _out = _run_bin(nat, f"barrier_rc_{tag}", td, timeout=60)
             assert rc == 7, f"`{tier}` 那一只没跑完：rc={rc}（比时间之前先确认它真的跑完了）"
-            ns[tag] = nat
-        a, b = _time_two(ns["auto"], ns["alpha"], "barrier", td, runs=5)
+            got[tag] = _time_bin(nat, f"barrier_{tag}", td, runs=5)
+
+    # **形状**：数 IR 就够了，与机器快慢无关（`#442` —— 原先唯一的断言是个绝对墙钟比值，
+    # 而它在本机 4.13×、CI runner 5.4×、作者那台 3.2×，界 5.0 落在三者的散布里）。
+    sites = body.count("store8(")
+    assert "__loment_wb" not in irs["auto"], (
+        "`choose gc_auto` 的 IR 里出现了写屏障 —— 那一档**不发**屏障，这是形状变了")
+    n_def = irs["alpha"].count("define internal void @__loment_wb")
+    assert n_def == 1, f"`choose gc_auto_alpha` 里屏障函数定义了 {n_def} 次（应为 1 次）"
+    n_call = irs["alpha"].count("call void @__loment_wb")
+    assert n_call == sites, (
+        f"屏障调用 {n_call} 处，而源里 `store8` 站点 {sites} 个 —— 屏障应当**每站一次**"
+        "（每字一次会让它变成 8 倍，跟着堆大小走则会随负载漂）")
+
+    a, b = got["auto"], got["alpha"]
     assert a > 0 and b > 0, f"计时没拿到数：auto={a} alpha={b}（微秒）"
     ratio = b / a
-    assert ratio <= 8.0, (
-        f"写屏障的墙钟是 auto 档的 {ratio:.2f} 倍（auto={a} µs，alpha={b} µs）—— 超过 5 倍。"
-        "这条界是抓**形状**变化的（屏障变成每字一次、或跟着堆大小走），不是抓几个百分点："
-        "实测 3.2×（Windows）/ 4.1×（Linux），而 IR 只有 1.37×")
     print(f"      写屏障：auto {a / 1000:.1f} ms / alpha {b / 1000:.1f} ms = {ratio:.2f}×"
-          "（交替跑，各一次 shell 里 5 遍取最小）")
+          f"（auto 的 IR {len(irs['auto'].splitlines())} 行、无屏障；"
+          f"alpha {len(irs['alpha'].splitlines())} 行、{n_call} 处调用 / {sites} 个站点）"
+          "（各一次 shell 里 5 遍取最小；比值只报不判，见 docstring）")
 
 
 @test
