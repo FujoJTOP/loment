@@ -374,6 +374,14 @@ _CASES: list[tuple[str, str]] = [
      "module m\n\nfn f() -> u32 {\n    let x = 1;\n    return x;\n}\n"),
     ("f64-in-annotation",
      "module m\n\nfn f() -> u32 {\n    let a: f64 = 1.0;\n    return 0;\n}\n"),
+    # `#323` 的另一半：**类型位上的未知名**是 E030，两侧都要是。上面那条压根到不了类型表
+    # （`1.0` 里的 `.` 在解析期就被拒成 E019）；这两条才量到 E030 本身。
+    # 第二条尤其要紧：在 `check_type` 补上 `[` 的递归之前，自举侧**一条都不报** ——
+    # 数组/切片的元素类型从来没被检查过，也就是**静默放行一个不存在的类型**。
+    ("unknown-type-let",
+     "module m\n\nfn f() -> u32 {\n    let a: f64 = 0;\n    return 0;\n}\n"),
+    ("unknown-type-array-element",
+     "module m\n\nfn f() -> u32 {\n    let a: [f64; 4] = [0, 0, 0, 0];\n    return 0;\n}\n"),
     ("bin-literal",
      "module m\n\nfn f() -> u32 {\n    let v: u32 = 0b1010;\n    return v;\n}\n"),
     # ---- 自举侧"死给你看"的两条 (issue #335 / #44) --------------------------------
