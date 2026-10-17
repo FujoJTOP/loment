@@ -143,7 +143,11 @@ def test_help_and_refresh():
         rc, out, _ = _run("--refresh", "--outlet", str(outlet))
         assert rc == 0, f"--refresh 退出 {rc}"
         assert "git clone" in out and "git -C" in out, out
-        assert "https://github.com/FujoJTOP/lompi" in out, out
+        # **从发布清单推导，不写死**：这里原来写着一个字面量地址，于是换组织时它红了
+        # （源里那处地址已经跟着 `loment_publish.ORG` 改了）。同一个地址的第二个真源
+        # 就是下一个会忘的地方 —— 上面 `test_outlet_url_matches_the_publish_list`
+        # 那一条盯的正是"源码里那处字面量与发布清单一致"。
+        assert "https://github.com/" + loment_publish.REPOS["lompi"]["repo"] in out, out
         assert str(outlet) in out, out
 
 
