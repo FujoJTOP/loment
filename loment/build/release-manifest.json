@@ -891,7 +891,7 @@
   },
   {
    "path": "tools/loment_invariant_test.py",
-   "sha256": "2f2b52a48de836e97d6f7149e71b8d44bea6b86f39cf22a429cd91850d3a79bf"
+   "sha256": "4bda330171caca9e8c599009cd9cfa03046bf76c6783585044744b1e56ae9646"
   },
   {
    "path": "tools/loment_suite.py",
@@ -2003,7 +2003,7 @@
   },
   {
    "path": "docs/150-loment-selfhost.en.md",
-   "sha256": "629844fad6fe9291224ce8bf0fcf408c2fe8b5a9c334624601e96981e9f5f081"
+   "sha256": "d1bf097dd2be5712398cfa9947a45fcd9efb17ed3740ce3eab7855dd20af5043"
   },
   {
    "path": "docs/150-loment-selfhost.md",
