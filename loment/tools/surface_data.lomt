@@ -27,7 +27,7 @@
 module surface_data
 choose runtime
 
-pub fn n_codes() -> u32 { return 30; }
+pub fn n_codes() -> u32 { return 31; }
 
 /// 报错器自己的版本（`lomenterr version` 打的就是它）。真源：`tools/loment_release.py`。
 pub fn lomenterr_version() -> str { return "0.1.2"; }
@@ -92,8 +92,10 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 57 { return "越界：字面量下标越过定长数组的界"; }
     if k == 58 { return "use after free"; }
     if k == 59 { return "用完再放：这块内存已经被 `free`，不能再用"; }
-    if k == 60 { return "this construct needs the runtime"; }
-    if k == 61 { return "这一档是 `no_runtime`，而这个构造要运行期"; }
+    if k == 60 { return "unknown type"; }
+    if k == 61 { return "未知类型"; }
+    if k == 62 { return "this construct needs the runtime"; }
+    if k == 63 { return "这一档是 `no_runtime`，而这个构造要运行期"; }
     return "";
 }
 
@@ -157,8 +159,10 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 57 { return "一个字面量下标越过了**定长数组**的界（声明是 `[u32; 4]`，却写了 `a[10]`）。"; }
     if k == 58 { return "A variable points at a block that **was already passed to `free`**, and is used again afterwards."; }
     if k == 59 { return "一个变量指向的块**已经被 `free`**，之后又用到了它。"; }
-    if k == 60 { return "A construct that would **drag the runtime into the artifact** is used, and this tier is `no_runtime` (the default)."; }
-    if k == 61 { return "用了一个**会把运行期拖进产物**的构造，而这一档是 `no_runtime`（默认档）。"; }
+    if k == 60 { return "A **type position** names a type this language does not have - a `let` annotation, a parameter, a return type, a struct field, an enum payload, or an array/slice element."; }
+    if k == 61 { return "一个**类型位置**上写了这门语言没有的类型（`let x: f64`、形参、返回类型、结构体字段、枚举载荷、数组/切片元素都算）。"; }
+    if k == 62 { return "A construct that would **drag the runtime into the artifact** is used, and this tier is `no_runtime` (the default)."; }
+    if k == 63 { return "用了一个**会把运行期拖进产物**的构造，而这一档是 `no_runtime`（默认档）。"; }
     return "";
 }
 
@@ -222,8 +226,10 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 57 { return "这里两边的数**都是编译期已知的** —— 所以它不是一个「运行期的一种可能」，而是**一个编译期事实**，`docs/205` §1.1 C5 把这条写成了语言规则：「越界访问在**字面量**时编译期拒」。**它不看 `lms`**（2026-10-16 起，issue #18）—— 在这个日子之前它只在 `choose lms_open` 时发，而 `lms` 是开发通道的中间态、不进发行版，于是发行版的用户拿不到这条。同一件事在`guard` 那一格早就是编译错误（`docs/146` §3），两个构造两个答案正是那个issue 点名的不一致。说死它值当：实测（`docs/253` §4.4）不拒的时候走 clang 是 UB（IR 里直接长出 `getelementptr inbounds … i32 10`），走仓内 `lomelf` 是静默踩相邻字节。"; }
     if k == 58 { return "After `free(p)` that block has gone back to the allocator, so using `p` again is a use-after-free. It **does not necessarily crash** - the block may keep its old bytes until some later `alloc` reuses it (`docs/253` section 5.1), so it is the kind of bug that ships quietly and then blows up when an allocation finally lands on it. The five checks `free` gained in `docs/210` section 2.8 cover **`free`'s own end** (is this really a block, was it already freed); they cannot cover \"used again afterwards\". Separate from E006: moving is an **ownership** matter, freeing is a **legality** one."; }
     if k == 59 { return "`free(p)` 之后那块内存已经还回分配器，再用 `p` 就是 use-after-free。它**不一定会崩** —— 块可能还留着旧字节，一直到最后被下一次 `alloc` 复用（`docs/253` §5.1），所以症状是那种「上线很久、某次分配把它盖掉」才炸的问题。`docs/210` §2.8 给 `free` 加的那五条检查管的是 **`free` 自己那一端**（是不是真块、有没有重复释放），管不了「之后再用」。与 E006 分开：移走是**所有权**的事，释放是**合法性**的事。"; }
-    if k == 60 { return "`no_runtime` does not say \"we hope the artifact carries no runtime\", it says **\"the artifact carries no runtime\"** (`docs/217`) - a **guarantee**, not a hope. So every construct that would drag one in is refused at compile time. The list is those specific ones: division `/` and remainder `%` (they need a divide-by-zero trap), `alloc` (the allocator and the heap globals), `str_concat` (the concat function), `panic` (an abort), `guard` (a domain check). **This has nothing to do with the `choose` you wrote** - what is reported is the construct and where it is. (Why it has its own code: see `#321` - it used to be folded into E022 \"bad `choose`\", while the user's `choose` line was correct.)"; }
-    if k == 61 { return "`no_runtime` 说的不是「我们希望产物里没有运行期」，而是「**产物里没有运行期**」（`docs/217`）—— 一条**保证**，不是一句期望。所以凡是会把它拖进去的构造都在编译期点名拒。名单是**具体的那几个**：除法 `/` 与取模 `%`（要一个除零陷阱）、`alloc`（要分配器与堆全局）、`str_concat`（要拼接函数）、`panic`（要一个 abort）、`guard`（要域检查）。**这一条与你写的 `choose` 无关** —— 报的是那个构造和它的位置。（分码的来路见 `#321`：从前它并进 E022「`choose` 写错了」，而用户那一行 `choose` 是对的。）"; }
+    if k == 60 { return "Loment's type table is **fixed**: `u8`..`u64`, `i8`..`i64`, `bool`, `ptr`, `str`, `()`, plus the `struct` / `enum` you declare and arrays/slices of those - no generic containers, and **no floating point** (`loment types` prints the whole list). So this is not \"that name was not declared\"; it is \"**this language has no such type**\". That is also why it is separate from E002: E002 is fixed by declaring the name, this one by naming a type that exists."; }
+    if k == 61 { return "Loment 的类型表是**固定的**：`u8`..`u64`、`i8`..`i64`、`bool`、`ptr`、`str`、`()`，加上你声明的 `struct` / `enum` 与它们的数组/切片 —— 没有泛型容器，**也没有浮点**（`loment types` 打出来就是全部）。所以这一条说的不是\"这个名字没声明\"，而是\"**这门语言没有这种类型**\"。它与 E002 分开的理由也在这里：E002 的修法是声明那个名字，这一条的修法是换一个真有的类型。"; }
+    if k == 62 { return "`no_runtime` does not say \"we hope the artifact carries no runtime\", it says **\"the artifact carries no runtime\"** (`docs/217`) - a **guarantee**, not a hope. So every construct that would drag one in is refused at compile time. The list is those specific ones: division `/` and remainder `%` (they need a divide-by-zero trap), `alloc` / `free` (the allocator and the heap globals), `str_concat` / `str_eq` (their runtime helpers), `panic` (an abort), `guard` (a domain check). **This has nothing to do with the `choose` you wrote** - what is reported is the construct and where it is. (Why it has its own code: see `#321` - it used to be folded into E022 \"bad `choose`\", while the user's `choose` line was correct.)"; }
+    if k == 63 { return "`no_runtime` 说的不是「我们希望产物里没有运行期」，而是「**产物里没有运行期**」（`docs/217`）—— 一条**保证**，不是一句期望。所以凡是会把它拖进去的构造都在编译期点名拒。名单是**具体的那几个**：除法 `/` 与取模 `%`（要一个除零陷阱）、`alloc` 与 `free`（要分配器与堆全局）、`str_concat` 与 `str_eq`（要它们的运行期辅助）、`panic`（要一个 abort）、`guard`（要域检查）。**这一条与你写的 `choose` 无关** —— 报的是那个构造和它的位置。（分码的来路见 `#321`：从前它并进 E022「`choose` 写错了」，而用户那一行 `choose` 是对的。）"; }
     return "";
 }
 
@@ -287,8 +293,10 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 57 { return "下标是字面量、且落在界内"; }
     if k == 58 { return "`p` is not read or written after `free(p)`; `p` is reassigned after the `free`"; }
     if k == 59 { return "`free(p)` 之后没有再读/写 `p`；`free` 之后 `p` 被重新赋值"; }
-    if k == 60 { return "the six constructs inside a unit that wrote `choose runtime`; `runtime` + `gc_manual` (a legal tier: runtime on, memory managed by you)"; }
-    if k == 61 { return "`choose runtime` 的单元里用 `/`、`%`、`alloc`、`str_concat`、`panic`、`guard`；`runtime` + `gc_manual`（要运行期、内存自己管的合法档）"; }
+    if k == 60 { return "`u32` / `i64` / `bool` / `ptr` / `str` / `()`; a `struct`/`enum` you declared; arrays and slices of those, `[T; N]` / `[T]`"; }
+    if k == 61 { return "`u32` / `i64` / `bool` / `ptr` / `str` / `()`；你声明的 `struct`/`enum` 名；它们的数组与切片 `[T; N]` / `[T]`"; }
+    if k == 62 { return "the eight constructs inside a unit that wrote `choose runtime`; `runtime` + `gc_manual` (a legal tier: runtime on, memory managed by you)"; }
+    if k == 63 { return "`choose runtime` 的单元里用 `/`、`%`、`alloc`、`free`、`str_concat`、`str_eq`、`panic`、`guard`；`runtime` + `gc_manual`（要运行期、内存自己管的合法档）"; }
     return "";
 }
 
@@ -352,8 +360,10 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 57 { return "下标是变量或表达式（这一条只能在编译期判已知的两个数，算出来的界不是它能管的）；切片 `[T]` 的下标（长度是运行期的）"; }
     if k == 58 { return "use before the `free`; reassignment followed by use after the `free`"; }
     if k == 59 { return "`free` 之前的使用；`free` 之后重新赋值再使用"; }
-    if k == 60 { return "any of those eight in the default tier (no `runtime` written); a dependency using them without declaring `choose runtime`"; }
-    if k == 61 { return "默认档（不写 `runtime`）下用上面那八个构造；依赖用了却不声明 `choose runtime`"; }
+    if k == 60 { return "`f32` / `f64` (there is no floating point); a generic container name; an identifier that is not a type (a variable name, say)"; }
+    if k == 61 { return "`f32` / `f64`（没有浮点）；泛型容器名；不是类型的标识符（如变量名）"; }
+    if k == 62 { return "any of those eight in the default tier (no `runtime` written); a dependency using them without declaring `choose runtime`"; }
+    if k == 63 { return "默认档（不写 `runtime`）下用上面那八个构造；依赖用了却不声明 `choose runtime`"; }
     return "";
 }
 
@@ -387,7 +397,8 @@ pub fn code_ascii(c: u32) -> str {
     if c == 27 { return "a non-() function may fall off the end of its body - every path must return"; }
     if c == 28 { return "index past the end of a fixed-size array - the index is a literal and the length is known at compile time"; }
     if c == 29 { return "use after free - this block was already passed to `free`"; }
-    if c == 30 { return "this construct would drag the runtime in, but this tier is `no_runtime`"; }
+    if c == 30 { return "unknown type - no type by that name; Loment has no floating point"; }
+    if c == 31 { return "this construct would drag the runtime in, but this tier is `no_runtime`"; }
     return "";
 }
 
@@ -610,14 +621,20 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 465 { return "别 `free` —— 让 LGC 管这块（`gc_auto` / `gc_auto_alpha` 下 `alloc` 发的块本来就由回收器管）。"; }
     if k == 467 { return "确实要提前还：`free(p)` 之后把 `p` 重新赋成新块，别再用旧值。"; }
     if k == 469 { return "把 `free` 挪到**最后一个使用点之后** —— 也就是 `p` 的生命周期真结束的地方。"; }
-    if k == 480 { return "You want the runtime: write `choose runtime` in the **root unit** (the entry one) - the artifact then carries that runtime and all of these are let through."; }
-    if k == 482 { return "You do not want it: replace the construct - e.g. write `/ 2` as `>> 1` (only when the divisor is a power of two and the dividend is unsigned), or replace an `alloc` with a fixed-size array on the stack."; }
-    if k == 484 { return "It is a **dependency** that reported this: that library needs the runtime, so write `choose runtime` in the **root unit**; if you would rather your program carry no runtime, use a library that does not drag one in."; }
-    if k == 486 { return "Not sure which site it is: read the line in the message - it is anchored on the **first** such construct, and the message also says \"this unit has N more of this kind\"."; }
-    if k == 481 { return "要运行期：在**根单元**（入口那一份）写一行 `choose runtime` —— 产物从此带上那段运行期，所有这一类构造一起放行。"; }
-    if k == 483 { return "不要运行期：把那个构造换掉 —— 比如把 `/ 2` 写成一次 `>> 1`（仅当除数是 2 的幂且被除数无符号），把 `alloc` 换成一块固定大小的栈数组。"; }
-    if k == 485 { return "是**依赖**报了这条：那个库要用运行期，就在**根单元**写 `choose runtime`；不想让你这个程序带上运行期，就换一个不拖运行期的库。"; }
-    if k == 487 { return "拿不准是哪一处：看报文的行号 —— 它锚在**第一个**这样的构造成员上，消息里还会写「这一类构造本单元另有 N 处」。"; }
+    if k == 480 { return "Name a type that is in the table (`loment types` prints all of them - the one people reach for is `f32`/`f64`)."; }
+    if k == 482 { return "To carry a fraction, **scale to integers**: `let x: u32 = 314;` for 3.14, with the point handled by arithmetic you write (`docs/228`)."; }
+    if k == 484 { return "If you truly need floating point, keep the value on the C ABI side and pass it through `extern fn` (`docs/173`) - floats are legal in the ABI, not in the language's type table."; }
+    if k == 481 { return "把类型换成表里真有的一个（`loment types` 列全部；最常要换掉的是 `f32`/`f64`）。"; }
+    if k == 483 { return "要表示小数就**放大成整数**：`let x: u32 = 314;` 表示 3.14，定点运算自己做（`docs/228`）。"; }
+    if k == 485 { return "非得用浮点：把那个值留在 C ABI 那一侧，用 `extern fn` 传进传出（`docs/173`）—— ABI 上浮点是合法的，语言里的类型不是。"; }
+    if k == 496 { return "You want the runtime: write `choose runtime` in the **root unit** (the entry one) - the artifact then carries that runtime and all of these are let through."; }
+    if k == 498 { return "You do not want it: replace the construct - e.g. write `/ 2` as `>> 1` (only when the divisor is a power of two and the dividend is unsigned), or replace an `alloc` with a fixed-size array on the stack."; }
+    if k == 500 { return "It is a **dependency** that reported this: that library needs the runtime, so write `choose runtime` in the **root unit**; if you would rather your program carry no runtime, use a library that does not drag one in."; }
+    if k == 502 { return "Not sure which site it is: read the line in the message - it is anchored on the **first** such construct, and the message also says \"this unit has N more of this kind\"."; }
+    if k == 497 { return "要运行期：在**根单元**（入口那一份）写一行 `choose runtime` —— 产物从此带上那段运行期，所有这一类构造一起放行。"; }
+    if k == 499 { return "不要运行期：把那个构造换掉 —— 比如把 `/ 2` 写成一次 `>> 1`（仅当除数是 2 的幂且被除数无符号），把 `alloc` 换成一块固定大小的栈数组。"; }
+    if k == 501 { return "是**依赖**报了这条：那个库要用运行期，就在**根单元**写 `choose runtime`；不想让你这个程序带上运行期，就换一个不拖运行期的库。"; }
+    if k == 503 { return "拿不准是哪一处：看报文的行号 —— 它锚在**第一个**这样的构造成员上，消息里还会写「这一类构造本单元另有 N 处」。"; }
     return "";
 }
 
@@ -653,7 +670,8 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 27 { return 3; }
     if c == 28 { return 4; }
     if c == 29 { return 3; }
-    if c == 30 { return 4; }
+    if c == 30 { return 3; }
+    if c == 31 { return 4; }
     return 0;
 }
 

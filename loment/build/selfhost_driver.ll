@@ -3138,7 +3138,7 @@ setprev:
 @.str.rt_phrase.16 = private unnamed_addr constant [0 x i8] c""
 @.str.wdiag_rt.0 = private unnamed_addr constant [8 x i8] c"\7B\22\66\69\6C\65\22\3A"
 @.str.wdiag_rt.1 = private unnamed_addr constant [8 x i8] c"\2C\22\6C\69\6E\65\22\3A"
-@.str.wdiag_rt.2 = private unnamed_addr constant [34 x i8] c"\2C\22\63\6F\6C\22\3A\30\2C\22\63\6F\64\65\22\3A\22\45\30\33\30\22\2C\22\6D\65\73\73\61\67\65\22\3A\22"
+@.str.wdiag_rt.2 = private unnamed_addr constant [34 x i8] c"\2C\22\63\6F\6C\22\3A\30\2C\22\63\6F\64\65\22\3A\22\45\30\33\31\22\2C\22\6D\65\73\73\61\67\65\22\3A\22"
 @.str.wdiag_rt.3 = private unnamed_addr constant [68 x i8] c"\3A\20\E5\A3\B0\E6\98\8E\E4\BA\86\20\60\6E\6F\5F\72\75\6E\74\69\6D\65\60\EF\BC\8C\E4\BD\86\E5\AE\83\E4\BC\9A\E8\AE\A9\E4\BA\A7\E7\89\A9\E5\B8\A6\E4\B8\8A\E8\BF\90\E8\A1\8C\E6\9C\9F\20\E2\80\94\E2\80\94\20"
 @.str.wdiag_rt.4 = private unnamed_addr constant [74 x i8] c"\EF\BC\88\60\6E\6F\5F\72\75\6E\74\69\6D\65\60\20\E6\98\AF\2A\2A\E4\BF\9D\E8\AF\81\2A\2A\EF\BC\9A\E4\BA\A7\E7\89\A9\E9\87\8C\E4\B8\8D\E8\AE\B8\E5\87\BA\E7\8E\B0\E9\82\A3\E6\AE\B5\E8\BF\90\E8\A1\8C\E6\9C\9F\EF\BC\89\E3\80\82"
 @.str.wdiag_rt.5 = private unnamed_addr constant [31 x i8] c"\E8\BF\99\E4\B8\80\E7\B1\BB\E6\9E\84\E9\80\A0\E6\9C\AC\E5\8D\95\E5\85\83\E5\8F\A6\E6\9C\89\20"
@@ -58586,7 +58586,7 @@ L226_then:
   %t700 = load ptr, ptr %out.addr
   %t701 = load i32, ptr %o.addr
   %t702 = load i32, ptr %hit.addr
-  %t703 = call i32 @sym_pub(ptr %t698, ptr %t699, ptr %t700, i32 %t701, i32 30, i32 %t702)
+  %t703 = call i32 @sym_pub(ptr %t698, ptr %t699, ptr %t700, i32 %t701, i32 31, i32 %t702)
   store i32 %t703, ptr %o.addr
   br label %L228_end
 L227_else:
@@ -103606,7 +103606,7 @@ L161_wbody:
   store { ptr, i64 } %t612, ptr %ph.addr
   store i32 0, ptr %isrt.addr
   %t613 = load i32, ptr %code.addr
-  %t614 = icmp eq i32 %t613, 30
+  %t614 = icmp eq i32 %t613, 31
   br i1 %t614, label %L166_sc_rhs, label %L167_sc_short
 L166_sc_rhs:
   %t615 = load { ptr, i64 }, ptr %ph.addr
