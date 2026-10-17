@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
 import loment_comefor  # noqa: E402
 import lomentc  # noqa: E402
+import potato_from  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 KEYWORDS = ["fn", "let", "if", "else", "while", "for", "in", "match", "struct", "enum",
             "trait", "impl", "const", "return", "mut", "pub", "use", "module",
@@ -78,7 +79,39 @@ def _line_span(text: str, line1: int) -> tuple[int, int]:
     return 0, 1
 
 
+def _foreign_grammar(text: str) -> tuple[str, str | None] | None:
+    """`#262`：文件头声明了 `choose write grammar <别名>` 时，`(规范名, 声明本身的错)`。
+
+    没有声明、或者声明的是**原生**语法（`loment` / `rust`，见 `potato_from.NATIVE_GRAMMARS`）
+    就返回 `None` —— 那种源该照常查。
+
+    **为什么要在查之前拦下来**：一份 `choose write grammar python` 的文件**编得过**（前门会把
+    它翻成 Loment），可语言服务拿 Loment 的规则去读它，报出来的是**一屏假错** —— 而"编得过
+    但编辑器报错"比"两边都报错"更糟：用户会去改一份本来就对的源。
+    """
+    lang, err, has = potato_from.read_grammar_decl(text)
+    if err:
+        return lang, err
+    if has and lang not in potato_from.NATIVE_GRAMMARS:
+        return lang, None
+    return None
+
+
 def _diagnostics(text: str, path: str) -> list[dict]:
+    fg = _foreign_grammar(text)
+    if fg is not None:
+        lang, derr = fg
+        if derr:
+            return [{"range": {"start": {"line": 0, "character": 0},
+                               "end": {"line": 0, "character": 1}},
+                     "severity": 1, "source": "loment", "message": derr}]
+        # **一条 Info，不是一屏 Error**：这份源不是 Loment 写的，这一层没有它的规则。说清楚
+        # "为什么这里安静"，比编一堆错更有用 —— 静默会让人以为服务挂了。
+        return [{"range": {"start": {"line": 0, "character": 0},
+                           "end": {"line": 0, "character": 1}},
+                 "severity": 3, "source": "loment",
+                 "message": f"这份源写的是 {lang} 语法（`choose write grammar {lang}`）——"
+                            f" 语言服务只查 Loment，所以这里不报诊断；要真诊断就 `loment build`。"}]
     try:
         mod = _parse(text)
         errs = lomentc.check(mod)

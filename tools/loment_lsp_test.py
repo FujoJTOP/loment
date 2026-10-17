@@ -614,5 +614,44 @@ def main() -> int:
     return loment_suite.run(TESTS, "loment_lsp_test")
 
 
+#: `#262` 的探针源：一份**编得过**的 python 语法文件（前门会把它翻成 Loment）。
+FOREIGN_SRC = ("choose write grammar python\n"
+               "\n"
+               "module t\n"
+               "\n"
+               "def f(v):\n"
+               "    return v + 1\n")
+
+
+@test
+def test_a_foreign_grammar_file_gets_one_info_and_no_fake_errors():
+    """`#262`：`choose write grammar python` 的源**编得过**，所以拿 Loment 的规则去查它，
+    报出来的全是**假错** —— 用户会去改一份本来就对的源。
+
+    两个语言服务各判一条，要求一样：**一条 Info（severity 3），一条 Error（severity 1）都没有**。
+    判"没有 Error"比判"有几条"更要紧 —— 假错正是这条 issue 说的东西。
+    """
+    uri = "file:///foreign.lomt"
+    pdg = PY_LSP.handle({"method": "textDocument/didOpen",
+                         "params": {"textDocument": {"uri": uri, "text": FOREIGN_SRC}}},
+                        {uri: FOREIGN_SRC})[0]["params"]["diagnostics"]
+    assert pdg and all(d["severity"] == 3 for d in pdg), pdg
+    if not (_clang() and _wsl()):
+        print("      自举侧 SKIP: 无 clang/WSL（Python 侧已判）")
+        return
+    msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"method": "textDocument/didOpen",
+             "params": {"textDocument": {"uri": uri, "text": FOREIGN_SRC}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "shutdown", "params": {}},
+            {"method": "exit"}]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        frames, rc, err = Batch(_build(td), td).run(msgs)
+    assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
+    dg = frames[1]["params"]["diagnostics"]
+    assert dg and all(d["severity"] == 3 for d in dg), dg
+    print("      两个语言服务：假错 0 条，各一条 Info 说明这份源是 python 语法")
+
+
 if __name__ == "__main__":
     sys.exit(main())

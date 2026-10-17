@@ -439,6 +439,73 @@ fn publish(mem: ptr, toks: ptr, uri: ptr, un: u32, errs: ptr, ne: u32) -> u32 {
     return o;
 }
 
+/// `#262`：文件头写着 `choose write grammar <别名>` 而别名**不是** `loment` / `rust` 时，
+/// 返回别名 token 的下标；否则 0。
+///
+/// **为什么这一层要拦**：那样一份源**编得过**（前门会把它翻成 Loment），可用 Loment 的规则
+/// 去查它，报出来的是**一屏假错** —— 用户会去改一份本来就对的源。
+/// 返回**别名在源里的跨度**（`(起点 << 32) | 长度`），0 = 没声明或者声明的是原生语法。
+/// 回**跨度**而不是 token 下标：这一趟要跑在 `switchify` **之前**（`apply_switches` 会把
+/// `choose write grammar …` 那一行当开关声明吃掉），之后下标就全移位了。
+fn lsc_foreign(src: ptr, t: ptr, nt: u32) -> u64 {
+    let i: u32 = 0;
+    while i + 3 < nt {
+        if byte_is(src, load32(t, i * 20 + 4), load32(t, i * 20 + 8), "choose")
+                && byte_is(src, load32(t, (i + 1) * 20 + 4), load32(t, (i + 1) * 20 + 8), "write")
+                && byte_is(src, load32(t, (i + 2) * 20 + 4),
+                           load32(t, (i + 2) * 20 + 8), "grammar")
+                && load32(t, (i + 3) * 20) == 0 {
+            let as_st: u32 = load32(t, (i + 3) * 20 + 4);
+            let as_ln: u32 = load32(t, (i + 3) * 20 + 8);
+            if byte_is(src, as_st, as_ln, "loment") || byte_is(src, as_st, as_ln, "rust") {
+                return 0;
+            }
+            return ((as_st as u64) * 4294967296) + (as_ln as u64);
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+/// **一条 Info，不是一屏 Error**：这份源不是 Loment 写的，这一层没有它的规则。说清楚
+/// "为什么这里安静"比编一堆错有用 —— 静默会让人以为服务挂了。
+fn publish_foreign(mem: ptr, text: ptr, uri: ptr, un: u32, as_st: u32, as_ln: u32) -> u32 {
+    let b: ptr = out_body(mem);
+    let o: u32 = BODY_OFF;
+    o = json_emit_lit(b, o, "{\"jsonrpc\": \"2.0\", \"method\": \"textDocument/publishDiagnostics\", \"params\": {\"uri\": ");
+    o = json_emit_str(b, o, uri, un);
+    o = json_emit_lit(b, o, ", \"diagnostics\": [{\"range\": {\"start\": {\"line\": 0, \"character\": 0}, \"end\": {\"line\": 0, \"character\": 1}}, \"severity\": 3, \"source\": \"loment\", \"message\": ");
+    let mb: ptr = ptr_add(mem, SCR_OFF + 6144);
+    let mo: u32 = 0;
+    let pre: str = "这份源写的是 ";
+    let q: u32 = 0;
+    while q < str_len(pre) {
+        store8(mb, mo, str_byte(pre, q) as u8);
+        mo = mo + 1;
+        q = q + 1;
+    }
+    let st: u32 = as_st;
+    let ln: u32 = as_ln;
+    q = 0;
+    while q < ln && mo < 200 {
+        store8(mb, mo, load8(text, st + q) as u8);
+        mo = mo + 1;
+        q = q + 1;
+    }
+    let suf: str = " 语法 —— 语言服务只查 Loment，所以这里不报诊断；要真诊断就 `loment build`。";
+    q = 0;
+    while q < str_len(suf) && mo < 400 {
+        store8(mb, mo, str_byte(suf, q) as u8);
+        mo = mo + 1;
+        q = q + 1;
+    }
+    o = json_emit_str(b, o, mb, mo);
+    o = json_emit_lit(b, o, "}]}}");
+    out_done(mem, o);
+    send_pending(mem);
+    return o;
+}
+
 // ---------------------------------------------------------------- 符号表
 
 fn sym_add(mem: ptr, name: ptr, n: u32, kind: u32, line: u32, col: u32) -> u32 {
@@ -1039,7 +1106,17 @@ fn on_change(mem: ptr, src: ptr, arena: ptr, root: u32, toks: ptr, chk: ptr,
     let text: ptr = doc_text(mem, idx);
     let tn2: u32 = doc_txtlen(mem, idx);
     let nt: u32 = lex(text, tn2, toks);
+    // `#262`：声明了**非原生**语法就先别查 —— 用 Loment 的规则读别的语言，报出来全是假错。
+    // **必须在 `switchify` 之前**：`apply_switches` 会把 `choose write grammar …` 那一行
+    // 当开关声明吃掉，之后 token 流里就找不到它了（下标也会整体移位）。
+    let fg: u64 = lsc_foreign(text, toks, nt);
     let nt: u32 = switchify(mem, text, toks, nt);
+    if fg != 0 {
+        store32(mem, S_NERR, 0);
+        scan_syms(mem, text, toks, nt);
+        return publish_foreign(mem, text, ubuf, un,
+                               (fg / 4294967296) as u32, (fg % 4294967296) as u32);
+    }
     let ne: u32 = run_check(text, toks, errs, chk);
     store32(mem, S_NERR, ne);
     scan_syms(mem, text, toks, nt);
