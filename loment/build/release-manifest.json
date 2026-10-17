@@ -15,11 +15,11 @@
   },
   {
    "path": "tools/lomentc.py",
-   "sha256": "ee34252b0396afb0a7cbf110fae3ff45136013f6b81fda2467d1ddc3867f68cb"
+   "sha256": "ca7993c2e43c2f87f728e6da19e45e50a4c248b08b43cf199af2d047d8e8c3d6"
   },
   {
    "path": "tools/lomentc_test.py",
-   "sha256": "99ed9aff388e08e823db7952e9d88d1bb1658c98e1d948d6843ffb2589581ad5"
+   "sha256": "034ef9bc977fbcae80ac812e0435235639eb269b8d27580649b301f75284a869"
   },
   {
    "path": "tools/potato.py",
@@ -811,7 +811,7 @@
   },
   {
    "path": "tools/loment_diag.py",
-   "sha256": "62b8a39f605aee25ad7ab1149f6ccd4e7047393e1f7c6a72eca833c59ee39f69"
+   "sha256": "671317c63034ec3972a631e5f59df16cb7df80eceeebfaff4689924b05568f7e"
   },
   {
    "path": "tools/loment_build.py",
@@ -923,7 +923,7 @@
   },
   {
    "path": "tools/loment_rule_parity.py",
-   "sha256": "48e9d3395a8ed3bb6be546cf4fbb83ee6f9fb68c53b5a51be7eed98fa05b39c3"
+   "sha256": "a1ea7ac266ac3d20219e1a14fc78a54fd533cba4d8b9f1204f4af197fb3a7291"
   },
   {
    "path": "tools/loment_channel.py",
@@ -1231,7 +1231,7 @@
   },
   {
    "path": "loment/build/selfhost_driver.ll",
-   "sha256": "0ea10c3a91a60ed940b5132a6918e98ac851d5227b56ffcba15e2fd55f24a9e1"
+   "sha256": "14b0e67a6ed5086ebb8a4675245eb7eebf6c7f8d609daba7128f00f21e56a7e6"
   },
   {
    "path": "loment/build/genesis/SHA256SUMS",
@@ -1367,7 +1367,7 @@
   },
   {
    "path": "loment/tools/surface_data.lomt",
-   "sha256": "db0e87a7312d36040c05da3a67b70bd12af184c2795378a0d2c9d678b258f812"
+   "sha256": "d2bde1ec5791dc876f30ba22564f7c591df4b2282c9ba0baf7f3786638ed814b"
   },
   {
    "path": "loment/tools/win_shim_data.lomt",
@@ -1827,7 +1827,7 @@
   },
   {
    "path": "loment/selfhost/checker.lomt",
-   "sha256": "85b25719413da6195d0c9f369139ae9614ee44137d38e32629238a2e3cc4b908"
+   "sha256": "8f819f26ceb277d1fc49566c0371d29ccba9487a1d6c87af9225f1f25fbe54ba"
   },
   {
    "path": "loment/selfhost/codegen.lomt",
@@ -2423,7 +2423,7 @@
   },
   {
    "path": "docs/253-loment-memory-safety.md",
-   "sha256": "018765774c84e22600ff3a2fb2b77bd23aba397e4372b0c3eb7ab66ac5524cbb"
+   "sha256": "571b41ae55c42bc2a295ec6f45682cebb75d190858974270e127e494ee50683c"
   },
   {
    "path": "docs/manual/index.md",
