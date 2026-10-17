@@ -54,7 +54,7 @@ jobs:
             | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       # **ghcr 的仓库名必须全小写**（Docker 的硬要求），而 `github.repository_owner`
-      # 是本仓的大小写原样 —— `FujoJTOP`。第一次就是这么红的（`repository name must be
+      # 是本仓的大小写原样 —— `Loment-Lang`。第一次就是这么红的（`repository name must be
       # lowercase`）。同时它就是 `gate.yml` 里那个字符串，两边必须一样（见文件头）。
       - name: 算镜像名（全小写）
         run: |
