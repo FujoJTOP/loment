@@ -155,6 +155,10 @@ GLOBS = [
     # `#343` 那一类的计量器（`#369`）：两条不变量（非零退出要带诊断、不许被信号打死）
     # 过一层语料，缺口的**账**在判据里，只许变短。
     "tools/loment_invariant_test.py",
+    # 各判据套件共用的运行器 (`#371`): 门禁要看"哪条判据跳过了"，它跟 `ci.py` 是一对，
+    # 所以排在它旁边（**位置必须与自举那份 `lomrel.lomt` 逐行对齐**）。
+    # （合 main 时两条各插在同一处：两条都留，只要两份清单次序一致。）
+    "tools/loment_suite.py",
     "tools/vscode_ext.py", "tools/vscode_ext_test.py",
     # 调试器 (docs/190): DAP 适配器 + ptrace 后端, 及其无头判据。
     # **位置与自举那份 `lomrel.lomt` 对齐** —— 见下面那条注释。
