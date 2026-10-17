@@ -15,7 +15,8 @@
   <a href="QUICKSTART.md">Quick start</a> ·
   <a href=".claude/skills/loment/SKILL.md">Language guide</a> ·
   <a href="standard/LLS.md">Standard</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a>
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="README.zh-CN.md">简体中文</a>
 </p>
 
 This is the main source code repository for Loment. It contains the compiler, the standard
