@@ -11,7 +11,7 @@
 # 13 个 driver 脚本（`lom_audit` / `lompi_sync` / `loment_publish` …）没有 `TESTS`，不在这里。
 # 合计 916 条判据 / 74 个套件。
 
-lomc_test 24
+lomc_test 25
 lomentc_test 153
 potato_test 11
 loment_ct_test 2
@@ -42,7 +42,7 @@ loment_channel_test 7
 loment_json_test 4
 loment_pkg_test 3
 loment_lomc_test 4
-loment_lsp_test 10
+loment_lsp_test 12
 loment_elf_test 43
 loment_pe_test 16
 loment_genesis_test 5

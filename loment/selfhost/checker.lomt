@@ -3284,13 +3284,27 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32) -> u32 {
     let depth: u32 = 0;
     let deep_done: u32 = 0;
     while chk_tok_kind(t, i) != 4 {
+        // **裸块不是语句**（`#44`）：Loment 没有"单独一层花括号"这回事，参考实现在解析期
+        // 就在**第一个**这种 `{` 上报 E019（`期望表达式，得到 '{'`）。合法块的开头永远跟着
+        // `)`、标识符（`else` / `struct S` / `match x` …）、`]`、`=>`、`to`，**不会是**
+        // `{` / `}` / `;`。不判这一条的话，下面那道深度上限会先开火，于是同一份源两边给出
+        // **不同的码**（参考 19 / 自举 23）—— 400 层裸块那正是 issue #44 的复现。
+        // `o == 0`：参考实现是"**第一个**解析错就中止"，所以只报第一条 —— 400 层裸块
+        // 若每层都报，用户会看到几十条一模一样的诊断。
+        if chk_tok_is(src, t, i, "{") && i > 0 && o == 0
+                && (chk_tok_is(src, t, i - 1, "{") || chk_tok_is(src, t, i - 1, "}")
+                    || chk_tok_is(src, t, i - 1, ";")) {
+            o = sym_pub(src, t, out, o, E_PARSE, i);
+        }
         // **太深了要当场说**（issue #44）：参考实现在解析期就设 64 层的上限并报 E023；自举侧
         // 原先一路走到 codegen 才在递归里把栈用穿 —— **段错误、零输出**。这一趟跑到 codegen
         // 之前，报出来就整趟不跑，正好把那边的段错误也挡在门外。
         // 只报**第一次**越界：再往上每层都报一遍对读者没意义（参考实现也只报一条）。
+        // **已经报过语法错就不再报它**：参考实现是"第一个解析错就中止"，两条一起报会让
+        // 码集比它多一个。
         if chk_tok_is(src, t, i, "{") {
             depth = depth + 1;
-            if depth > 64 && deep_done == 0 {
+            if depth > 64 && deep_done == 0 && o == 0 {
                 o = sym_pub(src, t, out, o, E_DEEP, i);
                 deep_done = 1;
             }
@@ -3304,6 +3318,27 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32) -> u32 {
         if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "return")
                 && chk_tok_is(src, t, i + 1, ";") {
             o = sym_pub(src, t, out, o, E_PARSE, i + 1);
+        }
+        // **字符串里的未知转义**（`#33` / `#36`）：参考实现在**词法期**就拒，而自举词法器没有
+        // 失败通道 —— 那一档并进这一趟，码与它一致（E019），且"报了就不再往下跑"。
+        // 认的六个与 `lomc._ESCAPES` 同一份：`n` `t` `r` `0` `\\` `"`。原先的兜底是"取原
+        // 字符"，于是 `"\r"` 静默变成字母 `r`、`"\x41"` 静默变成 `x41` 三个字符。
+        if chk_tok_kind(t, i) == 2 {
+            let est: u32 = load32(t, i * 20 + 4);
+            let eln: u32 = load32(t, i * 20 + 8);
+            let ek: u32 = 1;
+            while ek + 1 < eln {
+                if load8(src, est + ek) == 92 {
+                    let ee: u32 = load8(src, est + ek + 1);
+                    if !(ee == 110 || ee == 116 || ee == 114 || ee == 48
+                         || ee == 92 || ee == 34) {
+                        o = sym_pub(src, t, out, o, E_PARSE, i);
+                    }
+                    ek = ek + 2;
+                } else {
+                    ek = ek + 1;
+                }
+            }
         }
         if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "let")
                 && !(i > 0 && (chk_tok_is(src, t, i - 1, "if")
@@ -3328,7 +3363,36 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32) -> u32 {
         if chk_bad_num_suffix(src, t, i) {
             o = sym_pub(src, t, out, o, E_PARSE, i);
         }
+        // **语句之间少一个 `;`**（`#48`）：`let` 只能**起头** —— 前面是 `{` `}` `;` `if`
+        // `comefor` `else` `=>`。前面是个**值**（标识符 / 字面量 / `)` / `]`）就说明上一句
+        // 没写完；参考实现在解析期报「期望 ;」，而自举侧原先**一声不吭**，于是
+        // `loment check` 退出 0、零输出。
+        // **例外**：`command c` / `foruse py` 之后那个词是**语言名**，紧跟的 `let c {` 是
+        // 外部代码块声明（`loment/extblock/evil.lomt` 就是这一格），不是变量绑定 —— 全仓
+        // 扫过，这是唯一一处。
+        if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "let") && i > 0 && o == 0 {
+            let ok: u32 = 0;
+            if chk_tok_is(src, t, i - 1, "{") || chk_tok_is(src, t, i - 1, "}")
+                    || chk_tok_is(src, t, i - 1, ";") || chk_tok_is(src, t, i - 1, "if")
+                    || chk_tok_is(src, t, i - 1, "comefor")
+                    || chk_tok_is(src, t, i - 1, "else")
+                    || chk_tok_is(src, t, i - 1, "=>") {
+                ok = 1;
+            }
+            if i >= 2 && (chk_tok_is(src, t, i - 2, "command")
+                          || chk_tok_is(src, t, i - 2, "foruse")) {
+                ok = 1;
+            }
+            if ok == 0 {
+                o = sym_pub(src, t, out, o, E_PARSE, i);
+            }
+        }
         i = i + 1;
+    }
+    // **块没闭合**（`#48`）：参考实现在解析期就报「的块没闭合」；自举侧原先一路数到结束、
+    // 一声不吭 —— `loment check` 于是退出 0、零输出。
+    if depth != 0 && o == 0 {
+        o = sym_pub(src, t, out, o, E_PARSE, i);
     }
     return o;
 }
