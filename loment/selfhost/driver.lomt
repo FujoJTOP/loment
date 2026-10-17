@@ -279,7 +279,7 @@ fn wdiag(fd: u64, scr: ptr, file: ptr, fnam: u32,
 /// 会把运行期拖进产物的构造 → **人话**（issue #321）。照抄参考实现 `tools/lomentc.py`
 /// 的 `_RUNTIME_SITES` —— 报文的正文要的是"除法 `/`"这一句，不是那一格 token 原文，而两边
 /// 要逐字节一致。不是那八个之一就回空串（**判据**：那说明这一格的 token 不在名单里，
-/// 报文才退回 token 原文；`E030` 这一档的正常输入永远命得中）。
+/// 报文才退回 token 原文；`E031` 这一档的正常输入永远命得中）。
 fn rt_phrase(slot: ptr, toks: ptr, tk: u32) -> str {
     if tok_is(slot, toks, tk, "/") { return "除法 `/`"; }
     if tok_is(slot, toks, tk, "%") { return "取模 `%`"; }
@@ -292,7 +292,7 @@ fn rt_phrase(slot: ptr, toks: ptr, tk: u32) -> str {
     return "";
 }
 
-/// `E030`（默认档下用了会拖运行期的构造）的**结构化**诊断 —— 正文是**一句话**，不是
+/// `E031`（默认档下用了会拖运行期的构造）的**结构化**诊断 —— 正文是**一句话**，不是
 /// token（issue #321）。与参考实现 `check()` 里那条 f-string 逐字节同形：
 /// `{line}: 声明了 …—— {name}（…）。`
 /// +（`nsites > 1` 时）`这一类构造本单元另有 {nsites-1} 处。` + `要运行期就在根单元写 …`。
@@ -302,7 +302,7 @@ fn wdiag_rt(fd: u64, scr: ptr, file: ptr, fnam: u32, line: u32, ph: str, nsites:
     let _b: u64 = wjson_str(fd, file, fnam);
     let _c: u64 = wstr(fd, ",\"line\":");
     let _d: u64 = wdec(fd, scr, line);
-    let _e: u64 = wstr(fd, ",\"col\":0,\"code\":\"E030\",\"message\":\"");
+    let _e: u64 = wstr(fd, ",\"col\":0,\"code\":\"E031\",\"message\":\"");
     let _f: u64 = wdec(fd, scr, line);
     let _g: u64 = wstr(fd, ": 声明了 `no_runtime`，但它会让产物带上运行期 —— ");
     let _h: u64 = write_all(fd, str_ptr(ph), str_len(ph) as u64);
@@ -1537,7 +1537,7 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
             // 那是另一轮的事。
             //
             // **保证本身不受影响**：依赖的**代码**照样进合并流，于是"依赖里有除法而根写着
-            // `no_runtime`"这一条**自举侧判得住**（合并流上的 E030），而且判得比参考实现
+            // `no_runtime`"这一条**自举侧判得住**（合并流上的 E031），而且判得比参考实现
             // **更宽**（它连深度 > 1 的依赖也看得见）。两边只在"依赖声明了一个它**用不上**的
             // 核心模式"这一格上不同 —— 那一格不影响产物。
             blank_tok(slot, toks, i);
@@ -1958,12 +1958,12 @@ fn _start() -> u32 {
             wstr(2, ": ");
             let st: u32 = load32(toks2, tk * 20 + 4);
             let ln: u32 = load32(toks2, tk * 20 + 8);
-            // `E030`（这一档是 `no_runtime`，而这个构造要运行期）：正文写成**那句话**，
+            // `E031`（这一档是 `no_runtime`，而这个构造要运行期）：正文写成**那句话**，
             // 不是那一格 token（issue #321）。码是**专属**的（不再与 `choose` 共用 E022），
             // `str_len(ph) > 0` 只是"那格 token 在名单里"的兜底，照旧走 token 原文。
             let ph: str = rt_phrase(unit, toks2, tk);
             let isrt: u32 = 0;
-            if code == 30 && str_len(ph) > 0 {
+            if code == 31 && str_len(ph) > 0 {
                 isrt = 1;
             }
             let take: u32 = 24;
