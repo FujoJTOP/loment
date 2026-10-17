@@ -19,8 +19,12 @@
   <a href="README.md">English</a>
 </p>
 
-这是 Loment 的主源码仓：编译器、标准库与工具链都在这里。它以发行包的形式提供 —— Linux
-`tar.gz`、Windows `zip`、Windows 安装包 —— 跑起来不需要 Python、不需要 clang，也不需要 WSL。
+这是 Loment 的源码：编译器、标准库与工具链都在这里。**开发、issue 与 PR 都在 GitHub**
+（[Loment-Lang/loment](https://github.com/Loment-Lang/loment)）；GitLab、Gitee、Codeberg、
+Bitbucket 上是它的**只读镜像** —— 在那里提交、开 issue 不会有人看到。
+
+它以发行包的形式提供 —— Linux `tar.gz`、Windows `zip`、Windows 安装包 —— 跑起来不需要
+Python、不需要 clang，也不需要 WSL。
 
 ## 为什么是 Loment？
 
