@@ -287,7 +287,16 @@ jobs:
     # "一条外部命令都不碰"** —— 哪天往 `EXCLUSIVE_STATIC` 里加一条要用工具链的，
     # 它在这里会直接因为缺命令而红（那是能看见的，不是静默）。
     steps:
+      # **`fetch-depth: 0`（2026-10-16 起）**：`lom_audit` 的 M93/M95 要问一句
+      # "自手册/台账上次被写出以来，哪些路径动过" —— 那是它们**滞后容差**的那一半
+      # （容差为什么必须有，见 `.github/workflows/manifest.yml` 文件头那节）。
+      # `actions/checkout` 默认是 `fetch-depth: 1`，`git log` 就只看得到 HEAD，
+      # 那样问出来的答案是"什么都没动"⇒ 这两个判据会把每个 PR 都判红。
+      # 拿不到历史时它们**不静默放行**，会报一条指名要这个参数的账。
+      # 这个仓的 pack 是 ~32 MiB / 1400 多个提交，全取一次是秒级，换得起。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # 先自述环境 —— 这样"红"才有归因: 是仓库的问题，还是**这一台**上缺了那个命令。
       # 这一片跑在 **runner** 上（不拉镜像，见上面那段），所以这里列的就是 runner 自带的
@@ -424,7 +433,10 @@ jobs:
           - { shard: 5, total: 6 }
           - { shard: 6, total: 6 }
     steps:
+      # 同 `static-exclusive`：`lom_audit` 的 M93/M95 要历史（见那一处的注释）。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 环境自述
         run: |
@@ -561,7 +573,10 @@ jobs:
     container:
       image: ghcr.io/fujojtop/loment-ci:5
     steps:
+      # 同 `static-exclusive`：`lom_audit` 的 M93/M95 要历史（见那一处的注释）。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: 环境自述
         run: |
