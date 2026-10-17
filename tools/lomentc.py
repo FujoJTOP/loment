@@ -172,7 +172,9 @@ _IR_HEAP = '''; ---- 分配器（docs/175 §3.4 的 `gc_manual`）--------------
 ;
 ; 三条规则，各有它要挡的东西：
 ;   * **第一次适配 + 拆分**：空闲块大到有余（余量 ≥ 16）就切一块出来，余下的还回链上。
-;     不拆的话一次大分配会把整个链表吃光。
+;     不拆的话一次大分配会把整个链表吃光。**记录尺寸永远等于这块的实际跨度** ——
+;     不拆的时候**不把 size 改小**（余量不足 16 字节，改小它换不来可用空间，
+;     只让按 size 走的遍历掉进块内部，`FujoJTOP/loment#368`）。
 ;   * **地址序**：链表按地址升序，`free` 线性找插入点。顺序让「前沿回退」可判。
 ;   * **前沿回退**：释放的那一块**正好顶到 bump 前沿**时，直接把前沿退回去。
 ;     这是 LIFO（分配—释放—再分配）不涨内存的原因；没有它，`free` 只是把块挂起来，
@@ -214,14 +216,25 @@ take:
   %rest = load i32, ptr %tpp
   br i1 %cansplit, label %split, label %nosplit
 split:
+  ; **块的记录尺寸只在「真拆了」的时候才改小**（`FujoJTOP/loment#368`）——
+  ; 原来这句在 `taken:` 里无条件执行，于是**不拆分**那条路（余量 < 16 字节，
+  ; 块还是那么大，只是没切）也会把 size 改成 `need`。后果有两层：
+  ;   * 按 `size` 往前走的每一趟（`__loment_alloc` 的首次适配、`__loment_sweep`、
+  ;     `__loment_propagate`、以及收集器的两步）都会从 `cur + need` 继续，
+  ;     而那已经不是下一块了 —— 它掉进**块的内部**，把载荷当尺寸读；
+  ;   * 载荷里的字节多半是 0 ⇒ `i += 0` ⇒ **死循环**（实测：2 分钟不返回）。
+  ; 判据：`loment_elf_test::test_a_reused_block_keeps_its_recorded_extent`。
   %so = add i32 %cur, %need
   %spp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %so
   store i32 %slack, ptr %spp
   %so4 = add i32 %so, 4
   %spp4 = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %so4
   store i32 %rest, ptr %spp4
+  store i32 %need, ptr %hp
   br label %relink
 nosplit:
+  ; 不拆：**尺寸原样留着**（就是 `%bsz`）—— 那几十字节的余量仍然在块里，
+  ; 只是不足以另立一块。改小它不会让那点余量变得可用，只会让遍历失步。
   br label %relink
 relink:
   %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
@@ -236,7 +249,6 @@ setprev:
   store i32 %newhead, ptr %ppp
   br label %taken
 taken:
-  store i32 %need, ptr %hp
   %t4b = add i32 %cur, 4
   %tppb = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %t4b
   store i32 -1, ptr %tppb
@@ -450,14 +462,18 @@ take:
   %rest = load i32, ptr %tpp
   br i1 %cansplit, label %split, label %nosplit
 split:
+  ; **块的记录尺寸只在「真拆了」的时候才改小**（`FujoJTOP/loment#368`）—— 理由见
+  ; `_IR_HEAP` 同一条（这段与那一份逐字同源，只换 arena 的来处与寻址）。
   %so = add i32 %cur, %need
   %spp = getelementptr i8, ptr %hb, i32 %so
   store i32 %slack, ptr %spp
   %so4 = add i32 %so, 4
   %spp4 = getelementptr i8, ptr %hb, i32 %so4
   store i32 %rest, ptr %spp4
+  store i32 %need, ptr %hp
   br label %relink
 nosplit:
+  ; 不拆：**尺寸原样留着**（就是 `%bsz`）。
   br label %relink
 relink:
   %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
@@ -472,7 +488,6 @@ setprev:
   store i32 %newhead, ptr %ppp
   br label %taken
 taken:
-  store i32 %need, ptr %hp
   %t4b = add i32 %cur, 4
   %tppb = getelementptr i8, ptr %hb, i32 %t4b
   store i32 -1, ptr %tppb
@@ -5842,8 +5857,14 @@ roots:
 #: `gc_auto` 的触发：**按累计请求量**记 —— 过了 32 KiB 就收一次并清零。
 _IR_GC_TRIGGER_FIXED = '''define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **时钟 = 分配器真正吃掉多少字节**（`__loment_alloc` 自己那两行 `(sz + 15) & -8`），
+  ; 不是「载荷请求多少」—— 少了块头那 8 字节，小块程序的时钟就比消耗慢：8 字节载荷的
+  ; 块消耗 16、时钟只走 8，慢一倍 ⇒ 计数越过阈值的那一刻，arena 已经装满了（实测：
+  ; 纯拼接 3000 轮、计数 24000 < 32768，**一次都没收**，到 4096 轮 arena 满而 abort）。
+  %r0 = add i32 %sz, 15
+  %need = and i32 %r0, -8
   %b = load i32, ptr @__loment_gcbytes
-  %b2 = add i32 %b, %sz
+  %b2 = add i32 %b, %need
   store i32 %b2, ptr @__loment_gcbytes
   %big = icmp ugt i32 %b2, 32768
   br i1 %big, label %go, label %out
@@ -6048,24 +6069,27 @@ out:
 ; 判据（退回去了就说明死块都在顶端，正是小回收该干的事），而年轻代的**大小**不是。
 define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **时钟 = 分配器真正吃掉多少字节**（`(sz + 15) & -8`），不是载荷请求 —— 与固定档同一条
+  ; 理由（见 `_IR_GC_TRIGGER_FIXED`）。空间触发那一格原先写成 `off + sz + 8`：**多算了那
+  ; 个 8**（块头早被 `& -8` 那条并进去了），于是它报的「下一块落在哪儿」比实际偏后。
+  %r0 = add i32 %sz, 15
+  %need = and i32 %r0, -8
   %b = load i32, ptr @__loment_gcbytes
-  %b2 = add i32 %b, %sz
+  %b2 = add i32 %b, %need
   store i32 %b2, ptr @__loment_gcbytes
   %t = load i32, ptr @__loment_thresh
   %big = icmp ugt i32 %b2, %t
   %off = load i32, ptr @__loment_off
-  %n1 = add i32 %off, %sz
-  %n2 = add i32 %n1, 8
-  %near = icmp ugt i32 %n2, 64512
+  %n1 = add i32 %off, %need
+  %near = icmp ugt i32 %n1, 64512
   %go = or i1 %big, %near
   br i1 %go, label %do, label %out
 do:
   store i32 0, ptr @__loment_gcbytes
   call void @__loment_minor()
   %of2 = load i32, ptr @__loment_off
-  %m1 = add i32 %of2, %sz
-  %m2 = add i32 %m1, 8
-  %still = icmp ugt i32 %m2, 64512
+  %m1 = add i32 %of2, %need
+  %still = icmp ugt i32 %m1, 64512
   br i1 %still, label %maj, label %tune
 maj:
   call void @__loment_major()
@@ -7251,7 +7275,13 @@ class _Ir:
         """
         if not self.gc_any:
             return
-        self.rootk = sum(1 for ty, _ in self.vars.values() if self._root_ty(ty))
+
+        def slots(name: str) -> int:
+            """这个名字占几格根表：L0 提升过的缓冲按它的**字数**算，其余各占一格。"""
+            n = self.l0.get(name)
+            return (n + 7) // 8 if n else 1
+
+        self.rootk = sum(slots(nm) for nm, (ty, _) in self.vars.items() if self._root_ty(ty))
         if self.rootk == 0:
             return
         n0 = self.t()
@@ -7259,6 +7289,29 @@ class _Ir:
         i = 0
         for name, (ty, slot) in self.vars.items():
             if not self._root_ty(ty):
+                continue
+            sz = self.l0.get(name)
+            if sz:
+                # **L0 提升的缓冲：它的每一个 8 字节字各占一格**（`FujoJTOP/loment#362`）。
+                # 那个槽里存的是**栈**地址（`%NAME.buf`），而根扫拿槽里的值去减堆基址，
+                # 得到一个巨大的无符号数、`ult 65536` 为假 —— 于是整块缓冲**从来没人扫**。
+                # 而 L0 的规则**不禁止**缓冲里装堆指针：`_ptr_only_uses` 会把"只解引用"
+                # 的函数（如 `wr64`）吸收进安全集，于是那种函数可以把任意 u64 写进缓冲。
+                # 只登记**字**的地址就够了 —— 根扫本来就是"读那一格、看它像不像堆内地址"，
+                # 收集器一侧一个字都不用改。
+                k = (sz + 7) // 8
+                for j in range(k):
+                    idx = self.t()
+                    self.w(f"{idx} = add i32 {n0}, {i}")
+                    gp = self.t()
+                    self.w(f"{gp} = getelementptr [1024 x i64], ptr @__loment_roots,"
+                           f" i32 0, i32 {idx}")
+                    bp = self.t()
+                    self.w(f"{bp} = getelementptr [{k} x i64], ptr %{name}.buf, i32 0, i32 {j}")
+                    v = self.t()
+                    self.w(f"{v} = ptrtoint ptr {bp} to i64")
+                    self.w(f"store i64 {v}, ptr {gp}")
+                    i += 1
                 continue
             idx = self.t()
             self.w(f"{idx} = add i32 {n0}, {i}")

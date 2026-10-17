@@ -747,21 +747,23 @@ def test_gc_auto_collects_while_manual_exhausts():
           f"manual 耗尽 (rc={got[1]}) —— 自动回收是真的")
 
 
-#: `#367` 的语料：**一次 `alloc` 都不写**，只靠 `str_concat` 分配。6000 次拼接 × 56 字节
-#: （44 的请求取整成 56）≈ 336 KB，**远远**过 64 KiB arena。
+#: `#367` 的语料：**一次 `alloc` 都不写**，只靠 `str_concat` 分配。6000 次拼接 × 16 字节
+#: （8 的请求取整成 16）≈ 94 KB，**远远**过 64 KiB arena。
 #:
-#: **后缀为什么是 40 字节而不是 4**：`gc_auto` 的触发按**请求字节**计，而堆按**块字节**
-#: 消耗（请求 + 8 字节头、再向上取整到 8）。4 字节后缀那个比值是 2，于是计数器攒到 32768
-#: 的那一刻 arena 也正好满 —— 掐在临界上，`gc_auto` 那边会**先耗尽后收集**，判据变成
-#: 在测那个比值而不是在测触发。40 字节后缀把比值压到 56/44 ≈ 1.27，触发稳稳先到。
-#: （`gc_auto_alpha` 两种都一样过 —— 它另有一条**空间触发**，不靠这个计数器。）
+#: **后缀为什么是 4 字节、而不是当年那个 40**：这一格原先是 40 字节，用来**绕开**时钟的
+#: 缺陷 —— 触发按**请求字节**计，而堆按**块字节**消耗（请求 + 8 字节头、再向上取整到 8）；
+#: 4 字节后缀那个比值是 2，于是计数器攒到 32768 的那一刻 arena 也正好满，`gc_auto` 会
+#: **先耗尽后收集**，判据变成在测那个比值而不是在测触发。**时钟修好之后**（它算的就是分配器
+#: 真正吃掉的那两行 `(sz + 15) & -8`）那个绕开不再需要，于是回到 4 字节 —— 这一版才
+#: **钉得住**这个修复：把时钟改回只数载荷，`gc_auto` 那一只立刻变 132。
+#: （`gc_auto_alpha` 两种后缀都一样过 —— 它另有一条**空间触发**，不靠这个计数器。）
 _CONCAT_ONLY_SRC = (
     "module concatonly\n%s\nchoose runtime\n\n"
     "fn _start() {\n"
     "    let s: str = \"abcd\";\n"
     "    let i: u64 = 0;\n"
     "    while i < 6000 {\n"
-    "        let t: str = str_concat(s, \"0123456789012345678901234567890123456789\");\n"
+    "        let t: str = str_concat(s, \"efgh\");\n"
     "        i = i + 1;\n"
     "    }\n"
     "    syscall4(60, 7, 0, 0);\n"
@@ -813,6 +815,268 @@ def test_a_concat_only_program_still_collects():
         "成因：`str_concat` 的分配不计入触发计数")
     print(f"      gc_auto 触发调用 {calls['gc_auto']} 次 / gc_auto_alpha {calls['gc_auto_alpha']} 次，"
           "两档都跑完（无 `alloc` 的语料）")
+
+
+@test
+def test_collection_keeps_blocks_that_were_already_free():
+    """**回收必须留住"回收之前就已经空闲"的块**（`FujoJTOP/loment#366`）—— 判据是**三只**。
+
+    **Why**：`test_gc_auto_collects_while_manual_exhausts` 只测"垃圾能被收回来"。回收那一趟在
+    收垃圾之前会**把空闲链表清空**（`__loment_collect` 与 `__loment_minor` 原先各一句
+    `store i32 0, ptr @__loment_freehead`），指望清扫把每一块**重新挂回去**。而清扫走的是
+    `__loment_free`，它有一条守卫：**只在块头 `next` 是负数（借出态）时才链接**（`#164`）——
+    已经空闲的块头里存的正是链表后继，守卫直接返回。于是"清空 + 重挂"只重挂了这一趟
+    **新死**的块，**上一趟之前就空闲的块从此谁都找不着**：既不在链表上、也不在前沿里。
+    （落地时那两行是**直接删掉**的 —— 既然守卫本身已经挡住了双重插入，重置就只剩下丢块这一件事。
+    另一条判据 `test_a_collection_keeps_the_free_list` 直接量那件事，本条量的是它的**后果**。）
+
+    **How to apply**：循环里只握一块活块（`p`），每圈分配一块新的、再把**上一块** `free` 掉 ——
+    被 `free` 的那一块在回收发生时**没有任何根指着它**（槽 `p` 已经改指新块），所以它正是
+    "已经空闲、应当留在链上"的那一类。每圈 8008 字节，跑 300 圈 = 2.4 MB，而 arena 只有 64 KiB：
+      * `gc_auto` **+ `free`** → **跑完**（rc = 7）：链表在回收之后仍在，分配一直命中它；
+      * `gc_manual` + `free` → **跑完**（rc = 7）：这一只钉住"程序本身是能跑的" —— 少了它，
+        第一只红了会分不清是"回收吃掉了链表"还是"这份程序本来就装不下"；
+      * `gc_manual` + **不 `free`** → **必须崩**（rc = 132）：这一半是**证伪** —— 它证明 arena
+        确实装不下 2.4 MB，所以上面两只的 7 不是"反正都跑得通"。
+
+    实测（2026-10-15）：修之前第一只是 **rc = 132**（约八次回收就把 64 KiB 丢光）。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    body = ("module freesurvive\n%s\nchoose runtime\n\nfn _start() {\n"
+            "    let p: ptr = alloc(8000);\n"
+            "    store8(p, 0, 9);\n"
+            "    let i: u32 = 0;\n"
+            "    while i < 300 {\n"
+            "        let q: ptr = alloc(8000);\n"
+            "        store8(q, 0, 9);\n"
+            "        %s"
+            "        p = q;\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if load8(p, 0) == 9 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    cases = (("auto", "choose gc_auto", "free(p);\n        "),
+             ("manual", "choose gc_manual", "free(p);\n        "),
+             ("manual_nofree", "choose gc_manual", ""))
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, tier, extra in cases:
+            src = td / f"{tag}.lomt"
+            src.write_text(body % (tier, extra), encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"freesurvive_{tag}", td, timeout=60)[0])
+    assert got[0] == 7, (
+        f"`gc_auto` 那一只没跑完：退出码 {got[0]}（期望 7）。回收把**已经空闲的块**丢了 ——"
+        "列表在进清扫之前被清空，而清扫只有'重新挂'那一半才补得回来")
+    assert got[1] == 7, (
+        f"`gc_manual` 那一只没跑完：退出码 {got[1]}（期望 7）—— 这一只不收集，它的失败"
+        "说明这份程序本身就装不下，下面那条对 `gc_auto` 的判断不成立")
+    assert got[2] != 7, (
+        f"**不 `free` 的那一只也跑通了**（退出码 {got[2]}）—— 那这条判据测不出什么："
+        "arena 装得下 2.4 MB，前两只的 7 是'反正都跑得通'")
+    print(f"      auto 跑通 (rc={got[0]})；manual 跑通 (rc={got[1]})；"
+          f"manual 不 free 耗尽 (rc={got[2]}) —— 回收没吃掉空闲链表")
+
+
+@test
+def test_every_alloc_site_arms_the_collector():
+    """**`str_concat` 的分配点也要问一句"该收了没有"**（`FujoJTOP/loment#367`）—— 判据是**一对**。
+
+    **Why**：触发（`@__loment_maybe_collect`）原先只挂在 `alloc` 这个**内建**的发射点上，
+    而 `str_concat` 走的是同一个分配函数、却不经过那个点 —— 于是一份**只拼字符串**、自己
+    从不 `alloc` 的程序，`@__loment_gcbytes` 永远是 0，**收集器一次都不会被叫醒**，arena 撑爆。
+    要钉的就是"每个分配点都得问"。
+
+    **How to apply**：每圈 `str_concat(a, a)` 拼出一条 32 字节的新串、结果覆盖旧值（旧串立刻成
+    垃圾），活集恒为 32 字节。跑 10000 圈 = 320 KB 请求，arena 64 KiB：
+      * `gc_auto` → **跑完**（rc = 7）；
+      * `gc_manual` → **必须崩**（rc = 132）：这一半是**证伪**，证明 320 KB 确实装不下。
+
+    端到端：IR 过的是**包内镜像链接器**（`lomelf.compile_ll`）。实测（2026-10-15）：
+    修之前 `gc_auto` 那只也是 **rc = 132** —— 一份 `alloc` 一次都不调的程序，
+    收集器从头到尾没被叫醒过。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    body = ("module concatgc\n%s\nchoose runtime\n\nfn _start() {\n"
+            "    let a: str = \"0123456789abcdef\";\n"
+            "    let s: str = str_concat(a, a);\n"
+            "    let i: u32 = 0;\n"
+            "    while i < 10000 {\n"
+            "        s = str_concat(a, a);\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    if str_len(s) == 32 {\n        syscall4(60, 7, 0, 0);\n    }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, tier in (("auto", "choose gc_auto"), ("manual", "choose gc_manual")):
+            src = td / f"{tag}.lomt"
+            src.write_text(body % tier, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"concatgc_{tag}", td, timeout=60)[0])
+    assert got[0] == 7, (
+        f"`gc_auto` 那一只没跑完：退出码 {got[0]}（期望 7）。这份程序一次 `alloc` 都不调，"
+        "只有 `str_concat` 在分配 —— 它的分配点没问'该收了没有'，收集器就不会跑")
+    assert got[1] != 7, (
+        f"**`gc_manual` 那一只也跑通了**（退出码 {got[1]}）—— 那这条判据测不出回收："
+        "arena 没被耗尽，说明它比 320 KB 大得多")
+    print(f"      auto 跑通 (rc={got[0]}，320 KB 请求过 64 KiB arena)；"
+          f"manual 耗尽 (rc={got[1]}) —— 拼接也在触发")
+
+
+@test
+def test_a_recycled_block_does_not_derail_the_walks():
+    """**复用一块空闲块之后，块头的"记录尺寸"必须仍是它的实际跨度**（`FujoJTOP/loment#368`）。
+
+    **Why**：`__loment_alloc` 的 `take` 原先在 `taken:` 里**无条件**把块头的 size 写成
+    `%need`。真拆了的时候那是对的（余下那截在 `cur + need` 处另立了一块），**不拆**的时候
+    就是错的：块的跨度仍是 `%bsz`，记录尺寸却小了 `%bsz - %need`（< 16 字节，所以没拆）。
+    于是**每一趟按 size 往前走的遍历**（首次适配、清扫、传播、收集器清标记那两趟）都从
+    `cur + need` 继续 —— 那不是下一块，是**块的内部**。载荷里那些字多半是 0 ⇒ `i += 0`
+    ⇒ **死循环**（实测：2 分钟不返回；`perf` 的样本全落在收集器清标记那一趟的小循环里）。
+    那几十个字节也从此谁都找不到（既不在链上、也不在前沿里）。
+
+    **How to apply**：语料取自 `#368` —— 每圈拼一条 8 字节的串（分配后立刻 `free`），再分配
+    一块 16 字节的；被 `free` 的那一块随后会被**复用**，而 `24 - 16 = 8 < 16` 正好走**不拆**
+    那条路。跑 4097 圈，两次回收之后遍历就会失步。
+      * `gc_auto` → **跑完**（rc = 7）；修之前它**在第二次回收上不返回**（rc = 124，被 timeout
+        杀掉 —— 所以这里的超时是判据的一部分，不是保险丝）；
+      * `gc_manual` → **必须崩**（rc = 132）：这一半是**证伪** —— 它证明这份程序确实有约
+        98 KB 的请求要过 64 KiB 的 arena，跑通不是"反正都跑得通"。
+
+    端到端：IR 过的是**包内镜像链接器**（`lomelf.compile_ll`）。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    body = ("module reuseextent\n%s\nchoose runtime\n\nconst SZ: u32 = 16;\n\n"
+            "fn _start() {\n"
+            "    let s: str = \"abcd\";\n"
+            "    let esc: ptr = alloc(SZ);\n"
+            "    store8(esc, 0, 1);\n"
+            "    let i: u64 = 0;\n"
+            "    while i < 4097 {\n"
+            "        let t: str = str_concat(s, \"efgh\");\n"
+            "        free(str_ptr(t));\n"
+            "        let q: ptr = alloc(SZ);\n"
+            "        store8(q, 0, 2);\n"
+            "        esc = q;\n"
+            "        i = i + 1;\n"
+            "    }\n"
+            "    syscall4(60, 7, 0, 0);\n}\n")
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, tier in (("auto", "choose gc_auto"), ("manual", "choose gc_manual")):
+            src = td / f"{tag}.lomt"
+            src.write_text(body % tier, encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"reuseextent_{tag}", td, timeout=30)[0])
+    assert got[0] == 7, (
+        f"`gc_auto` 那一只没跑完：退出码 {got[0]}（期望 7）。124 = 被 timeout 杀掉，也就是"
+        "**在第二次回收上不返回** —— 有一块被复用之后记录尺寸与实际跨度对不上，"
+        "收集器清标记那一趟掉进块内部、读到 size=0 就原地打转")
+    assert got[1] != 7, (
+        f"**`gc_manual` 那一只也跑通了**（退出码 {got[1]}）—— 那这条判据测不出什么："
+        "arena 装得下这约 98 KB 请求，上面那只的 7 不是回收换来的")
+    print(f"      auto 跑通 (rc={got[0]})；manual 耗尽 (rc={got[1]}) —— 复用没有让遍历失步")
+
+
+@test
+def test_a_promoted_buffer_is_scanned():
+    """**L0 提升到栈上的那块缓冲，里面的字也要被根扫看到**（`FujoJTOP/loment#362`）。
+
+    **Why**：`choose gc_auto_alpha` 的 L0 把 `let NAME: ptr = alloc(<字面量>)` 提到栈上，
+    于是那个局部槽里存的是**栈**地址。根扫是这么判的：`rdo = 槽里的值 − @__loment_heap`，
+    `ult 65536` 才当堆内地址 —— 栈地址减出来是个巨大的无符号数，**直接跳过**。
+    而 `__loment_propagate` 只在堆里走。两者合起来：**那块缓冲的内容从来没人扫**。
+
+    而 L0 的规则**并不禁止**缓冲里装堆指针：`_ptr_only_uses` 会把"只解引用"的用户函数
+    （这里就是 `wr64`）吸收进安全集，于是它能把任意 u64 写进缓冲 —— 那正是容器会做的事。
+    只被缓冲里那 8 个字节指着的对象，于是被当垃圾收掉，块还被复用，程序读回的是别人的字节。
+
+    **How to apply**：语料取自 `#362`。`hold` 是 L0 候选（`alloc(8)` 字面量、只经由 `wr64`
+    解引用）；目标 `t` 唯一的引用就是写进 `hold` 的那 8 个字节；末尾那个 `alloc(32)`
+    （块长 40 B，全程序只有目标用这个尺寸）是**探测块** —— 对象真被收了，它就一定落在
+    目标那块上、把载荷盖成 200。三只同源程序：
+      * `alpha` + 写进去 → **跑完**（rc = 7）；修之前是 **rc = 3**（读回 200）；
+      * `alpha` + **不写** → **必须不是 7**：这一半是**证伪** —— 没有那 8 个字节，对象本就
+        该被收，探测块就该盖掉它。少了这一半，"跑完"可能只是探测块什么也没盖到；
+      * `auto` + 写进去 → **跑完**（rc = 7）：那一档没有 L0，堆块照常被扫，
+        是 issue 里那一对里的另一半。
+
+    端到端：IR 过的是**包内镜像链接器**（`lomelf.compile_ll`）。
+    """
+    if not _wsl():
+        print("      SKIP: 无 WSL")
+        return
+    body = ("module l0hole\n%s\nchoose runtime\n\n"
+            "fn junk() -> u64 {\n"
+            "    let p: u64 = alloc(16) as u64;\n"
+            "    store8(p as ptr, 0, 200);\n"
+            "    return p;\n}\n\n"
+            "fn wr64(p: ptr, o: u32, v: u64) -> u32 {\n"
+            "    store8(p, o, (v & 255) as u8);\n"
+            "    store8(p, o + 1, ((v >> 8) & 255) as u8);\n"
+            "    store8(p, o + 2, ((v >> 16) & 255) as u8);\n"
+            "    store8(p, o + 3, ((v >> 24) & 255) as u8);\n"
+            "    store8(p, o + 4, ((v >> 32) & 255) as u8);\n"
+            "    store8(p, o + 5, ((v >> 40) & 255) as u8);\n"
+            "    store8(p, o + 6, ((v >> 48) & 255) as u8);\n"
+            "    store8(p, o + 7, ((v >> 56) & 255) as u8);\n"
+            "    return 0;\n}\n\n"
+            "fn _start() {\n"
+            "    let hold: ptr = alloc(8);\n"
+            "    let t: u64 = alloc(32) as u64;\n"
+            "    store8(t as ptr, 0, 7);\n"
+            "%s"
+            "    let i: u32 = 0;\n"
+            "    while i < 4000 { let _a: u64 = junk(); i = i + 1; }\n"
+            "    let probe: u64 = alloc(32) as u64;\n"
+            "    store8(probe as ptr, 0, 200);\n"
+            "    if load8(t as ptr, 0) == 7 { syscall4(60, 7, 0, 0); }\n"
+            "    syscall4(60, 3, 0, 0);\n}\n")
+    cases = (("alpha", "choose gc_auto_alpha", "    wr64(hold, 0, t);\n"),
+             ("alpha_nowrite", "choose gc_auto_alpha", ""),
+             ("auto", "choose gc_auto", "    wr64(hold, 0, t);\n"))
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        got = []
+        for tag, tier, extra in cases:
+            src = td / f"{tag}.lomt"
+            src.write_text(body % (tier, extra), encoding="utf-8", newline="\n")
+            ll = _ref_ir(src, td)
+            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            nat = td / f"{tag}.native"
+            nat.write_bytes(blob)
+            got.append(_run_bin(nat, f"l0hole_{tag}", td, timeout=30)[0])
+    assert got[0] == 7, (
+        f"`gc_auto_alpha` 那一只读到 {got[0]}（期望 7）—— 目标被收了。提升后的缓冲是一块"
+        "**栈**内存，它的槽里存的是栈地址，根扫按'减堆基址、小于 arena'判，于是整块缓冲"
+        "从来没人扫；只被它指着的对象就成了垃圾")
+    assert got[1] != 7, (
+        f"**不写那 8 个字节的那一只也跑通了**（退出码 {got[1]}）—— 那这条判据测不出什么："
+        "没有那 8 个字节，对象本来就该被收，探测块就该盖掉它")
+    assert got[2] == 7, (
+        f"`gc_auto` 那一只读到 {got[2]}（期望 7）—— 那一档没有 L0，堆块照常被扫，"
+        "不该在这里出问题（issue 里的另一半正是它）")
+    print(f"      alpha 跑通 (rc={got[0]})；alpha 不写就不保 (rc={got[1]})；"
+          f"auto 跑通 (rc={got[2]}) —— 提升缓冲的字在根扫里")
 
 
 @test
@@ -2391,11 +2655,18 @@ def test_the_generational_barrier_has_a_measured_cost():
     循环里一次 `alloc` 都没有 ⇒ 两个档的差别**只有**屏障那一次调用，没有收集器掺进来），
     编两遍 —— `choose gc_auto`（**不发**屏障）与 `choose gc_auto_alpha`（每站发一次）——
     各自**一次 shell 里跑 5 遍取最小**（见 `_time_bin`：一次 `wsl` 启动就能淹掉被测时间）。
-    两个断言：
+    三个断言，而**确定性的那个才是这条判据的意图**：
+
       * 两只**都跑完**（rc = 7）—— 否则"更快"可能只是崩得早；
-      * alpha / auto **不超过 3 倍**。界取得宽是有意的：这条要抓的是**形状变了**
-        （例如屏障变成每字一次、或跟着堆大小走），不是抓几个百分点 —— 那几个百分点由
-        IR 的 1.37 倍那条确定性的判据管。实测比值印在 `PASS` 行上，供 §7 记数。
+      * `gc_auto` 的 IR 里**一条屏障都没有**（那一档不发）；
+      * `gc_auto_alpha` 的 IR 里屏障函数定义 **1** 次、**调用次数 == 源里 `store8` 站点数**
+        （每站一次）。这三条与机器快慢无关，抓的正是"形状变了"：每字一次会让调用数变成
+        8 倍，跟着堆大小走则会随负载漂。
+
+    **墙钟只报不判**（`FujoJTOP/loment#442`）：同一个比值在判据作者那台是 3.2×、本机 4.13×、
+    CI runner 5.4×（两次相差 0.5%，不是抖动），而界原先定在 5.0 —— **分开的是机器，不是形状**：
+    它在 CI 上恒红、在别的机器上恒绿，与那棵树对不对无关。要让它重新变成门禁，得让它跟
+    **同一次运行里、紧接着的对照**比，而不是跟一个绝对比值比。比值仍打印出来，供 `docs/210` §7 记数。
     """
     if not _wsl():
         print("      SKIP: 无 clang/WSL")
@@ -2421,25 +2692,38 @@ def test_the_generational_barrier_has_a_measured_cost():
     with tempfile.TemporaryDirectory() as tds:
         td = Path(tds)
         got = {}
+        irs: dict[str, str] = {}
         for tag, tier in (("auto", "choose gc_auto"), ("alpha", "choose gc_auto_alpha")):
             src = td / f"{tag}.lomt"
             src.write_text(body % tier, encoding="utf-8", newline="\n")
             ll = _ref_ir(src, td)
-            blob, _info = lomelf.compile_ll(ll.read_text(encoding="utf-8"))
+            irs[tag] = ll.read_text(encoding="utf-8")
+            blob, _info = lomelf.compile_ll(irs[tag])
             nat = td / f"{tag}.native"
             nat.write_bytes(blob)
             rc, _out = _run_bin(nat, f"barrier_rc_{tag}", td, timeout=60)
             assert rc == 7, f"`{tier}` 那一只没跑完：rc={rc}（比时间之前先确认它真的跑完了）"
             got[tag] = _time_bin(nat, f"barrier_{tag}", td, runs=5)
+
+    # **形状**：数 IR 就够了，与机器快慢无关（`#442` —— 原先唯一的断言是个绝对墙钟比值，
+    # 而它在本机 4.13×、CI runner 5.4×、作者那台 3.2×，界 5.0 落在三者的散布里）。
+    sites = body.count("store8(")
+    assert "__loment_wb" not in irs["auto"], (
+        "`choose gc_auto` 的 IR 里出现了写屏障 —— 那一档**不发**屏障，这是形状变了")
+    n_def = irs["alpha"].count("define internal void @__loment_wb")
+    assert n_def == 1, f"`choose gc_auto_alpha` 里屏障函数定义了 {n_def} 次（应为 1 次）"
+    n_call = irs["alpha"].count("call void @__loment_wb")
+    assert n_call == sites, (
+        f"屏障调用 {n_call} 处，而源里 `store8` 站点 {sites} 个 —— 屏障应当**每站一次**"
+        "（每字一次会让它变成 8 倍，跟着堆大小走则会随负载漂）")
+
     a, b = got["auto"], got["alpha"]
     assert a > 0 and b > 0, f"计时没拿到数：auto={a} alpha={b}（微秒）"
     ratio = b / a
-    assert ratio <= 5.0, (
-        f"写屏障的墙钟是 auto 档的 {ratio:.2f} 倍（auto={a} µs，alpha={b} µs）—— 超过 5 倍。"
-        "这条界是抓**形状**变化的（屏障变成每字一次、或跟着堆大小走），不是抓几个百分点："
-        "2026-10-16 实测约 **3.2×**，而 IR 只有 1.37×")
     print(f"      写屏障：auto {a / 1000:.1f} ms / alpha {b / 1000:.1f} ms = {ratio:.2f}×"
-          "（各一次 shell 里 5 遍取最小）")
+          f"（auto 的 IR {len(irs['auto'].splitlines())} 行、无屏障；"
+          f"alpha {len(irs['alpha'].splitlines())} 行、{n_call} 处调用 / {sites} 个站点）"
+          "（各一次 shell 里 5 遍取最小；比值只报不判，见 docstring）")
 
 
 @test
