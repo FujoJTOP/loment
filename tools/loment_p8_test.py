@@ -2405,7 +2405,7 @@ def test_m85_entry_load_distinguishes_empty_file_from_directory():
         # （任何把它当 C 串读的消费者都只看得到前半截）。行尾那个 `\n` 不算杂散。
         assert "\x00" not in err, f"缺文件那句话里带了 NUL: {err[:300]!r}"
         assert "\x00" not in run(work, "dir_nul")[1], "目录那句话里带了 NUL"
-        # `issue #8`：**没有源码位置**的失败也要进结构化诊断（`E030` 这一档）。
+        # `issue #8`：**没有源码位置**的失败也要进结构化诊断（`E031` 这一档）。
         # 没写进去的话启动器只能回吐裸行 —— 那正是 issue 报的那个症状。
         # `line` 必须是 **0**，不是编出来的行号：渲染器见 0 就不印 `:行号`。
         dj = work / "d.jsonl"
@@ -2413,7 +2413,7 @@ def test_m85_entry_load_distinguishes_empty_file_from_directory():
         assert rc == 1, f"缺文件应当退 1, 得到 {rc}: {err[:300]}"
         recs = [json.loads(x) for x in dj.read_text(encoding="utf-8").splitlines() if x.strip()]
         assert recs, "缺文件没写结构化诊断 (启动器只能回吐裸行)"
-        assert recs[0]["code"] == "E030", f"缺文件的码不是 E030: {recs[0]}"
+        assert recs[0]["code"] == "E031", f"缺文件的码不是 E031: {recs[0]}"
         assert recs[0]["line"] == 0, f"没有位置的那一档 line 必须是 0: {recs[0]}"
         assert recs[0]["file"].endswith("no-such-entry.lomt"), recs[0]
         assert "cannot open" in err, "写结构化诊断的同时, 给人看的那一行也要照打"

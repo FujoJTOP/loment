@@ -1499,7 +1499,7 @@ fn load_file(path: ptr, n: u32, out: ptr, off: u64, seen: ptr, snc: ptr,
         // 多出来的那一字节是字符串常量的 NUL, 用户看到的是 `打不开 \0路径` (issue #8)。
         // `failp` 把字面量交给 `wstr`、把路径按量好的长度写, 两边都不带尾巴。
         let dm: str = "cannot open this file";
-        wdiag_file(dfd, scr, path, n, 30, str_ptr(dm), str_len(dm));
+        wdiag_file(dfd, scr, path, n, 31, str_ptr(dm), str_len(dm));
         failp("cannot open ", path, n);
         die(1);
     }
@@ -1801,7 +1801,7 @@ fn _start() -> u32 {
     let tokv: u64 = sys_alloc(TOKS_CAP as u64);
     if tokv == 0 {
         let dm: str = "out of memory: cannot allocate the lexer buffer (brk failed)";
-        wdiag_file(dfd, scr, ap, an, 32, str_ptr(dm), str_len(dm));
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
         return fail(dm);
     }
     let toks: ptr = tokv as ptr;
@@ -1823,18 +1823,18 @@ fn _start() -> u32 {
     let ek: u32 = entry_kind(ap, an, scr);
     if ek == 1 {
         let dm: str = "the entry is a directory, not a source file";
-        wdiag_file(dfd, scr, ap, an, 30, str_ptr(dm), str_len(dm));
+        wdiag_file(dfd, scr, ap, an, 31, str_ptr(dm), str_len(dm));
         return fail(dm);
     }
     let len: u64 = load_file(ap, an, unit, 0, seen, snc, 0, scr, toks, 0);
     if len == 0 {
         if ek == 2 {
             let dm: str = "the entry file is empty (there is no source in it)";
-            wdiag_file(dfd, scr, ap, an, 30, str_ptr(dm), str_len(dm));
+            wdiag_file(dfd, scr, ap, an, 31, str_ptr(dm), str_len(dm));
             return fail(dm);
         }
         let dm2: str = "cannot load the entry file (is the path right?)";
-        wdiag_file(dfd, scr, ap, an, 30, str_ptr(dm2), str_len(dm2));
+        wdiag_file(dfd, scr, ap, an, 31, str_ptr(dm2), str_len(dm2));
         return fail(dm2);
     }
     // 单元的词法缓冲: 按**实测密度**估 —— 仓库 184 个文件合计 4.81 字节/token, 最密的
@@ -1846,7 +1846,7 @@ fn _start() -> u32 {
     let tok2v: u64 = sys_alloc(tcap);
     if tok2v == 0 {
         let dm: str = "the unit is too large: cannot allocate the lexer buffer";
-        wdiag_file(dfd, scr, ap, an, 32, str_ptr(dm), str_len(dm));
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
         return fail(dm);
     }
     let toks2: ptr = tok2v as ptr;
@@ -1855,7 +1855,7 @@ fn _start() -> u32 {
     let nt0: u32 = lex_cap(unit, len as u32, toks2, ntk);
     if nt0 > ntk {
         let dm: str = "the unit is too large: more tokens than the buffer holds (denser than 10 bytes/token)";
-        wdiag_file(dfd, scr, ap, an, 32, str_ptr(dm), str_len(dm));
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
         return fail(dm);
     }
     // **文件必须以 `module` 开头，而且名字要写在同一行**（`#24`）。
@@ -1895,7 +1895,7 @@ fn _start() -> u32 {
     let ntl: u32 = lex_cap(unit, len as u32, toks2, ntk);
     if ntl > ntk {
         let dm: str = "the unit is too large: more tokens than the buffer holds (denser than 10 bytes/token)";
-        wdiag_file(dfd, scr, ap, an, 32, str_ptr(dm), str_len(dm));
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
         return fail(dm);
     }
     // 开关 (`docs/182` §1): **在 token 流上落定** —— 关着的那段体连 token 都不留,
@@ -1905,7 +1905,7 @@ fn _start() -> u32 {
     let swv: u64 = sys_alloc(8008);
     if swv == 0 {
         let dm: str = "out of memory: cannot allocate the switch table (brk failed)";
-        wdiag_file(dfd, scr, ap, an, 32, str_ptr(dm), str_len(dm));
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
         return fail(dm);
     }
     let sw: ptr = swv as ptr;
@@ -1922,7 +1922,7 @@ fn _start() -> u32 {
         let cfv: u64 = sys_alloc(CF_BYTES as u64);       // 方言表 + 体缓冲 + 语境
         if cfv == 0 {
             let dm: str = "out of memory: cannot allocate the comefor workspace (brk failed)";
-            wdiag_file(dfd, scr, ap, an, 32, str_ptr(dm), str_len(dm));
+            wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
             return fail(dm);
         }
         // 解释器的工作堆**单独要一块**（墙 ①b）：与 codegen 的 49152B 同在一块 64 KiB
@@ -1930,20 +1930,20 @@ fn _start() -> u32 {
         let hpv: u64 = sys_alloc(cf_heap_bytes() as u64);
         if hpv == 0 {
             let dm: str = "out of memory: cannot allocate the comefor heap (brk failed)";
-            wdiag_file(dfd, scr, ap, an, 32, str_ptr(dm), str_len(dm));
+            wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
             return fail(dm);
         }
         // 展开后的产物表。与源一样大 —— 宏体可以吐得比吃的多，但不会多到要再翻一倍。
         let cfov: u64 = sys_alloc(TOKS_CAP as u64);
         if cfov == 0 {
             let dm: str = "out of memory: cannot allocate the comefor output buffer (brk failed)";
-            wdiag_file(dfd, scr, ap, an, 32, str_ptr(dm), str_len(dm));
+            wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
             return fail(dm);
         }
         let rsv: u64 = sys_alloc(64);
         if rsv == 0 {
             let dm: str = "out of memory: cannot allocate the comefor result buffer (brk failed)";
-            wdiag_file(dfd, scr, ap, an, 32, str_ptr(dm), str_len(dm));
+            wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
             return fail(dm);
         }
         let rs: ptr = rsv as ptr;
@@ -1971,7 +1971,7 @@ fn _start() -> u32 {
     let errsv: u64 = sys_alloc(8192);
     if errsv == 0 {
         let dm: str = "out of memory: cannot allocate the diagnostic buffer (brk failed)";
-        wdiag_file(dfd, scr, ap, an, 32, str_ptr(dm), str_len(dm));
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
         return fail(dm);
     }
     let errs: ptr = errsv as ptr;
@@ -1982,7 +1982,7 @@ fn _start() -> u32 {
     let arenav: u64 = sys_alloc(chk_arena_bytes() as u64);
     if arenav == 0 {
         let dm: str = "out of memory: cannot allocate the checker arena (brk failed)";
-        wdiag_file(dfd, scr, ap, an, 32, str_ptr(dm), str_len(dm));
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
         return fail(dm);
     }
     let arena: ptr = arenav as ptr;
@@ -1999,7 +1999,7 @@ fn _start() -> u32 {
     }
     if nsym > (chk_arena_scr() - chk_arena_syms()) / 20 {
         let dm: str = "more declarations than the checker's symbol table holds -- split the facade";
-        wdiag_file(dfd, scr, ap, an, 32, str_ptr(dm), str_len(dm));
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
         return fail(dm);
     }
     let tytp: ptr = ptr_add(arena, chk_arena_tyt());
@@ -2089,14 +2089,14 @@ fn _start() -> u32 {
     let cgv: u64 = sys_alloc(cg_arena_bytes() as u64);
     if cgv == 0 {
         let dm: str = "out of memory: cannot allocate the codegen state block (brk failed)";
-        wdiag_file(dfd, scr, ap, an, 32, str_ptr(dm), str_len(dm));
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(dm), str_len(dm));
         return fail(dm);
     }
     let cg: ptr = cgv as ptr;
     let m: u32 = emit_module(unit, toks2, ir, cg);
     if m == 0 {
         let msg: str = "more functions than the codegen table holds -- split the facade";
-        wdiag_file(dfd, scr, ap, an, 32, str_ptr(msg), str_len(msg));
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(msg), str_len(msg));
         return fail(msg);
     }
     write_all(1, ir, m as u64);

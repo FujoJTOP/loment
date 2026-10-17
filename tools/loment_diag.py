@@ -74,6 +74,21 @@ RULES = [
      "**没有名字规则**；后端的 `native M23`（struct 字段暂只支持标量）也还没放行它们。"
      "**换一种写法绕开**（改成编译器认得名字的形状）；绕不开就报告（附上这条消息）。"
      "进度见 `docs/147` §2「命名层」与 `docs/145` 的里程碑表。"),
+    # E030 = **类型位置上的未知名**（`#323`）。**与 E002 分开**，理由与上面那条 E024/E025/E026
+    # 同一条：码按**修法**分。E002 的修法是"先声明这个名字 / 改拼写 / 补 `use`"；而
+    # `let a: f64 = 1;` 里用户要被告知的是"**这门语言没有浮点**"（`loment types` 只列
+    # `u8..u64 i8..i64 bool ptr str` 与聚合）—— 那是"这门语言没有"，不是"你写错了"。
+    #
+    # **0.1.4.5 的实测形状**：`error[E002]: undeclared name` + 一张讲"没有类型推断 /
+    # 先定义后使用 / 跨模块要 `pub`"的建议表，三条一条都不适用。用户会去找拼写错误。
+    #
+    # **排在最前**（在 E002 之前）：本码的字面就是"未知类型"，比 E002 的 `类型 .*未声明`
+    # 更专有 —— 按"更专有的排前面"的老规矩放这里，将来谁给 E002 加分支也不会把它抢走。
+    ("E030", r"未知类型 ",
+     "未知类型",
+     "把类型换成语言真有的一个（`loment types` 列全部）。**最常撞的是浮点**：Loment "
+     "没有 `f32` / `f64` —— 要么把标度放大成整数（`let x: u32 = 314;` 表示 3.14），"
+     "要么把值留在 C ABI 那边用 `extern fn` 传（`docs/173`）。"),
     # E002 必须排在 E001 前面: `载荷类型 Foo 未声明` / `结构体 S.a 类型 Foo 未声明` 里
     # 既有"类型"又有"未声明" —— 用户要做的事是"先声明 Foo"(E002), 不是"检查两侧类型"。
     ("E002", r"未定义的函数|未声明的变量|未声明$|未知结构体|未知枚举|类型 .*未声明|没有方法",
@@ -274,15 +289,14 @@ RULES = [
      "所以两者必须成对：有 `command_main` 却没有命令声明，它就是**死代码**（不会被调用）；"
      "只有声明而没有 `command_main`，生成的入口就没有东西可调（链接时才炸，所以在这里拒）；"
      "签名不对则生成的入口调不动它 —— 入口固定是 "
-     "`fn command_main(argv: ptr, argc: u32) -> u32`（`docs/223` §3.2）。"),
-    # ---- E030..E032（issue #8，2026-10-16）：**没有源码位置的失败**。
+     "`fn command_main(argv: ptr, argc: u32) -> u32`（`docs/223` §3.2）。"),# ---- E031..E033（issue #8，2026-10-16）：**没有源码位置的失败**。
     #
     # 上面那些码全是"源码里哪一行写错了"。这三条不是 —— 它们说的是"**文件**／**产物**
     # 这一层出的事"：读不到输入、写不了输出、这台编译器装不下这个单元。所以它们的记录
     # `line` 是 **0**（= 没有位置，`lomenterr` 的 `num_raw` 就是这个口径），渲染器据此
     # **不印 `:行号`**、也不去源里切那两行。
     #
-    # ⚠ **号是 30 起，不是 28**：E028/E029 已经被 LMS 第 1 级检查器占了（`docs/253` §5.1，
+    # ⚠ **号是 31 起，不是 28**：E028/E029 已经被 LMS 第 1 级检查器占了（`docs/253` §5.1，
     # 定长数组越界 / use-after-free）。合并 main 时撞的号，按"已落地的那份不改"顺延。
     #
     # **为什么各占一个码、而不是并进某一条**：按本仓那条老规矩 —— **码按修法分**。
@@ -295,22 +309,21 @@ RULES = [
     # **它们与参考实现的关系**：参考实现在这几处**一句话都没有** —— 读不到文件是没接住的
     # `FileNotFoundError`，写不了输出是没接住的 `OSError`，两者都直接甩 Python 栈。自举侧
     # 一直在报，只是报的话给不了用户。这一轮两边都补：自举侧吐结构化记录，参考侧改吐一句话。
-    ("E030", r"cannot read |cannot open |打不开输入文件|读不了输入文件|是目录, 不是源文件"
+    ("E031", r"cannot read |cannot open |打不开输入文件|读不了输入文件|是目录, 不是源文件"
              r"|入口是空文件",
      "输入文件读不了",
      "编译器要读的那份源没拿到：可能是路径不存在、是个目录、没有读权限，或者是**空文件**。"
      "这与\"你的源码写错了\"是两件事 —— 源码一个字符都还没被看，所以没有行号可指。"),
-    ("E031", r"cannot write the output file|写不了输出文件|写不了输出",
+    ("E032", r"cannot write the output file|写不了输出文件|写不了输出",
      "输出文件写不了",
      "链接器把产物写到你给的那个 `-o` 路径上时失败了。**最常见的起因是那个目录不存在** —— "
      "`loment build a.lomt -o build/a` 而 `build/` 还没建。也与\"你的源码写错了\"无关。"),
-    ("E032", r"unit is too large|out of memory|单元太大|表容量|does not fit in the input buffer"
+    ("E033", r"unit is too large|out of memory|单元太大|表容量|does not fit in the input buffer"
              r"|超过 4 MiB 上限",
      "这个单元超出编译器装得下的量",
      "这套工具链是**自举**的：词法缓冲、符号表、codegen 表、回填表都是**固定容量**"
      "（它们开在程序映像里，而不是按需增长）。单元大过那些格就报这一条。"
      "它不是\"你的源码错了\" —— 同一份源码换个更小的形状就编得过。"),
-
 ]
 
 
@@ -358,9 +371,11 @@ ASCII_ONE_LINER: dict[int, str] = {
     27: "a non-() function may fall off the end of its body - every path must return",
     28: "index past the end of a fixed-size array - the index is a literal and the length "
         "is known at compile time",
-    30: "cannot read the input file - missing, a directory, unreadable, or empty",
-    31: "cannot write the output file - its directory is missing, or it is not writable",
-    32: "the unit is too large for this compiler's fixed buffers - split the facade",
+    29: "use after free - this block was already passed to `free`",
+    30: "unknown type - no type by that name; Loment has no floating point",
+    31: "cannot read the input file - missing, a directory, unreadable, or empty",
+    32: "cannot write the output file - its directory is missing, or it is not writable",
+    33: "the unit is too large for this compiler's fixed buffers - split the facade",
     29: "use after free - this block was already passed to `free`",
 }
 
@@ -404,9 +419,11 @@ TITLE_EN: dict[int, str] = {
     26: "`command_main` without a matching declaration",
     27: "control flow: this function may fall off the end of its body",
     28: "index past the end of a fixed-size array",
-    30: "cannot read this input file",
-    31: "cannot write the output file",
-    32: "this unit is too large for the compiler",
+    29: "use after free",
+    30: "unknown type",
+    31: "cannot read this input file",
+    32: "cannot write the output file",
+    33: "this unit is too large for the compiler",
     29: "use after free",
 }
 
@@ -868,7 +885,28 @@ CARDS: dict[int, Card] = {
         ),
         yes="`free(p)` 之后没有再读/写 `p`；`free` 之后 `p` 被重新赋值",
         no="`free` 之前的使用；`free` 之后重新赋值再使用",
-    ),    30: Card(
+    ),
+    30: Card(
+        what="一个**类型位置**上写了这门语言没有的类型（`let x: f64`、形参、返回类型、"
+             "结构体字段、枚举载荷、数组/切片元素都算）。",
+        why="Loment 的类型表是**固定的**：`u8`..`u64`、`i8`..`i64`、`bool`、`ptr`、`str`、"
+            "`()`，加上你声明的 `struct` / `enum` 与它们的数组/切片 —— 没有泛型容器，"
+            "**也没有浮点**（`loment types` 打出来就是全部）。所以这一条说的不是"
+            "\"这个名字没声明\"，而是\"**这门语言没有这种类型**\"。"
+            "它与 E002 分开的理由也在这里：E002 的修法是声明那个名字，这一条的修法是"
+            "换一个真有的类型。",
+        fixes=(
+            "把类型换成表里真有的一个（`loment types` 列全部；最常要换掉的是 `f32`/`f64`）。",
+            "要表示小数就**放大成整数**：`let x: u32 = 314;` 表示 3.14，"
+            "定点运算自己做（`docs/228`）。",
+            "非得用浮点：把那个值留在 C ABI 那一侧，用 `extern fn` 传进传出（`docs/173`）—— "
+            "ABI 上浮点是合法的，语言里的类型不是。",
+        ),
+        yes="`u32` / `i64` / `bool` / `ptr` / `str` / `()`；你声明的 `struct`/`enum` 名；"
+            "它们的数组与切片 `[T; N]` / `[T]`",
+        no="`f32` / `f64`（没有浮点）；泛型容器名；不是类型的标识符（如变量名）",
+    ),
+    31: Card(
         what="编译器要读的那份源文件没拿到。**还没有看源码一个字符** —— 所以这条没有行号。",
         why="装载是编译的第一趟，而这一条发生在它之前。「文件读不到」与「文件里的源码写错了」"
             "是两件不同的事：前者无论如何改源码都解决不了，所以它单独一个码、"
@@ -883,7 +921,7 @@ CARDS: dict[int, Card] = {
         yes="路径存在、是普通文件、非空、可读",
         no="写错的路径；目录；0 字节的文件；没有读权限的文件",
     ),
-    31: Card(
+    32: Card(
         what="链接器把产物写到你给的 `-o` 路径上时失败了。",
         why="产物是编译的**最后一步**，所以这条与源码无关 —— 源码全对也可能写不出去。"
             "最常见的原因是**父目录不存在**：`loment build a.lomt -o out/a` 而 `out/` 还没建。"
@@ -897,7 +935,7 @@ CARDS: dict[int, Card] = {
         yes="`-o` 的父目录存在且可写",
         no="不存在的目录；只读目录；正在运行的 exe 占着的路径",
     ),
-    32: Card(
+    33: Card(
         what="这个单元超出了这套编译器**固定容量**的那几张表（词法缓冲 / 符号表 / "
              "codegen 表 / 回填表）。",
         why="这套工具链是**自举**的，没有优化器也没有动态容器：那几张表开在程序映像里，"
@@ -906,14 +944,13 @@ CARDS: dict[int, Card] = {
             "所以这条不是「你的源码错了」，是「这一份的形状对这台编译器来说太大了」。",
         fixes=(
             "把门面拆小：一个 `use` 拉进来的东西太多就分几层（`loment/lib/` 里那些就是样板）。",
-            "`use` 条数也有上限（一个文件 300 条）—— 超过就是这条。",
+            "`use` 条数也有上限（一个文件 310 条）—— 超过就是这条。",
             "声明那么多函数/类型的话，把单元切成几个模块，各自有自己的表。",
             "确实切不动就拿这事开个 issue：上限是常量，抬它有账可查（`docs/158` 记着每次抬高的实测）。",
         ),
         yes="单元在词法缓冲 / 符号表 / codegen 表 / 回填表的容量之内",
         no="单个源文件里塞一整个库；几百个 `use`；几百个顶层声明",
     ),
-
 }
 
 
@@ -1553,7 +1590,32 @@ CARDS_EN: dict[int, Card] = {
         yes="`p` is not read or written after `free(p)`; `p` is reassigned after the "
             "`free`",
         no="use before the `free`; reassignment followed by use after the `free`",
-    ),    30: Card(
+    ),
+    30: Card(
+        what="A **type position** names a type this language does not have - a `let` "
+             "annotation, a parameter, a return type, a struct field, an enum payload, or an "
+             "array/slice element.",
+        why="Loment's type table is **fixed**: `u8`..`u64`, `i8`..`i64`, `bool`, `ptr`, "
+            "`str`, `()`, plus the `struct` / `enum` you declare and arrays/slices of those "
+            "- no generic containers, and **no floating point** (`loment types` prints the "
+            "whole list). So this is not \"that name was not declared\"; it is \"**this "
+            "language has no such type**\". That is also why it is separate from E002: E002 "
+            "is fixed by declaring the name, this one by naming a type that exists.",
+        fixes=(
+            "Name a type that is in the table (`loment types` prints all of them - the one "
+            "people reach for is `f32`/`f64`).",
+            "To carry a fraction, **scale to integers**: `let x: u32 = 314;` for 3.14, with "
+            "the point handled by arithmetic you write (`docs/228`).",
+            "If you truly need floating point, keep the value on the C ABI side and pass it "
+            "through `extern fn` (`docs/173`) - floats are legal in the ABI, not in the "
+            "language's type table.",
+        ),
+        yes="`u32` / `i64` / `bool` / `ptr` / `str` / `()`; a `struct`/`enum` you declared; "
+            "arrays and slices of those, `[T; N]` / `[T]`",
+        no="`f32` / `f64` (there is no floating point); a generic container name; an "
+           "identifier that is not a type (a variable name, say)",
+    ),
+    31: Card(
         what="The compiler did not get the source file it was told to read. **Not one "
              "character of the source has been looked at** - so this one has no line number.",
         why="Loading is the compiler's first pass, and this happens before it. \"The file "
@@ -1574,7 +1636,7 @@ CARDS_EN: dict[int, Card] = {
         yes="the path exists, is a regular file, is not empty, and is readable",
         no="a misspelt path; a directory; a 0-byte file; a file you may not read",
     ),
-    31: Card(
+    32: Card(
         what="The linker failed to write the artifact to the `-o` path you gave it.",
         why="The artifact is the compiler's **last step**, so this has nothing to do with "
             "your source - the source can be perfect and the write still fail. The most "
@@ -1594,7 +1656,7 @@ CARDS_EN: dict[int, Card] = {
         yes="the parent directory of `-o` exists and is writable",
         no="a directory that does not exist; a read-only directory; a path held by a running exe",
     ),
-    32: Card(
+    33: Card(
         what="This unit outgrew the compiler's **fixed-capacity** tables (the lexer buffer, "
              "the symbol table, the codegen table, the backfill table).",
         why="This toolchain is **self-hosted**: it has no optimiser and no dynamic "
@@ -1606,7 +1668,7 @@ CARDS_EN: dict[int, Card] = {
         fixes=(
             "Split the facade: if one `use` pulls in too much, break it into layers (the "
             "files under `loment/lib/` are the model).",
-            "`use` also has a per-file limit (300 lines) - over that is this code.",
+            "`use` also has a per-file limit (310 lines) - over that is this code.",
             "If it is the number of declarations, cut the unit into modules so each has its "
             "own tables.",
             "If it genuinely cannot be cut, open an issue: the limits are constants, and "
@@ -1616,7 +1678,6 @@ CARDS_EN: dict[int, Card] = {
         no="a whole library in one source file; hundreds of `use`; hundreds of top-level "
            "declarations",
     ),
-
 }
 
 

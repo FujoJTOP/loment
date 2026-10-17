@@ -1752,8 +1752,8 @@ setprev:
 @.str.is_base_type.9 = private unnamed_addr constant [3 x i8] c"\73\74\72"
 @.str.is_base_type.10 = private unnamed_addr constant [3 x i8] c"\70\74\72"
 @.str.is_builtin.0 = private unnamed_addr constant [176 x i8] c"\73\74\72\5F\6C\65\6E\20\73\74\72\5F\65\71\20\73\74\72\5F\63\6F\6E\63\61\74\20\73\74\72\5F\62\79\74\65\20\73\6C\69\63\65\5F\6C\65\6E\20\70\61\6E\69\63\20\61\6C\6C\6F\63\20\66\72\65\65\20\6C\6F\61\64\38\20\73\74\6F\72\65\38\20\61\74\6F\6D\69\63\5F\61\64\64\20\69\6E\62\20\6F\75\74\62\20\67\65\74\5F\62\69\74\73\20\73\65\74\5F\62\69\74\73\20\73\74\72\5F\70\74\72\20\70\74\72\5F\61\64\64\20\70\74\72\5F\73\75\62\20\73\79\73\63\61\6C\6C\34\20\73\79\73\63\61\6C\6C\36\20\73\79\73\63\61\6C\6C\37\20\74\68\72\65\61\64\5F\73\70\61\77\6E"
-@.str.check_type.0 = private unnamed_addr constant [1 x i8] c"\5B"
-@.str.check_type.1 = private unnamed_addr constant [3 x i8] c"\6D\75\74"
+@.str.check_type.0 = private unnamed_addr constant [3 x i8] c"\6D\75\74"
+@.str.check_type.1 = private unnamed_addr constant [1 x i8] c"\5B"
 @.str.chk_find_paren.0 = private unnamed_addr constant [1 x i8] c"\28"
 @.str.chk_find_paren.1 = private unnamed_addr constant [1 x i8] c"\7B"
 @.str.chk_skip_type.0 = private unnamed_addr constant [3 x i8] c"\6D\75\74"
@@ -41529,74 +41529,85 @@ entry:
   %t1 = load ptr, ptr %src.addr
   %t2 = load ptr, ptr %t.addr
   %t3 = load i32, ptr %i.addr
-  %t4 = getelementptr inbounds [1 x i8], ptr @.str.check_type.0, i64 0, i64 0
+  %t4 = getelementptr inbounds [3 x i8], ptr @.str.check_type.0, i64 0, i64 0
   %t5 = insertvalue { ptr, i64 } undef, ptr %t4, 0
-  %t6 = insertvalue { ptr, i64 } %t5, i64 1, 1
+  %t6 = insertvalue { ptr, i64 } %t5, i64 3, 1
   %t7 = call i1 @chk_tok_is(ptr %t1, ptr %t2, i32 %t3, { ptr, i64 } %t6)
-  br i1 %t7, label %L2_sc_short, label %L1_sc_rhs
-L1_sc_rhs:
+  br i1 %t7, label %L1_then, label %L2_else
+L1_then:
   %t8 = load ptr, ptr %src.addr
   %t9 = load ptr, ptr %t.addr
-  %t10 = load i32, ptr %i.addr
-  %t11 = getelementptr inbounds [3 x i8], ptr @.str.check_type.1, i64 0, i64 0
-  %t12 = insertvalue { ptr, i64 } undef, ptr %t11, 0
-  %t13 = insertvalue { ptr, i64 } %t12, i64 3, 1
-  %t14 = call i1 @chk_tok_is(ptr %t8, ptr %t9, i32 %t10, { ptr, i64 } %t13)
-  br label %L3_sc_end
-L2_sc_short:
-  br label %L3_sc_end
-L3_sc_end:
-  %t15 = phi i1 [ %t14, %L1_sc_rhs ], [ true, %L2_sc_short ]
-  br i1 %t15, label %L4_then, label %L5_else
+  %t10 = load ptr, ptr %s.addr
+  %t11 = load i32, ptr %n.addr
+  %t12 = load i32, ptr %i.addr
+  %t13 = add i32 %t12, 1
+  %t14 = load ptr, ptr %p.addr
+  %t15 = load i32, ptr %o.addr
+  %t16 = call i64 @check_type(ptr %t8, ptr %t9, ptr %t10, i32 %t11, i32 %t13, ptr %t14, i32 %t15)
+  ret i64 %t16
+L2_else:
+  br label %L3_end
+L3_end:
+  %t17 = load ptr, ptr %src.addr
+  %t18 = load ptr, ptr %t.addr
+  %t19 = load i32, ptr %i.addr
+  %t20 = getelementptr inbounds [1 x i8], ptr @.str.check_type.1, i64 0, i64 0
+  %t21 = insertvalue { ptr, i64 } undef, ptr %t20, 0
+  %t22 = insertvalue { ptr, i64 } %t21, i64 1, 1
+  %t23 = call i1 @chk_tok_is(ptr %t17, ptr %t18, i32 %t19, { ptr, i64 } %t22)
+  br i1 %t23, label %L4_then, label %L5_else
 L4_then:
-  %t16 = load i32, ptr %i.addr
-  %t17 = zext i32 %t16 to i64
-  %t18 = mul i64 %t17, 4294967296
-  %t19 = load i32, ptr %o.addr
-  %t20 = zext i32 %t19 to i64
-  %t21 = add i64 %t18, %t20
-  ret i64 %t21
+  %t24 = load ptr, ptr %src.addr
+  %t25 = load ptr, ptr %t.addr
+  %t26 = load ptr, ptr %s.addr
+  %t27 = load i32, ptr %n.addr
+  %t28 = load i32, ptr %i.addr
+  %t29 = add i32 %t28, 1
+  %t30 = load ptr, ptr %p.addr
+  %t31 = load i32, ptr %o.addr
+  %t32 = call i64 @check_type(ptr %t24, ptr %t25, ptr %t26, i32 %t27, i32 %t29, ptr %t30, i32 %t31)
+  ret i64 %t32
 L5_else:
   br label %L6_end
 L6_end:
-  %t22 = load ptr, ptr %src.addr
-  %t23 = load ptr, ptr %t.addr
-  %t24 = load i32, ptr %i.addr
-  %t25 = call i1 @is_base_type(ptr %t22, ptr %t23, i32 %t24)
-  br i1 %t25, label %L7_then, label %L8_else
+  %t33 = load ptr, ptr %src.addr
+  %t34 = load ptr, ptr %t.addr
+  %t35 = load i32, ptr %i.addr
+  %t36 = call i1 @is_base_type(ptr %t33, ptr %t34, i32 %t35)
+  br i1 %t36, label %L7_then, label %L8_else
 L7_then:
-  %t26 = load i32, ptr %i.addr
-  %t27 = zext i32 %t26 to i64
-  %t28 = mul i64 %t27, 4294967296
-  %t29 = load i32, ptr %o.addr
-  %t30 = zext i32 %t29 to i64
-  %t31 = add i64 %t28, %t30
-  ret i64 %t31
+  %t37 = load i32, ptr %i.addr
+  %t38 = zext i32 %t37 to i64
+  %t39 = mul i64 %t38, 4294967296
+  %t40 = load i32, ptr %o.addr
+  %t41 = zext i32 %t40 to i64
+  %t42 = add i64 %t39, %t41
+  ret i64 %t42
 L8_else:
   br label %L9_end
 L9_end:
-  %t32 = load ptr, ptr %t.addr
-  %t33 = load i32, ptr %i.addr
-  %t34 = call i32 @chk_tok_kind(ptr %t32, i32 %t33)
-  %t35 = icmp eq i32 %t34, 0
-  br i1 %t35, label %L10_then, label %L11_else
+  %t43 = load ptr, ptr %t.addr
+  %t44 = load i32, ptr %i.addr
+  %t45 = call i32 @chk_tok_kind(ptr %t43, i32 %t44)
+  %t46 = icmp eq i32 %t45, 0
+  br i1 %t46, label %L10_then, label %L11_else
 L10_then:
-  %t36 = load ptr, ptr %src.addr
-  %t37 = load ptr, ptr %t.addr
-  %t38 = load ptr, ptr %s.addr
-  %t39 = load i32, ptr %n.addr
-  %t40 = load i32, ptr %i.addr
-  %t41 = call i32 @chk_lookup_slot(ptr %t36, ptr %t37, ptr %t38, i32 %t39, i32 %t40)
-  %t42 = icmp ne i32 %t41, 0
-  br i1 %t42, label %L13_then, label %L14_else
+  %t47 = load ptr, ptr %src.addr
+  %t48 = load ptr, ptr %t.addr
+  %t49 = load ptr, ptr %s.addr
+  %t50 = load i32, ptr %n.addr
+  %t51 = load i32, ptr %i.addr
+  %t52 = call i32 @chk_lookup_slot(ptr %t47, ptr %t48, ptr %t49, i32 %t50, i32 %t51)
+  %t53 = icmp ne i32 %t52, 0
+  br i1 %t53, label %L13_then, label %L14_else
 L13_then:
-  %t43 = load i32, ptr %i.addr
-  %t44 = zext i32 %t43 to i64
-  %t45 = mul i64 %t44, 4294967296
-  %t46 = load i32, ptr %o.addr
-  %t47 = zext i32 %t46 to i64
-  %t48 = add i64 %t45, %t47
-  ret i64 %t48
+  %t54 = load i32, ptr %i.addr
+  %t55 = zext i32 %t54 to i64
+  %t56 = mul i64 %t55, 4294967296
+  %t57 = load i32, ptr %o.addr
+  %t58 = zext i32 %t57 to i64
+  %t59 = add i64 %t56, %t58
+  ret i64 %t59
 L14_else:
   br label %L15_end
 L15_end:
@@ -41604,18 +41615,18 @@ L15_end:
 L11_else:
   br label %L12_end
 L12_end:
-  %t49 = load i32, ptr %i.addr
-  %t50 = zext i32 %t49 to i64
-  %t51 = mul i64 %t50, 4294967296
-  %t52 = load ptr, ptr %src.addr
-  %t53 = load ptr, ptr %t.addr
-  %t54 = load ptr, ptr %p.addr
-  %t55 = load i32, ptr %o.addr
-  %t56 = load i32, ptr %i.addr
-  %t57 = call i32 @sym_pub(ptr %t52, ptr %t53, ptr %t54, i32 %t55, i32 2, i32 %t56)
-  %t58 = zext i32 %t57 to i64
-  %t59 = add i64 %t51, %t58
-  ret i64 %t59
+  %t60 = load i32, ptr %i.addr
+  %t61 = zext i32 %t60 to i64
+  %t62 = mul i64 %t61, 4294967296
+  %t63 = load ptr, ptr %src.addr
+  %t64 = load ptr, ptr %t.addr
+  %t65 = load ptr, ptr %p.addr
+  %t66 = load i32, ptr %o.addr
+  %t67 = load i32, ptr %i.addr
+  %t68 = call i32 @sym_pub(ptr %t63, ptr %t64, ptr %t65, i32 %t66, i32 30, i32 %t67)
+  %t69 = zext i32 %t68 to i64
+  %t70 = add i64 %t62, %t69
+  ret i64 %t70
 }
 ; chk_find_paren -> u32
 define i32 @chk_find_paren(ptr %src, ptr %t, i32 %i) {
@@ -101404,7 +101415,7 @@ L7_then:
   %t61 = load { ptr, i64 }, ptr %dm.addr
   %t62 = extractvalue { ptr, i64 } %t61, 1
   %t63 = trunc i64 %t62 to i32
-  call void @wdiag_file(i64 %t55, ptr %t56, ptr %t57, i32 %t58, i32 30, ptr %t60, i32 %t63)
+  call void @wdiag_file(i64 %t55, ptr %t56, ptr %t57, i32 %t58, i32 31, ptr %t60, i32 %t63)
   %t64 = getelementptr inbounds [12 x i8], ptr @.str.load_file.4, i64 0, i64 0
   %t65 = insertvalue { ptr, i64 } undef, ptr %t64, 0
   %t66 = insertvalue { ptr, i64 } %t65, i64 12, 1
@@ -102682,7 +102693,7 @@ L61_then:
   %t206 = load { ptr, i64 }, ptr %dm.addr
   %t207 = extractvalue { ptr, i64 } %t206, 1
   %t208 = trunc i64 %t207 to i32
-  call void @wdiag_file(i64 %t200, ptr %t201, ptr %t202, i32 %t203, i32 32, ptr %t205, i32 %t208)
+  call void @wdiag_file(i64 %t200, ptr %t201, ptr %t202, i32 %t203, i32 33, ptr %t205, i32 %t208)
   %t209 = load { ptr, i64 }, ptr %dm.addr
   %t210 = call i32 @fail({ ptr, i64 } %t209)
   ret i32 %t210
@@ -102756,7 +102767,7 @@ L67_then:
   %t261 = load { ptr, i64 }, ptr %dm.addr
   %t262 = extractvalue { ptr, i64 } %t261, 1
   %t263 = trunc i64 %t262 to i32
-  call void @wdiag_file(i64 %t255, ptr %t256, ptr %t257, i32 %t258, i32 30, ptr %t260, i32 %t263)
+  call void @wdiag_file(i64 %t255, ptr %t256, ptr %t257, i32 %t258, i32 31, ptr %t260, i32 %t263)
   %t264 = load { ptr, i64 }, ptr %dm.addr
   %t265 = call i32 @fail({ ptr, i64 } %t264)
   ret i32 %t265
@@ -102793,7 +102804,7 @@ L73_then:
   %t287 = load { ptr, i64 }, ptr %dm.addr
   %t288 = extractvalue { ptr, i64 } %t287, 1
   %t289 = trunc i64 %t288 to i32
-  call void @wdiag_file(i64 %t281, ptr %t282, ptr %t283, i32 %t284, i32 30, ptr %t286, i32 %t289)
+  call void @wdiag_file(i64 %t281, ptr %t282, ptr %t283, i32 %t284, i32 31, ptr %t286, i32 %t289)
   %t290 = load { ptr, i64 }, ptr %dm.addr
   %t291 = call i32 @fail({ ptr, i64 } %t290)
   ret i32 %t291
@@ -102813,7 +102824,7 @@ L75_end:
   %t301 = load { ptr, i64 }, ptr %dm2.addr
   %t302 = extractvalue { ptr, i64 } %t301, 1
   %t303 = trunc i64 %t302 to i32
-  call void @wdiag_file(i64 %t295, ptr %t296, ptr %t297, i32 %t298, i32 30, ptr %t300, i32 %t303)
+  call void @wdiag_file(i64 %t295, ptr %t296, ptr %t297, i32 %t298, i32 31, ptr %t300, i32 %t303)
   %t304 = load { ptr, i64 }, ptr %dm2.addr
   %t305 = call i32 @fail({ ptr, i64 } %t304)
   ret i32 %t305
@@ -102844,7 +102855,7 @@ L76_then:
   %t322 = load { ptr, i64 }, ptr %dm.addr
   %t323 = extractvalue { ptr, i64 } %t322, 1
   %t324 = trunc i64 %t323 to i32
-  call void @wdiag_file(i64 %t316, ptr %t317, ptr %t318, i32 %t319, i32 32, ptr %t321, i32 %t324)
+  call void @wdiag_file(i64 %t316, ptr %t317, ptr %t318, i32 %t319, i32 33, ptr %t321, i32 %t324)
   %t325 = load { ptr, i64 }, ptr %dm.addr
   %t326 = call i32 @fail({ ptr, i64 } %t325)
   ret i32 %t326
@@ -102891,7 +102902,7 @@ L82_then:
   %t351 = load { ptr, i64 }, ptr %dm.addr
   %t352 = extractvalue { ptr, i64 } %t351, 1
   %t353 = trunc i64 %t352 to i32
-  call void @wdiag_file(i64 %t345, ptr %t346, ptr %t347, i32 %t348, i32 32, ptr %t350, i32 %t353)
+  call void @wdiag_file(i64 %t345, ptr %t346, ptr %t347, i32 %t348, i32 33, ptr %t350, i32 %t353)
   %t354 = load { ptr, i64 }, ptr %dm.addr
   %t355 = call i32 @fail({ ptr, i64 } %t354)
   ret i32 %t355
@@ -103049,7 +103060,7 @@ L103_then:
   %t457 = load { ptr, i64 }, ptr %dm.addr
   %t458 = extractvalue { ptr, i64 } %t457, 1
   %t459 = trunc i64 %t458 to i32
-  call void @wdiag_file(i64 %t451, ptr %t452, ptr %t453, i32 %t454, i32 32, ptr %t456, i32 %t459)
+  call void @wdiag_file(i64 %t451, ptr %t452, ptr %t453, i32 %t454, i32 33, ptr %t456, i32 %t459)
   %t460 = load { ptr, i64 }, ptr %dm.addr
   %t461 = call i32 @fail({ ptr, i64 } %t460)
   ret i32 %t461
@@ -103075,7 +103086,7 @@ L106_then:
   %t474 = load { ptr, i64 }, ptr %dm.addr
   %t475 = extractvalue { ptr, i64 } %t474, 1
   %t476 = trunc i64 %t475 to i32
-  call void @wdiag_file(i64 %t468, ptr %t469, ptr %t470, i32 %t471, i32 32, ptr %t473, i32 %t476)
+  call void @wdiag_file(i64 %t468, ptr %t469, ptr %t470, i32 %t471, i32 33, ptr %t473, i32 %t476)
   %t477 = load { ptr, i64 }, ptr %dm.addr
   %t478 = call i32 @fail({ ptr, i64 } %t477)
   ret i32 %t478
@@ -103120,7 +103131,7 @@ L112_then:
   %t504 = load { ptr, i64 }, ptr %dm.addr
   %t505 = extractvalue { ptr, i64 } %t504, 1
   %t506 = trunc i64 %t505 to i32
-  call void @wdiag_file(i64 %t498, ptr %t499, ptr %t500, i32 %t501, i32 32, ptr %t503, i32 %t506)
+  call void @wdiag_file(i64 %t498, ptr %t499, ptr %t500, i32 %t501, i32 33, ptr %t503, i32 %t506)
   %t507 = load { ptr, i64 }, ptr %dm.addr
   %t508 = call i32 @fail({ ptr, i64 } %t507)
   ret i32 %t508
@@ -103148,7 +103159,7 @@ L115_then:
   %t523 = load { ptr, i64 }, ptr %dm.addr
   %t524 = extractvalue { ptr, i64 } %t523, 1
   %t525 = trunc i64 %t524 to i32
-  call void @wdiag_file(i64 %t517, ptr %t518, ptr %t519, i32 %t520, i32 32, ptr %t522, i32 %t525)
+  call void @wdiag_file(i64 %t517, ptr %t518, ptr %t519, i32 %t520, i32 33, ptr %t522, i32 %t525)
   %t526 = load { ptr, i64 }, ptr %dm.addr
   %t527 = call i32 @fail({ ptr, i64 } %t526)
   ret i32 %t527
@@ -103175,7 +103186,7 @@ L118_then:
   %t541 = load { ptr, i64 }, ptr %dm.addr
   %t542 = extractvalue { ptr, i64 } %t541, 1
   %t543 = trunc i64 %t542 to i32
-  call void @wdiag_file(i64 %t535, ptr %t536, ptr %t537, i32 %t538, i32 32, ptr %t540, i32 %t543)
+  call void @wdiag_file(i64 %t535, ptr %t536, ptr %t537, i32 %t538, i32 33, ptr %t540, i32 %t543)
   %t544 = load { ptr, i64 }, ptr %dm.addr
   %t545 = call i32 @fail({ ptr, i64 } %t544)
   ret i32 %t545
@@ -103201,7 +103212,7 @@ L121_then:
   %t558 = load { ptr, i64 }, ptr %dm.addr
   %t559 = extractvalue { ptr, i64 } %t558, 1
   %t560 = trunc i64 %t559 to i32
-  call void @wdiag_file(i64 %t552, ptr %t553, ptr %t554, i32 %t555, i32 32, ptr %t557, i32 %t560)
+  call void @wdiag_file(i64 %t552, ptr %t553, ptr %t554, i32 %t555, i32 33, ptr %t557, i32 %t560)
   %t561 = load { ptr, i64 }, ptr %dm.addr
   %t562 = call i32 @fail({ ptr, i64 } %t561)
   ret i32 %t562
@@ -103294,7 +103305,7 @@ L130_then:
   %t620 = load { ptr, i64 }, ptr %dm.addr
   %t621 = extractvalue { ptr, i64 } %t620, 1
   %t622 = trunc i64 %t621 to i32
-  call void @wdiag_file(i64 %t614, ptr %t615, ptr %t616, i32 %t617, i32 32, ptr %t619, i32 %t622)
+  call void @wdiag_file(i64 %t614, ptr %t615, ptr %t616, i32 %t617, i32 33, ptr %t619, i32 %t622)
   %t623 = load { ptr, i64 }, ptr %dm.addr
   %t624 = call i32 @fail({ ptr, i64 } %t623)
   ret i32 %t624
@@ -103325,7 +103336,7 @@ L133_then:
   %t641 = load { ptr, i64 }, ptr %dm.addr
   %t642 = extractvalue { ptr, i64 } %t641, 1
   %t643 = trunc i64 %t642 to i32
-  call void @wdiag_file(i64 %t635, ptr %t636, ptr %t637, i32 %t638, i32 32, ptr %t640, i32 %t643)
+  call void @wdiag_file(i64 %t635, ptr %t636, ptr %t637, i32 %t638, i32 33, ptr %t640, i32 %t643)
   %t644 = load { ptr, i64 }, ptr %dm.addr
   %t645 = call i32 @fail({ ptr, i64 } %t644)
   ret i32 %t645
@@ -103438,7 +103449,7 @@ L154_then:
   %t704 = load { ptr, i64 }, ptr %dm.addr
   %t705 = extractvalue { ptr, i64 } %t704, 1
   %t706 = trunc i64 %t705 to i32
-  call void @wdiag_file(i64 %t698, ptr %t699, ptr %t700, i32 %t701, i32 32, ptr %t703, i32 %t706)
+  call void @wdiag_file(i64 %t698, ptr %t699, ptr %t700, i32 %t701, i32 33, ptr %t703, i32 %t706)
   %t707 = load { ptr, i64 }, ptr %dm.addr
   %t708 = call i32 @fail({ ptr, i64 } %t707)
   ret i32 %t708
@@ -103760,7 +103771,7 @@ L193_then:
   %t925 = load { ptr, i64 }, ptr %dm.addr
   %t926 = extractvalue { ptr, i64 } %t925, 1
   %t927 = trunc i64 %t926 to i32
-  call void @wdiag_file(i64 %t919, ptr %t920, ptr %t921, i32 %t922, i32 32, ptr %t924, i32 %t927)
+  call void @wdiag_file(i64 %t919, ptr %t920, ptr %t921, i32 %t922, i32 33, ptr %t924, i32 %t927)
   %t928 = load { ptr, i64 }, ptr %dm.addr
   %t929 = call i32 @fail({ ptr, i64 } %t928)
   ret i32 %t929
@@ -103793,7 +103804,7 @@ L196_then:
   %t948 = load { ptr, i64 }, ptr %msg.addr
   %t949 = extractvalue { ptr, i64 } %t948, 1
   %t950 = trunc i64 %t949 to i32
-  call void @wdiag_file(i64 %t942, ptr %t943, ptr %t944, i32 %t945, i32 32, ptr %t947, i32 %t950)
+  call void @wdiag_file(i64 %t942, ptr %t943, ptr %t944, i32 %t945, i32 33, ptr %t947, i32 %t950)
   %t951 = load { ptr, i64 }, ptr %msg.addr
   %t952 = call i32 @fail({ ptr, i64 } %t951)
   ret i32 %t952
