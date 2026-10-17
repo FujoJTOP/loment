@@ -11,7 +11,7 @@ about
 about 两个实现一起改：检查器发 E031（不再借 `E_MODE`），驱动器按新码分派，结构化诊断里
 about 的 `"code"` 跟着改。参考侧的 `loment_diag.RULES` / `CARDS` / `ASCII_ONE_LINER` /
 about `TITLE_EN` 与 `lomentc.py` 那两条正则各自改动（那不是"同一段文本的多个副本"，
-about 按普通改动落，见 `docs/256` §4）。
+about 按普通改动落，见 `docs/257` §4）。
 about
 about 这一笔以修改件落的理由：**自举侧那几处是"同一段文本、两个实现各一份"** ——
 about 驱动器里 `code == 22` 那一处必须与检查器发的码同步改，改漏一处的症状是

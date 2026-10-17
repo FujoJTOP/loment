@@ -1268,6 +1268,37 @@ def test_gate_reports_how_many_criteria_did_not_run():
 
 
 @test
+def test_no_shipped_tool_prints_an_internal_name():
+    """包里那些工具**写给人看的消息不许以内部组件名开头**（`issue #8`）。
+
+    用户敲的是 `loment`（或 `lompi`）。`fujoc-s`（自举驱动的旧内部名）、`lomelf`、
+    `fujofmt` / `lomfmt`、`lomdoc` 这些名字对他不指向任何他手上的东西 —— 而
+    `fujoc-s: 打不开 x.lomt` 正是他实际看到的那一行。`issue #8` 报的三条里两条是这个。
+
+    **为什么扫源码而不是跑二进制**：跑一遍要构建整包（分钟级），而这一条要守的是
+    "新加的消息别再带内部名" —— 那是纯静态的，扫一遍就够。跑真东西那半由
+    `loment_p8_test` 的入口装载那条与 `loment_err_test` 的渲染那条承担。
+
+    **`lompi:` 与 `lomenterr:` 不在此列**：它们是独立命令，用户真的会敲（包里
+    `bin/lompi`、`bin/lomenterr` 就在那儿）。这里禁的是**用户没敲过**的名字。
+    """
+    pat = re.compile(r'"((?:fujoc-s|fujofmt|lomelf|lomfmt|lomdoc)\s*:)')
+    bad = []
+    for d in (ROOT / "loment" / "selfhost", ROOT / "loment" / "tools"):
+        for src in sorted(d.glob("*.lomt")):
+            for n, line in enumerate(src.read_text(encoding="utf-8").splitlines(), 1):
+                # **整行注释跳过** —— 源码里本来就有几处在注解里引用旧消息（那些正是
+                # 这一条要记的事），扫它们会把"记录"当成"违规"。
+                if line.lstrip().startswith("//"):
+                    continue
+                for m in pat.finditer(line):
+                    bad.append(f"{src.relative_to(ROOT)}:{n}: {m.group(1)}")
+    assert not bad, ("有人把内部组件名写进了面向用户的消息 (用户敲的是 `loment`):\n  "
+                     + "\n  ".join(bad))
+    print("      包里没有工具以内部组件名开头报消息")
+
+
+@test
 def test_gate_budget_matches_the_suites():
     """`#371` 两道棘轮的**签入文件本身**说得通吗。
 

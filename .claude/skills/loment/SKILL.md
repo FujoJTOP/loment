@@ -858,7 +858,7 @@ These are defects rather than language rules, and each one is here because meeti
 knowing costs half a day.
 
 20. **A unit can carry only one name-form `use`.** The second one fails with
-    `fujoc-s: 打不开 <garbage>` (*cannot open …*) where the "path" is a fragment of your own
+    `loment: cannot open <garbage>` where the "path" is a fragment of your own
     source - exit 1, no file name, no line. The path form `use "…/text.lomt"` has no such limit,
     so that is the workaround. A unit that carries imports also loses most of its string-literal
     capacity: measured, **eight ~34-byte literals** are enough to bring the compiler down with

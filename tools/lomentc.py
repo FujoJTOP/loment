@@ -8808,8 +8808,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ERR] {path}: {e}", file=sys.stderr)
         # 位置指不出来的那一档（`line == 0`，例如"前门拒了这份源"）**不写**结构化诊断 ——
         # 写进去就等于给它编了一个行号，而那个行号会被渲染器当真。
+        #
+        # **`E028`..`E030` 那几条不受这条管**（`issue #8`）：它们说的就是"这条诊断不属于
+        # 某一行"（文件读不到、产物写不出去、单元太大），所以它们**写**，`line` 明写 **0**。
+        # 渲染器那边认得 0 = 没有位置，既不印 `:0`、也不去源里切那两行。
         if e.line > 0:
             write_diags(args.diag_out, [diag_record(path, e.line, e.col, e.msg)])
+        return 1
+    except OSError as e:
+        # **文件这一层的失败**（`issue #8`）：路径不存在、给的是目录、没有读权限。
+        # 这一路原先**一句话都没有** —— `Path.read_text` 抛 `FileNotFoundError` /
+        # `PermissionError` / `IsADirectoryError`，用户拿到的是 Python 栈。它与"源码写错了"
+        # 是两件事（源码一个字符都还没看），所以它有自己的码，`line` 是 0。
+        msg = f"读不了输入文件 {path}: {e.strerror or e}"
+        print(f"[ERR] {path}: {msg}", file=sys.stderr)
+        write_diags(args.diag_out, [diag_record(path, 0, 0, msg)])
         return 1
 
     errs = check(mod, deps=deps)

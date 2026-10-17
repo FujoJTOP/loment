@@ -303,7 +303,41 @@ RULES = [
      "所以两者必须成对：有 `command_main` 却没有命令声明，它就是**死代码**（不会被调用）；"
      "只有声明而没有 `command_main`，生成的入口就没有东西可调（链接时才炸，所以在这里拒）；"
      "签名不对则生成的入口调不动它 —— 入口固定是 "
-     "`fn command_main(argv: ptr, argc: u32) -> u32`（`docs/223` §3.2）。"),
+     "`fn command_main(argv: ptr, argc: u32) -> u32`（`docs/223` §3.2）。"),# ---- E031..E033（issue #8，2026-10-16）：**没有源码位置的失败**。
+    #
+    # 上面那些码全是"源码里哪一行写错了"。这三条不是 —— 它们说的是"**文件**／**产物**
+    # 这一层出的事"：读不到输入、写不了输出、这台编译器装不下这个单元。所以它们的记录
+    # `line` 是 **0**（= 没有位置，`lomenterr` 的 `num_raw` 就是这个口径），渲染器据此
+    # **不印 `:行号`**、也不去源里切那两行。
+    #
+    # ⚠ **号是 31 起，不是 28**：E028/E029 已经被 LMS 第 1 级检查器占了（`docs/253` §5.1，
+    # 定长数组越界 / use-after-free）。合并 main 时撞的号，按"已落地的那份不改"顺延。
+    #
+    # **为什么各占一个码、而不是并进某一条**：按本仓那条老规矩 —— **码按修法分**。
+    # 这三件事用户要做的**动作完全不同**：查路径 / 建目录或换 `-o` / 把单元拆小。
+    # 并进任何一条都会给出"照着建议改却没解决"的消息。
+    #
+    # **为什么排在最后**：`RULES` 是**有序**的，第一个命中就赢。这三条的模式都偏宽
+    # （`cannot open` / `打不开` 这类），插在中间会抢走上面那些更精确的模式。
+    #
+    # **它们与参考实现的关系**：参考实现在这几处**一句话都没有** —— 读不到文件是没接住的
+    # `FileNotFoundError`，写不了输出是没接住的 `OSError`，两者都直接甩 Python 栈。自举侧
+    # 一直在报，只是报的话给不了用户。这一轮两边都补：自举侧吐结构化记录，参考侧改吐一句话。
+    ("E031", r"cannot read |cannot open |打不开输入文件|读不了输入文件|是目录, 不是源文件"
+             r"|入口是空文件",
+     "输入文件读不了",
+     "编译器要读的那份源没拿到：可能是路径不存在、是个目录、没有读权限，或者是**空文件**。"
+     "这与\"你的源码写错了\"是两件事 —— 源码一个字符都还没被看，所以没有行号可指。"),
+    ("E032", r"cannot write the output file|写不了输出文件|写不了输出",
+     "输出文件写不了",
+     "链接器把产物写到你给的那个 `-o` 路径上时失败了。**最常见的起因是那个目录不存在** —— "
+     "`loment build a.lomt -o build/a` 而 `build/` 还没建。也与\"你的源码写错了\"无关。"),
+    ("E033", r"unit is too large|out of memory|单元太大|表容量|does not fit in the input buffer"
+             r"|超过 4 MiB 上限",
+     "这个单元超出编译器装得下的量",
+     "这套工具链是**自举**的：词法缓冲、符号表、codegen 表、回填表都是**固定容量**"
+     "（它们开在程序映像里，而不是按需增长）。单元大过那些格就报这一条。"
+     "它不是\"你的源码错了\" —— 同一份源码换个更小的形状就编得过。"),
 ]
 
 
@@ -354,6 +388,10 @@ ASCII_ONE_LINER: dict[int, str] = {
     29: "use after free - this block was already passed to `free`",
     31: "this construct would drag the runtime in, but this tier is `no_runtime`",
     30: "unknown type - no type by that name; Loment has no floating point",
+    31: "cannot read the input file - missing, a directory, unreadable, or empty",
+    32: "cannot write the output file - its directory is missing, or it is not writable",
+    33: "the unit is too large for this compiler's fixed buffers - split the facade",
+    29: "use after free - this block was already passed to `free`",
 }
 
 
@@ -399,6 +437,10 @@ TITLE_EN: dict[int, str] = {
     29: "use after free",
     31: "this construct needs the runtime",
     30: "unknown type",
+    31: "cannot read this input file",
+    32: "cannot write the output file",
+    33: "this unit is too large for the compiler",
+    29: "use after free",
 }
 
 
@@ -908,6 +950,51 @@ CARDS: dict[int, Card] = {
         yes="`u32` / `i64` / `bool` / `ptr` / `str` / `()`；你声明的 `struct`/`enum` 名；"
             "它们的数组与切片 `[T; N]` / `[T]`",
         no="`f32` / `f64`（没有浮点）；泛型容器名；不是类型的标识符（如变量名）",
+    ),
+    31: Card(
+        what="编译器要读的那份源文件没拿到。**还没有看源码一个字符** —— 所以这条没有行号。",
+        why="装载是编译的第一趟，而这一条发生在它之前。「文件读不到」与「文件里的源码写错了」"
+            "是两件不同的事：前者无论如何改源码都解决不了，所以它单独一个码、"
+            "而且**不是**语法错（E019）。空文件也落在这里 —— 那不是「写错了」，是「没得读」。",
+        fixes=(
+            "核对路径：`loment check <file>` 里的 `<file>` 要真的是那个文件"
+            "（相对路径是相对**当前目录**，不是相对别的什么）。",
+            "给的是目录就换成文件：目录本身不是源。想看一个目录里有什么，用 `loment ls <目录>`。",
+            "文件是空的就把源码写进去；另外确认它有读权限（`chmod +r`）。",
+            "路径太长或带了通配符（`*`）也会落到这里 —— shell 没展开时编译器看到的是那个字面量。",
+        ),
+        yes="路径存在、是普通文件、非空、可读",
+        no="写错的路径；目录；0 字节的文件；没有读权限的文件",
+    ),
+    32: Card(
+        what="链接器把产物写到你给的 `-o` 路径上时失败了。",
+        why="产物是编译的**最后一步**，所以这条与源码无关 —— 源码全对也可能写不出去。"
+            "最常见的原因是**父目录不存在**：`loment build a.lomt -o out/a` 而 `out/` 还没建。"
+            "其次是权限，或者那个路径上已经有别的进程占着（Windows 上改了正在运行的 exe 就是这样）。",
+        fixes=(
+            "先建目录：`mkdir -p out` 再 `loment build a.lomt -o out/a`。",
+            "换个落点：`-o a`（不写目录）会落在当前目录。",
+            "确认那个目录你能写（`touch out/x` 试一下就知道了），必要时换个目录。",
+            "Windows 上「写不了」有时是**那个 exe 正在运行** —— 先关掉它再编。",
+        ),
+        yes="`-o` 的父目录存在且可写",
+        no="不存在的目录；只读目录；正在运行的 exe 占着的路径",
+    ),
+    33: Card(
+        what="这个单元超出了这套编译器**固定容量**的那几张表（词法缓冲 / 符号表 / "
+             "codegen 表 / 回填表）。",
+        why="这套工具链是**自举**的，没有优化器也没有动态容器：那几张表开在程序映像里，"
+            "大小是编译期常量。单元大到装不下时，宁可**当场报错**也不静默截断 —— 截断的话"
+            "后面的代码会凭空消失，而那种错要等到运行时才现形（`docs/158` §5 记着这条纪律）。"
+            "所以这条不是「你的源码错了」，是「这一份的形状对这台编译器来说太大了」。",
+        fixes=(
+            "把门面拆小：一个 `use` 拉进来的东西太多就分几层（`loment/lib/` 里那些就是样板）。",
+            "`use` 条数也有上限（一个文件 310 条）—— 超过就是这条。",
+            "声明那么多函数/类型的话，把单元切成几个模块，各自有自己的表。",
+            "确实切不动就拿这事开个 issue：上限是常量，抬它有账可查（`docs/158` 记着每次抬高的实测）。",
+        ),
+        yes="单元在词法缓冲 / 符号表 / codegen 表 / 回填表的容量之内",
+        no="单个源文件里塞一整个库；几百个 `use`；几百个顶层声明",
     ),
 }
 
@@ -1611,6 +1698,69 @@ CARDS_EN: dict[int, Card] = {
             "arrays and slices of those, `[T; N]` / `[T]`",
         no="`f32` / `f64` (there is no floating point); a generic container name; an "
            "identifier that is not a type (a variable name, say)",
+    ),
+    31: Card(
+        what="The compiler did not get the source file it was told to read. **Not one "
+             "character of the source has been looked at** - so this one has no line number.",
+        why="Loading is the compiler's first pass, and this happens before it. \"The file "
+            "cannot be read\" and \"the source in it is wrong\" are two different things: no "
+            "edit to the source can fix the first, so it gets its own code and is **not** a "
+            "syntax error (E019). An empty file lands here too - that is not \"written "
+            "wrongly\", it is \"nothing to read\".",
+        fixes=(
+            "Check the path: the `<file>` in `loment check <file>` has to be that file (a "
+            "relative path is relative to the **current directory**, nothing else).",
+            "If you handed it a directory, hand it a file: a directory is not source. To see "
+            "what a directory holds, use `loment ls <dir>`.",
+            "If the file is empty, write the source into it; and check you can read it "
+            "(`chmod +r`).",
+            "A path that is too long, or carries a wildcard (`*`) the shell did not expand, "
+            "also lands here - the compiler sees the literal text.",
+        ),
+        yes="the path exists, is a regular file, is not empty, and is readable",
+        no="a misspelt path; a directory; a 0-byte file; a file you may not read",
+    ),
+    32: Card(
+        what="The linker failed to write the artifact to the `-o` path you gave it.",
+        why="The artifact is the compiler's **last step**, so this has nothing to do with "
+            "your source - the source can be perfect and the write still fail. The most "
+            "common cause is a **missing parent directory**: `loment build a.lomt -o out/a` "
+            "when `out/` does not exist yet. Next comes permissions, or the path being held "
+            "by another process (on Windows, replacing an exe that is running does this).",
+        fixes=(
+            "Create the directory first: `mkdir -p out`, then "
+            "`loment build a.lomt -o out/a`.",
+            "Pick another landing spot: `-o a` (no directory) writes into the current "
+            "directory.",
+            "Check you can write in that directory (`touch out/x` settles it); if not, use "
+            "another one.",
+            "On Windows a failed write is sometimes **the exe you are overwriting still "
+            "running** - close it and build again.",
+        ),
+        yes="the parent directory of `-o` exists and is writable",
+        no="a directory that does not exist; a read-only directory; a path held by a running exe",
+    ),
+    33: Card(
+        what="This unit outgrew the compiler's **fixed-capacity** tables (the lexer buffer, "
+             "the symbol table, the codegen table, the backfill table).",
+        why="This toolchain is **self-hosted**: it has no optimiser and no dynamic "
+            "containers, and those tables live inside the program image with a size fixed at "
+            "compile time. When a unit does not fit, it reports **on the spot** rather than "
+            "truncating silently - truncation would make code vanish, and that kind of bug "
+            "only shows up at run time. So this is not \"your source is wrong\"; it is \"this "
+            "unit is too big for this compiler\".",
+        fixes=(
+            "Split the facade: if one `use` pulls in too much, break it into layers (the "
+            "files under `loment/lib/` are the model).",
+            "`use` also has a per-file limit (310 lines) - over that is this code.",
+            "If it is the number of declarations, cut the unit into modules so each has its "
+            "own tables.",
+            "If it genuinely cannot be cut, open an issue: the limits are constants, and "
+            "raising one has a paper trail.",
+        ),
+        yes="the unit fits the lexer buffer / symbol table / codegen table / backfill table",
+        no="a whole library in one source file; hundreds of `use`; hundreds of top-level "
+           "declarations",
     ),
 }
 

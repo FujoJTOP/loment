@@ -5,7 +5,7 @@ about
 about #345 的选项里，**(a)「给每个固定容量补一条失败路径」是唯一既安全、又不动那条招牌的一条**
 about （它自己写的），而它的第一档是**能验、能守住**的一条线：**用户一份源文件推得动的那些
 about 容量，越界必须有话**。(b) 让编译器链运行期、(c) 让 `alloc` 变成真正的分配器、(d) 把
-about `no_runtime` 的说法收窄 —— 三条都比这一笔大，理由记在 `docs/257`。
+about `no_runtime` 的说法收窄 —— 三条都比这一笔大，理由记在 `docs/258`。
 about 
 about 这一笔落的四处都在 `driver.lomt`，症状都是**静默截断**（不是写穿）：
 about   * `SLOT` —— 源文件不小于 512 KiB 时读满槽，截断后的源会给出一串**与被截断位置无关**的解析错；
@@ -13,8 +13,12 @@ about   * `DIR_CAP` / `SUBP_CAP` —— 路径拼装截断，于是 `openat` 去
 about     用户看到的是「这个 `use` 找不到」；
 about   * `EXT_CAP` —— `loment.conf` 的源后缀截断，而截断出来的后缀**可能正好又叫中另一个词法档**。
 about 
-about 顺带把 `codegen` 那两张表共用的那句报错**点全名**：发射器对 `CG_MAXFN` 与 `CG_MAXENUM` 都只
-about `return 0`，从驱动这一端看不出是哪一张撞的 —— 原先只写「函数数」，于是枚举爆掉时用户会去删函数。
+about 顺带把 `codegen` 那两张表共用的那一格**点全名**：发射器对 `CG_MAXFN` 与 `CG_MAXENUM` 都只
+about `return 0`，从驱动这一端看不出是哪一张撞的 —— 原先只写函数数，于是枚举爆掉时用户会去删函数。
+about 
+about **2026-10-17 重写过一次**（不是新事，是同一件事的第二次落）：`#440` 把驱动器里所有面向用户的
+about 消息改成了英文 + `wdiag_file`，并删掉了 `fujoc-s:` 这个内部名（用户敲的是 `loment`）。
+about 这一笔那四条消息跟着改成同一口径 —— 两条改动撞在同一段文本上，所以 `expect` 与两块都重写了。
 about 
 about 棘轮：`loment_caps_test::test_the_front_end_has_no_silent_capacity` 把「前端缺口 0」钉住，
 about `EXPLAINED` 逐条写清每一处排除的来路（见 `tools/loment_caps.py`）。
@@ -33,7 +37,7 @@ new <<<
     // 无关的解析错 —— 那是本仓最不肯让的形状（`docs/188` 的"宁拒勿猜"）。
     // 判据只需一次比较：读满 `SLOT` 就说明**至少**这么大，下面那句把这个事实说出来。
     if raw_n >= SLOT as u64 {
-        return fail("fujoc-s: 源文件不小于 524288 字节 —— 单文件槽装不下它，而截断会给出与被截断位置无关的解析错 (#345)。把门面拆小\n") as u64;
+        return fail("this source file is 512 KiB or larger -- the per-file slot cannot hold it, and cutting it short yields parse errors unrelated to where it was cut: split the facade") as u64;
     }
     let nb: u32 = strip_cr(slot, raw_n as u32);
 >>>
@@ -56,7 +60,7 @@ fn subdirs_of(dirp: ptr, dl: u32, dst: ptr, scr: ptr) -> u32 {
     // 会去 `openat` 一个不存在的目录，用户看到的是"这个 `use` 找不到"（`docs/188` 的
     // "宁拒勿猜"：宁可报错，也不要让一个截断过的输入伪装成一个查无此物）。
     if dl >= DIR_CAP - 1 {
-        return fail("fujoc-s: 目录路径超过 1024 字节 (项目根/工具目录/版本名的上限, #345)\n");
+        return fail("a directory path is longer than 1024 bytes (the project root / tool dir / version-name limit) -- move the project closer to the filesystem root");
     }
     let i: u32 = 0;
     while i < dl && i < DIR_CAP - 1 {
@@ -84,7 +88,7 @@ new <<<
     // 循环是三个条件里哪一个停的？**`e` 撞上沿**就是路径被截断 —— 那时下面这次 `openat`
     // 找的是一个不存在的路径，而调用方只知道"这个名字不是目录"（`#345` 的 (a)）。
     if e >= SUBP_CAP - 1 && load8(dent, nm + j) != 0 {
-        return fail("fujoc-s: 子路径超过 1472 字节 (每层源文件一个槽, #345)\n");
+        return fail("a subpath is longer than 1472 bytes (one slot per source level) -- shorten the path");
     }
     store8(w, e, 0 as u8);
 >>>
@@ -113,7 +117,7 @@ new <<<
     // 同 `SUBP_CAP` 那条：`q` 撞上沿而字符串里还有字节 ⇒ 后缀被截断（`#345` 的 (a)）。
     // 静默截断的后果比"配错了"更难查：截出来的后缀**可能正好又叫中另一个词法档**。
     if q >= EXT_CAP - 1 && q < sl - 2 {
-        return fail("fujoc-s: loment.conf 里的源后缀超过 256 字节 (#345)\n");
+        return fail("the source extension in loment.conf is longer than 256 bytes");
     }
     store8(dst, q, 0 as u8);
 >>>
@@ -122,13 +126,17 @@ edit loment/selfhost/driver.lomt expect 1
 old <<<
     let m: u32 = emit_module(unit, toks2, ir, cg);
     if m == 0 {
-        return fail("fujoc-s: 单元的函数数超过 codegen 表容量 (拆小门面)\n");
+        let msg: str = "more functions than the codegen table holds -- split the facade";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(msg), str_len(msg));
+        return fail(msg);
 >>>
 new <<<
     let m: u32 = emit_module(unit, toks2, ir, cg);
     if m == 0 {
-        // **两张表共用这一句，所以两张都点名**（`#345` 的 (a)）：发射器对 `CG_MAXFN`
-        // 与 `CG_MAXENUM` 都只 `return 0`，从这一端看不出是哪一张撞的 —— 那就别猜，
-        // 把两个名字一起写出来（原先只写"函数数"，于是枚举爆掉时用户去删函数）。
-        return fail("fujoc-s: 单元超过 codegen 表容量 —— 函数数 > 4600 或枚举数 > 320 (拆小门面)\n");
+        // **两张表共用这一格，所以两张都点名**（`#345` 的 (a)）：发射器对 `CG_MAXFN` 与
+        // `CG_MAXENUM` 都只 `return 0`，从驱动这一端看不出是哪一张撞的 —— 那就别猜，
+        // 把两个名字一起写出来（原先只写函数数，于是枚举爆掉时用户会去删函数）。
+        let msg: str = "more functions (or more enum variants) than the codegen tables hold -- split the facade";
+        wdiag_file(dfd, scr, ap, an, 33, str_ptr(msg), str_len(msg));
+        return fail(msg);
 >>>
