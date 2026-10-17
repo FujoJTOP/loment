@@ -27,7 +27,7 @@
 module surface_data
 choose runtime
 
-pub fn n_codes() -> u32 { return 30; }
+pub fn n_codes() -> u32 { return 33; }
 
 /// 报错器自己的版本（`lomenterr version` 打的就是它）。真源：`tools/loment_release.py`。
 pub fn lomenterr_version() -> str { return "0.1.2"; }
@@ -94,6 +94,12 @@ pub fn code_title(c: u32, lang: u32) -> str {
     if k == 59 { return "用完再放：这块内存已经被 `free`，不能再用"; }
     if k == 60 { return "unknown type"; }
     if k == 61 { return "未知类型"; }
+    if k == 62 { return "cannot read this input file"; }
+    if k == 63 { return "输入文件读不了"; }
+    if k == 64 { return "cannot write the output file"; }
+    if k == 65 { return "输出文件写不了"; }
+    if k == 66 { return "this unit is too large for the compiler"; }
+    if k == 67 { return "这个单元超出编译器装得下的量"; }
     return "";
 }
 
@@ -159,6 +165,12 @@ pub fn code_what(c: u32, lang: u32) -> str {
     if k == 59 { return "一个变量指向的块**已经被 `free`**，之后又用到了它。"; }
     if k == 60 { return "A **type position** names a type this language does not have - a `let` annotation, a parameter, a return type, a struct field, an enum payload, or an array/slice element."; }
     if k == 61 { return "一个**类型位置**上写了这门语言没有的类型（`let x: f64`、形参、返回类型、结构体字段、枚举载荷、数组/切片元素都算）。"; }
+    if k == 62 { return "The compiler did not get the source file it was told to read. **Not one character of the source has been looked at** - so this one has no line number."; }
+    if k == 63 { return "编译器要读的那份源文件没拿到。**还没有看源码一个字符** —— 所以这条没有行号。"; }
+    if k == 64 { return "The linker failed to write the artifact to the `-o` path you gave it."; }
+    if k == 65 { return "链接器把产物写到你给的 `-o` 路径上时失败了。"; }
+    if k == 66 { return "This unit outgrew the compiler's **fixed-capacity** tables (the lexer buffer, the symbol table, the codegen table, the backfill table)."; }
+    if k == 67 { return "这个单元超出了这套编译器**固定容量**的那几张表（词法缓冲 / 符号表 / codegen 表 / 回填表）。"; }
     return "";
 }
 
@@ -224,6 +236,12 @@ pub fn code_why(c: u32, lang: u32) -> str {
     if k == 59 { return "`free(p)` 之后那块内存已经还回分配器，再用 `p` 就是 use-after-free。它**不一定会崩** —— 块可能还留着旧字节，一直到最后被下一次 `alloc` 复用（`docs/253` §5.1），所以症状是那种「上线很久、某次分配把它盖掉」才炸的问题。`docs/210` §2.8 给 `free` 加的那五条检查管的是 **`free` 自己那一端**（是不是真块、有没有重复释放），管不了「之后再用」。与 E006 分开：移走是**所有权**的事，释放是**合法性**的事。"; }
     if k == 60 { return "Loment's type table is **fixed**: `u8`..`u64`, `i8`..`i64`, `bool`, `ptr`, `str`, `()`, plus the `struct` / `enum` you declare and arrays/slices of those - no generic containers, and **no floating point** (`loment types` prints the whole list). So this is not \"that name was not declared\"; it is \"**this language has no such type**\". That is also why it is separate from E002: E002 is fixed by declaring the name, this one by naming a type that exists."; }
     if k == 61 { return "Loment 的类型表是**固定的**：`u8`..`u64`、`i8`..`i64`、`bool`、`ptr`、`str`、`()`，加上你声明的 `struct` / `enum` 与它们的数组/切片 —— 没有泛型容器，**也没有浮点**（`loment types` 打出来就是全部）。所以这一条说的不是\"这个名字没声明\"，而是\"**这门语言没有这种类型**\"。它与 E002 分开的理由也在这里：E002 的修法是声明那个名字，这一条的修法是换一个真有的类型。"; }
+    if k == 62 { return "Loading is the compiler's first pass, and this happens before it. \"The file cannot be read\" and \"the source in it is wrong\" are two different things: no edit to the source can fix the first, so it gets its own code and is **not** a syntax error (E019). An empty file lands here too - that is not \"written wrongly\", it is \"nothing to read\"."; }
+    if k == 63 { return "装载是编译的第一趟，而这一条发生在它之前。「文件读不到」与「文件里的源码写错了」是两件不同的事：前者无论如何改源码都解决不了，所以它单独一个码、而且**不是**语法错（E019）。空文件也落在这里 —— 那不是「写错了」，是「没得读」。"; }
+    if k == 64 { return "The artifact is the compiler's **last step**, so this has nothing to do with your source - the source can be perfect and the write still fail. The most common cause is a **missing parent directory**: `loment build a.lomt -o out/a` when `out/` does not exist yet. Next comes permissions, or the path being held by another process (on Windows, replacing an exe that is running does this)."; }
+    if k == 65 { return "产物是编译的**最后一步**，所以这条与源码无关 —— 源码全对也可能写不出去。最常见的原因是**父目录不存在**：`loment build a.lomt -o out/a` 而 `out/` 还没建。其次是权限，或者那个路径上已经有别的进程占着（Windows 上改了正在运行的 exe 就是这样）。"; }
+    if k == 66 { return "This toolchain is **self-hosted**: it has no optimiser and no dynamic containers, and those tables live inside the program image with a size fixed at compile time. When a unit does not fit, it reports **on the spot** rather than truncating silently - truncation would make code vanish, and that kind of bug only shows up at run time. So this is not \"your source is wrong\"; it is \"this unit is too big for this compiler\"."; }
+    if k == 67 { return "这套工具链是**自举**的，没有优化器也没有动态容器：那几张表开在程序映像里，大小是编译期常量。单元大到装不下时，宁可**当场报错**也不静默截断 —— 截断的话后面的代码会凭空消失，而那种错要等到运行时才现形（`docs/158` §5 记着这条纪律）。所以这条不是「你的源码错了」，是「这一份的形状对这台编译器来说太大了」。"; }
     return "";
 }
 
@@ -289,6 +307,12 @@ pub fn code_yes(c: u32, lang: u32) -> str {
     if k == 59 { return "`free(p)` 之后没有再读/写 `p`；`free` 之后 `p` 被重新赋值"; }
     if k == 60 { return "`u32` / `i64` / `bool` / `ptr` / `str` / `()`; a `struct`/`enum` you declared; arrays and slices of those, `[T; N]` / `[T]`"; }
     if k == 61 { return "`u32` / `i64` / `bool` / `ptr` / `str` / `()`；你声明的 `struct`/`enum` 名；它们的数组与切片 `[T; N]` / `[T]`"; }
+    if k == 62 { return "the path exists, is a regular file, is not empty, and is readable"; }
+    if k == 63 { return "路径存在、是普通文件、非空、可读"; }
+    if k == 64 { return "the parent directory of `-o` exists and is writable"; }
+    if k == 65 { return "`-o` 的父目录存在且可写"; }
+    if k == 66 { return "the unit fits the lexer buffer / symbol table / codegen table / backfill table"; }
+    if k == 67 { return "单元在词法缓冲 / 符号表 / codegen 表 / 回填表的容量之内"; }
     return "";
 }
 
@@ -354,6 +378,12 @@ pub fn code_no(c: u32, lang: u32) -> str {
     if k == 59 { return "`free` 之前的使用；`free` 之后重新赋值再使用"; }
     if k == 60 { return "`f32` / `f64` (there is no floating point); a generic container name; an identifier that is not a type (a variable name, say)"; }
     if k == 61 { return "`f32` / `f64`（没有浮点）；泛型容器名；不是类型的标识符（如变量名）"; }
+    if k == 62 { return "a misspelt path; a directory; a 0-byte file; a file you may not read"; }
+    if k == 63 { return "写错的路径；目录；0 字节的文件；没有读权限的文件"; }
+    if k == 64 { return "a directory that does not exist; a read-only directory; a path held by a running exe"; }
+    if k == 65 { return "不存在的目录；只读目录；正在运行的 exe 占着的路径"; }
+    if k == 66 { return "a whole library in one source file; hundreds of `use`; hundreds of top-level declarations"; }
+    if k == 67 { return "单个源文件里塞一整个库；几百个 `use`；几百个顶层声明"; }
     return "";
 }
 
@@ -388,6 +418,9 @@ pub fn code_ascii(c: u32) -> str {
     if c == 28 { return "index past the end of a fixed-size array - the index is a literal and the length is known at compile time"; }
     if c == 29 { return "use after free - this block was already passed to `free`"; }
     if c == 30 { return "unknown type - no type by that name; Loment has no floating point"; }
+    if c == 31 { return "cannot read the input file - missing, a directory, unreadable, or empty"; }
+    if c == 32 { return "cannot write the output file - its directory is missing, or it is not writable"; }
+    if c == 33 { return "the unit is too large for this compiler's fixed buffers - split the facade"; }
     return "";
 }
 
@@ -616,6 +649,30 @@ pub fn code_fix(c: u32, i: u32, lang: u32) -> str {
     if k == 481 { return "把类型换成表里真有的一个（`loment types` 列全部；最常要换掉的是 `f32`/`f64`）。"; }
     if k == 483 { return "要表示小数就**放大成整数**：`let x: u32 = 314;` 表示 3.14，定点运算自己做（`docs/228`）。"; }
     if k == 485 { return "非得用浮点：把那个值留在 C ABI 那一侧，用 `extern fn` 传进传出（`docs/173`）—— ABI 上浮点是合法的，语言里的类型不是。"; }
+    if k == 496 { return "Check the path: the `<file>` in `loment check <file>` has to be that file (a relative path is relative to the **current directory**, nothing else)."; }
+    if k == 498 { return "If you handed it a directory, hand it a file: a directory is not source. To see what a directory holds, use `loment ls <dir>`."; }
+    if k == 500 { return "If the file is empty, write the source into it; and check you can read it (`chmod +r`)."; }
+    if k == 502 { return "A path that is too long, or carries a wildcard (`*`) the shell did not expand, also lands here - the compiler sees the literal text."; }
+    if k == 497 { return "核对路径：`loment check <file>` 里的 `<file>` 要真的是那个文件（相对路径是相对**当前目录**，不是相对别的什么）。"; }
+    if k == 499 { return "给的是目录就换成文件：目录本身不是源。想看一个目录里有什么，用 `loment ls <目录>`。"; }
+    if k == 501 { return "文件是空的就把源码写进去；另外确认它有读权限（`chmod +r`）。"; }
+    if k == 503 { return "路径太长或带了通配符（`*`）也会落到这里 —— shell 没展开时编译器看到的是那个字面量。"; }
+    if k == 512 { return "Create the directory first: `mkdir -p out`, then `loment build a.lomt -o out/a`."; }
+    if k == 514 { return "Pick another landing spot: `-o a` (no directory) writes into the current directory."; }
+    if k == 516 { return "Check you can write in that directory (`touch out/x` settles it); if not, use another one."; }
+    if k == 518 { return "On Windows a failed write is sometimes **the exe you are overwriting still running** - close it and build again."; }
+    if k == 513 { return "先建目录：`mkdir -p out` 再 `loment build a.lomt -o out/a`。"; }
+    if k == 515 { return "换个落点：`-o a`（不写目录）会落在当前目录。"; }
+    if k == 517 { return "确认那个目录你能写（`touch out/x` 试一下就知道了），必要时换个目录。"; }
+    if k == 519 { return "Windows 上「写不了」有时是**那个 exe 正在运行** —— 先关掉它再编。"; }
+    if k == 528 { return "Split the facade: if one `use` pulls in too much, break it into layers (the files under `loment/lib/` are the model)."; }
+    if k == 530 { return "`use` also has a per-file limit (310 lines) - over that is this code."; }
+    if k == 532 { return "If it is the number of declarations, cut the unit into modules so each has its own tables."; }
+    if k == 534 { return "If it genuinely cannot be cut, open an issue: the limits are constants, and raising one has a paper trail."; }
+    if k == 529 { return "把门面拆小：一个 `use` 拉进来的东西太多就分几层（`loment/lib/` 里那些就是样板）。"; }
+    if k == 531 { return "`use` 条数也有上限（一个文件 310 条）—— 超过就是这条。"; }
+    if k == 533 { return "声明那么多函数/类型的话，把单元切成几个模块，各自有自己的表。"; }
+    if k == 535 { return "确实切不动就拿这事开个 issue：上限是常量，抬它有账可查（`docs/158` 记着每次抬高的实测）。"; }
     return "";
 }
 
@@ -652,6 +709,9 @@ pub fn code_nfix(c: u32) -> u32 {
     if c == 28 { return 3; }
     if c == 29 { return 3; }
     if c == 30 { return 3; }
+    if c == 31 { return 4; }
+    if c == 32 { return 4; }
+    if c == 33 { return 4; }
     return 0;
 }
 

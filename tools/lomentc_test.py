@@ -2165,8 +2165,12 @@ def test_l0_rule_pair():
     assert a_calls == L0_ALPHA_ALLOC_LEFT, f"alpha 的分配点应为 {L0_ALPHA_ALLOC_LEFT}，得到 {a_calls}"
     # 两个数都非平凡：不然"全都提升"与"一个都不提升"都能让上面两条同时成立
     assert 0 < L0_ALPHA_ALLOC_LEFT < L0_ALLOC_SITES, "这一对里两种走向都要有"
-    # 缓冲的 `[... x i64]` 计数（每格两行：alloca + store）钉住"尺寸取整"没被改坏
-    assert alpha_ll.count(".buf") == 2 * sum(len(v) for v in L0_WANT.values()), alpha_ll.count(".buf")
+    # 缓冲的 `[... x i64]` 计数钉住"尺寸取整"没被改坏。每格现在有 **2 + 字数** 处：
+    # `alloca`、那条 `store ptr %N.buf`，以及**根登记的每一个字**
+    # （`FujoJTOP/loment#362`：提升缓冲的每个 8 字节字各占一格根表）。
+    want_buf = sum(2 + (sz + 7) // 8
+                   for per in L0_WANT.values() for sz in per.values())
+    assert alpha_ll.count(".buf") == want_buf, alpha_ll.count(".buf")
     assert ".buf" not in manual_ll
     # 两份源**只差那一行** —— 不然"差别来自档位"这个说法就不成立
     assert L0_ALPHA_SRC.replace("choose gc_auto_alpha", "X") == \

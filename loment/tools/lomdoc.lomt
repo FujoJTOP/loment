@@ -75,8 +75,21 @@ fn write_all(fd: u64, p: ptr, n: u64) -> u64 {
     return off;
 }
 
+/// 面向用户的失败消息: `loment: <msg>` 换行。前缀是 **`loment`**(用户敲的那个命令),
+/// 不是 `lomdoc`(这个包里的文档器组件名) —— issue #8。
 fn fail(msg: str) -> u32 {
+    write_all(2, str_ptr("loment: "), str_len("loment: ") as u64);
     write_all(2, str_ptr(msg), str_len(msg) as u64);
+    write_all(2, str_ptr("\n"), str_len("\n") as u64);
+    return die(1);
+}
+
+/// 同 `fail`, 消息后面接一段**已经量好的字节** (路径)。
+fn failp(msg: str, tail: ptr, n: u32) -> u32 {
+    write_all(2, str_ptr("loment: "), str_len("loment: ") as u64);
+    write_all(2, str_ptr(msg), str_len(msg) as u64);
+    write_all(2, tail, n as u64);
+    write_all(2, str_ptr("\n"), str_len("\n") as u64);
     return die(1);
 }
 
@@ -1184,7 +1197,7 @@ fn _start() -> u32 {
     let scrv: u64 = sys_alloc(SCR_CAP as u64);
     let swv: u64 = sys_alloc(SW_BYTES as u64);
     if memv == 0 || srcv == 0 || tokv == 0 || argv_buf == 0 || scrv == 0 || swv == 0 {
-        return fail("lomdoc: brk failed\n");
+        return fail("out of memory (brk failed)");
     }
     let mem: ptr = memv as ptr;
     let src: ptr = srcv as ptr;
@@ -1193,13 +1206,13 @@ fn _start() -> u32 {
     let sw: ptr = swv as ptr;
     let av: u64 = argv1(argv_buf as ptr, 65536, scr);
     if av == 0 {
-        return fail("lomdoc: 用法: lomdoc <文件.lomt>\n");
+        return fail("usage: loment doc <file.lomt>");
     }
     let ap: ptr = ptr_add(argv_buf as ptr, (av >> 32) as u32);
     let an: u32 = (av % 4294967296) as u32;
     let fd: i64 = open_ro(ap, an, scr);
     if fd < 0 {
-        return fail("lomdoc: 打不开输入文件\n");
+        return failp("cannot open the input file: ", ap, an);
     }
     let raw: u64 = read_all(fd as u64, src, SRC_CAP as u64);
     syscall4(3, fd as u64, 0, 0);
@@ -1212,8 +1225,7 @@ fn _start() -> u32 {
     // **别的写法在这里拦住**（`#144`）—— 必须在**看词法流之前**，因为声明那一行
     // 一旦被 `apply_switches` 吃掉，下文就全是"照着译文读原文"的错位。
     if foreign_grammar(src, toks, ntok0) == 1 {
-        return fail("lomdoc: 这是用别的写法写的 Loment（文件头有 `choose write grammar`）—— lomdoc 只处理**原生**写法。这份源要交给编译器：`loment check <文件>`（docs/211 / docs/182 §1.9）。
-");
+        return fail("this source is written in another grammar (its header has `choose write grammar`) and this documentation generator takes the native spelling only -- hand the file to the compiler instead: `loment check <file>`");
     }
     let ntok: u32 = apply_switches(src, toks, ntok0, sw);
     let m: u32 = render(mem, src, len, toks, ntok, ap, an);
