@@ -422,7 +422,11 @@ jobs:
     if: ${{ always() && github.event.inputs.suite == '' && github.event.inputs.only == '' && github.event.inputs.diagnose_twin != 'true' }}
     needs: [static-exclusive]
     container:
-      image: ghcr.io/fujojtop/loment-ci:5
+      # **路径里带着属主名**（`docs/255` §2）：库一换组织，这一行就得跟着换，而它**不是**
+      # 算出来的 —— `ci-image.yml` 那边是 `github.repository_owner` 转小写，两边靠人看着对齐。
+      # 顺序是硬的：先在新属主下把 tag 建出来、**再把它设成 public**（包默认私有，而 fork 的
+      # PR 拿不到私有包 ⇒ 它们会死在"拉镜像"这一步）、**最后**才改这里。反了就是每一片都拉不到。
+      image: ghcr.io/loment-lang/loment-ci:5
     strategy:
       fail-fast: false
       matrix:
@@ -571,7 +575,8 @@ jobs:
     timeout-minutes: 180
     if: ${{ github.event.inputs.suite != '' || github.event.inputs.only != '' || github.event.inputs.diagnose_twin == 'true' }}
     container:
-      image: ghcr.io/fujojtop/loment-ci:5
+      # 与 `static-shard` 同一条镜像，理由与那句"顺序是硬的"见上面。
+      image: ghcr.io/loment-lang/loment-ci:5
     steps:
       # 同 `static-exclusive`：`lom_audit` 的 M93/M95 要历史（见那一处的注释）。
       - uses: actions/checkout@v4
