@@ -221,6 +221,13 @@ fn emit_val(s: ptr, out: ptr, lvl: u32) -> u32 {
 
 // ---------------------------------------------------------------- 类型
 
+//: 类型记号里的哨兵: `0` = 未知 (调用方落到**期望类型**)、`4294967295` = unit (`void`)。
+//: **`4294967294` = `bool`** —— 源里不一定有 `bool` 那个词可以指 (`(a < 0)` 就没有),
+//: 而参考实现 `expr_type(Bin)` 对比较/逻辑**直接返回 `"bool"`** (`tools/lomentc.py`)。
+//: 少这个记号, 自举侧只能拿操作数的类型顶上去 —— `(a<0) != (b<0)` 于是发成 `icmp ne i64`,
+//: 而那两个操作数其实是 `i1` (`#316`)。
+const CG_TY_BOOL: u32 = 4294967294;
+
 fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     let stt: u32 = subst_tok(s, src, toks, tt);   // 泛型实例: 类型参数 -> 具体类型
     if stt != tt {
@@ -228,6 +235,9 @@ fn emit_ty(s: ptr, out: ptr, src: ptr, toks: ptr, tt: u32) -> u32 {
     }
     if tt == 4294967295 {   // UNIT: 无 `-> T` 的函数
         return emit_str(s, out, "void");
+    }
+    if tt == CG_TY_BOOL {
+        return emit_str(s, out, "i1");
     }
     if tt == 0 {
         return emit_str(s, out, "i32");
@@ -366,9 +376,48 @@ fn sub_expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
     return expr_type(s, src, toks, j);
 }
 
-/// [j+1, rp) 这一段按参考实现的 `expr_type(Bin) = lt or rt` 取类型: 先取第一个操作数,
-/// 为空再取某个**顶层**二元运算符右侧的操作数。操作数一律交给 `sub_expr_type`。
+/// [j+1, rp) 这一段按参考实现的 `expr_type(Bin)` 取类型: **先看算子** —— 这一段的
+/// **最深那个**算子 (`op_prec` 最小者, 与 `expr_bin` 的取法同一条规则) 若是比较/逻辑
+/// (`&&` `||` `==` `!=` `<` `<=` `>` `>=`, 即 `op_code` 的 1..8), 那这一段就是 `bool`,
+/// **不看操作数是谁**; 其余情形才是 `lt or rt`: 先取第一个操作数, 为空再取某个
+/// **顶层**二元运算符右侧的操作数。操作数一律交给 `sub_expr_type`。
+///
+/// 少了"算子优先"那一步, `(a < 0)` 会被顶成 `a` 的类型 (i64), 而它的值其实是 `i1` ——
+/// 于是 `(a<0) != (b<0)` 发成 `icmp ne i64`, 两个操作数却是 `i1` (`#316`)。
+///
+/// 扫的时候**多记号算子整条跳掉** (`k0 = k0 + op_toks(c0)`): `>>` 是两个 `>` 记号,
+/// 而单独一个 `>` 会被 `op_code` 读成比较 (7) —— 不跳的话
+/// `(w[i] >> (i % 32)) & 1` 会被误判成 bool, 发成 `and i1` (实测踩到, 在 `potato.lomt`
+/// 的 IR 里现形)。取"最深那个"而不是"见到就算", 是因为算术比比较**紧**:
+/// `a & b == c` 的顶层是 `==` 而 `a >> b` 的顶层是 `>>`。
 fn operand_bin_type(s: ptr, src: ptr, toks: ptr, j: u32, rp: u32) -> u32 {
+    let k0: u32 = j + 1;
+    let d0: u32 = 0;
+    let best: u32 = 0;
+    while k0 < rp {
+        if tok_is(src, toks, k0, "(") || tok_is(src, toks, k0, "[") {
+            d0 = d0 + 1;
+            k0 = k0 + 1;
+        } else if tok_is(src, toks, k0, ")") || tok_is(src, toks, k0, "]") {
+            d0 = d0 - 1;
+            k0 = k0 + 1;
+        } else {
+            let c0: u32 = op_code(src, toks, k0);
+            if c0 == 0 {
+                k0 = k0 + 1;
+            } else {
+                if d0 == 0 {
+                    if best == 0 || op_prec(c0) < op_prec(best) {
+                        best = c0;
+                    }
+                }
+                k0 = k0 + op_toks(c0);
+            }
+        }
+    }
+    if best >= 1 && best <= 8 {
+        return CG_TY_BOOL;
+    }
     let t: u32 = sub_expr_type(s, src, toks, j + 1);
     if t != 0 {
         return t;
@@ -684,7 +733,10 @@ fn expr_type(s: ptr, src: ptr, toks: ptr, j: u32) -> u32 {
         if tok_is(src, toks, rp2 + 1, "as") {
             return rp2 + 2;
         }
-        return expr_type(s, src, toks, j + 1);
+        // 括号**透明**, 但里面那一段要按 `expr_type(Bin)` 判 (算子优先, 见
+        // `operand_bin_type`): 直接递归到 `j+1` 会把 `(a < 0)` 判成 `a` 的类型,
+        // 而它的值是 `bool` (`#316`)。
+        return operand_bin_type(s, src, toks, j, rp2);
     }
     if tok_is(src, toks, j, "-") || tok_is(src, toks, j, "!") {
         return expr_type(s, src, toks, j + 1);
@@ -1897,11 +1949,18 @@ fn emit_str_lit_bytes(s: ptr, out: ptr, src: ptr, toks: ptr, i: u32) -> u32 {
         let b: u32 = load8(src, st + k);
         if b == 92 {
             let e: u32 = load8(src, st + k + 1);
+            // 转义表与 `lomc._ESCAPES` 同一份（`#33` / `#36`）：`\n` `\t` `\r` `\0`；其余
+            // （`\\` `\"` 以及未知）取那个字符本身。**未知那一档由 checker 报 E019** ——
+            // 自举词法器没有失败通道，所以拒绝落在检查期。
             let d: u32 = e;
             if e == 110 {
                 d = 10;
             } else if e == 116 {
                 d = 9;
+            } else if e == 114 {
+                d = 13;
+            } else if e == 48 {
+                d = 0;
             }
             emit_hex_byte(s, out, d);
             k = k + 2;

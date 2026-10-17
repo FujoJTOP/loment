@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -21,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lomc  # noqa: E402
 import loment_comefor  # noqa: E402
 import lomentc  # noqa: E402
+import potato_from  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 KEYWORDS = ["fn", "let", "if", "else", "while", "for", "in", "match", "struct", "enum",
             "trait", "impl", "const", "return", "mut", "pub", "use", "module",
@@ -78,7 +80,39 @@ def _line_span(text: str, line1: int) -> tuple[int, int]:
     return 0, 1
 
 
+def _foreign_grammar(text: str) -> tuple[str, str | None] | None:
+    """`#262`：文件头声明了 `choose write grammar <别名>` 时，`(规范名, 声明本身的错)`。
+
+    没有声明、或者声明的是**原生**语法（`loment` / `rust`，见 `potato_from.NATIVE_GRAMMARS`）
+    就返回 `None` —— 那种源该照常查。
+
+    **为什么要在查之前拦下来**：一份 `choose write grammar python` 的文件**编得过**（前门会把
+    它翻成 Loment），可语言服务拿 Loment 的规则去读它，报出来的是**一屏假错** —— 而"编得过
+    但编辑器报错"比"两边都报错"更糟：用户会去改一份本来就对的源。
+    """
+    lang, err, has = potato_from.read_grammar_decl(text)
+    if err:
+        return lang, err
+    if has and lang not in potato_from.NATIVE_GRAMMARS:
+        return lang, None
+    return None
+
+
 def _diagnostics(text: str, path: str) -> list[dict]:
+    fg = _foreign_grammar(text)
+    if fg is not None:
+        lang, derr = fg
+        if derr:
+            return [{"range": {"start": {"line": 0, "character": 0},
+                               "end": {"line": 0, "character": 1}},
+                     "severity": 1, "source": "loment", "message": derr}]
+        # **一条 Info，不是一屏 Error**：这份源不是 Loment 写的，这一层没有它的规则。说清楚
+        # "为什么这里安静"，比编一堆错更有用 —— 静默会让人以为服务挂了。
+        return [{"range": {"start": {"line": 0, "character": 0},
+                           "end": {"line": 0, "character": 1}},
+                 "severity": 3, "source": "loment",
+                 "message": f"这份源写的是 {lang} 语法（`choose write grammar {lang}`）——"
+                            f" 语言服务只查 Loment，所以这里不报诊断；要真诊断就 `loment build`。"}]
     try:
         mod = _parse(text)
         errs = lomentc.check(mod)
@@ -141,6 +175,66 @@ def _decls(text: str) -> dict[str, dict]:
     return syms
 
 
+def _member_receiver(text: str, line: int, ch: int) -> str | None:
+    """光标前是 `recv.` 的话返回 `recv`（`#28`）。认 `p.` 与 `p.x` 的前半截。
+
+    `p[i].` / `a.b.` 暂不认 —— 返回 None，走通用补全。**宁可少给，不给错的**：补错一项
+    比少补一项更打扰人（`#27` 那条"指到假的地方去比指得粗更坏"是同一个判断）。
+    """
+    lines = text.splitlines()
+    if not (0 <= line < len(lines)):
+        return None
+    prefix = lines[line][:max(0, ch)]
+    m = re.search(r"([A-Za-z_]\w*)\.[A-Za-z0-9_]*$", prefix)
+    if not m:
+        return None
+    start = m.start(1)
+    if start > 0 and (prefix[start - 1].isalnum() or prefix[start - 1] in "_."):
+        return None
+    return m.group(1)
+
+
+def _lets_of(node, out: list) -> None:
+    """把 `node` 底下所有 `Let` 收进 `out`（含块内的）。"""
+    if isinstance(node, lomentc.Let):
+        out.append(node)
+    elif isinstance(node, list):
+        for x in node:
+            _lets_of(x, out)
+    elif hasattr(node, "__dataclass_fields__"):
+        for k in node.__dataclass_fields__:
+            _lets_of(getattr(node, k, None), out)
+
+
+def _member_items(text: str, recv: str, line1: int) -> list[dict] | None:
+    """`recv` 在 `line1`（1 起）那一处是什么类型；是 `struct` 就回它的字段，否则 None。"""
+    try:
+        mod = _parse(text)
+    except Exception:  # noqa: BLE001  编辑中的语法错不影响补全
+        return None
+    f = None
+    for g in mod.funcs:
+        if g.line <= line1 and (f is None or g.line > f.line):
+            f = g
+    if f is None:
+        return None
+    ty = None
+    for p in f.params:
+        if p.name == recv:
+            ty = p.type
+    lets: list = []
+    _lets_of(f.body, lets)
+    for s in lets:
+        if s.name == recv and s.line < line1:
+            ty = s.type
+    if not ty:
+        return None
+    st = next((s for s in mod.structs if s.name == ty.strip()), None)
+    if st is None:
+        return None
+    return [{"label": fn, "kind": 5, "detail": ft} for fn, ft in st.fields]
+
+
 def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
     """纯函数式 LSP 处理: 输入一条消息, 输出若干条待发送消息。"""
     method = msg.get("method", "")
@@ -199,6 +293,15 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
                                   "end": {"line": sym["line"], "character": s1}}}}]
     if method == "textDocument/completion":
         uri = (params.get("textDocument") or {}).get("uri", "")
+        # `#28`：`p.` 之后要给 `Point` 的字段，不是一屏关键字。
+        pos = params.get("position") or {}
+        recv = _member_receiver(docs.get(uri, ""), pos.get("line", 0),
+                                pos.get("character", 0))
+        if recv is not None:
+            got = _member_items(docs.get(uri, ""), recv, pos.get("line", 0) + 1)
+            if got is not None:
+                return [{"jsonrpc": "2.0", "id": rid,
+                         "result": {"isIncomplete": False, "items": got}}]
         items = [{"label": k, "kind": 14} for k in KEYWORDS]
         items += [{"label": t, "kind": 6} for t in TYPE_KEYWORDS]
         try:

@@ -221,8 +221,9 @@ KNOWN_GAPS: set[tuple[str, str]] = {
     ("eleven-params", "stage1"),
     ("boundary-params-11", "stage1"),
     ("struct-literal-no-trailing-comma", "stage1"),
-    ("flat-250-terms", "reference"),
-    ("boundary-terms-250", "reference"),
+    # `flat-250-terms` / `boundary-terms-250` **已划掉**：`#226` 在这个 PR 里修好了（递归上限
+    # 抬到 8000，真撞上转成 E023），参考实现不再炸 `RecursionError`。账**只许变短**，所以
+    # 修好的那一格必须在同一个 PR 里删掉 —— 否则这条判据会点名"这一格已经绿了"。
 }
 
 

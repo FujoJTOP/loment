@@ -3955,8 +3955,29 @@ def _unit_where(m: Module) -> str:
     return f"`{m.src.as_posix()}`" if m.src is not None else f"`{m.name}`"
 
 
+#: `#226`：一个约 250 项的**扁平表达式**会让 `check` 死在 Python 的 `RecursionError` 上 ——
+#: 三千行 traceback，一个字都不是诊断。两件事一起做：
+#:
+#: * 上限抬到 8000：普通程序（含这一档）本来就不该撞上；
+#: * 真撞上了转成 **E023**（消息里有"嵌套超过"，分类器按修法归到那一码），而不是把
+#:   traceback 甩给用户 —— 与 `#369` 那条不变量同源：**Python 的 traceback 不是诊断**。
+#:
+#: 抬上限不会变成段错误：CPython 3.11 起自己也会在 C 栈见底前抛 `RecursionError`。
+_RECURSION_FLOOR = 8000
+
+
 def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
           deps: list[Module] | None = None, _dep_pass: bool = False) -> list[str]:
+    if sys.getrecursionlimit() < _RECURSION_FLOOR:
+        sys.setrecursionlimit(_RECURSION_FLOOR)
+    try:
+        return _check(mod, ext_funcs=ext_funcs, deps=deps, _dep_pass=_dep_pass)
+    except RecursionError:
+        raise LomError(0, 0, "嵌套超过编译器的递归上限 —— 把这段拆成几个函数，或把表达式拆开") from None
+
+
+def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
+           deps: list[Module] | None = None, _dep_pass: bool = False) -> list[str]:
     # **依赖的正文也查** (`#149`, 2026-10-09 补)。原先只把 `deps` 的**导出符号**入表
     # (M12: 仅 pub 可见), 正文不验 —— 于是 `pub fn f(p: ptr) -> u32 { return p; }` 这样的库
     # **当依赖时一路绿**, 只有当**入口**查才报。后果: 一个库可以带着正文类型错发布, 而每一个

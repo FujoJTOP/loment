@@ -540,6 +540,32 @@ def test_lomc_twin_selfhost_compiles():
     print(f"      种子自举链编译 lomccheck.lomt 成功 ({len(rr.stdout)}B IR)")
 
 
+@test
+def test_string_escapes_are_six_and_the_rest_is_an_error():
+    """`#33` / `#36`：字符串转义认 `n t r 0 \\\\ "` 这六个，**表外是 E019**。
+
+    原先表里没有 `r` 与 `0`，两者都走"未知转义取原字符"那条兜底 —— 于是 `"\\r"` 静默变成
+    **字母 r**（用户写回车得到一个 r），`"\\x41"` 静默变成三个字符 `x41`。而仓库自己在用
+    `"\\0"`（`loment/lib/proc.lomt` 的 `"/bin/sh\\0"`），一直靠同一条静默兜底在跑。
+
+    判据两头都量：**认的那几个值对不对**（不是"不报错"，是**字节**），以及**表外真的拒**。
+    """
+    def val(raw: str) -> str:
+        return [t for t in lomc.lex(raw) if t.kind == "string"][0].val
+
+    assert val('"a\\rb"') == "a\rb", repr(val('"a\\rb"'))
+    assert val('"a\\0b"') == "a\x00b", repr(val('"a\\0b"'))
+    assert val('"a\\tb"') == "a\tb" and val('"a\\nb"') == "a\nb"
+    assert val('"a\\\\b"') == "a\\b" and val('"a\\"b"') == 'a"b'
+    for bad in ('"\\q"', '"\\x41"', '"\\u0041"'):
+        try:
+            lomc.lex(bad)
+        except lomc.LomError as e:
+            assert "未知转义" in str(e), (bad, e)
+        else:
+            raise AssertionError(f"{bad} 没有被拒 —— 又是静默取原字符")
+
+
 def main() -> int:
     return loment_suite.run(TESTS, "lomc_test")
 
