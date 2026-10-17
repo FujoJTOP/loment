@@ -167,6 +167,126 @@ def test_every_tool_is_in_the_release_manifest():
     print(f"      发布清单覆盖：{len(have)} 个 tools/*.py 一件不少，{len(loment_release.GLOBS)} 条 glob 无空转")
 
 
+# ------------------------------------------------- 生成物不是一个**共享寄存器**（docs/254）
+
+#: **整树生成物** —— 内容取决于 `GLOBS` 里**每一个**文件。`docs/manual/` 也算：它的
+#: `index.md` 第 3 行是 `tools/lomentc.py` 的哈希戳（`loment_manual.compiler_version`），
+#: 于是**任何两个都改了编译器的 PR** 也会在同一行上对撞 —— 而编译器正是本仓的主线。
+WHOLE_TREE_ARTIFACTS = ("loment/build/release-manifest.json",
+                        "loment/build/SHA256SUMS",
+                        "docs/manual")
+
+
+def _workflow() -> str:
+    return (ROOT / ".github" / "workflows" / "manifest.yml").read_text(encoding="utf-8")
+
+
+def _add_list(job: str) -> str:
+    """那个 job 里 `git add` 收的路径（本仓纪律是点名 add，不是 `-A`）。
+
+    **先把反斜杠续行接起来**：`git add` 的路径表在 main 那一路是两行长（五件 + `docs`），
+    只看第一行会漏掉续行上的整树生成物 —— 那正是这条要抓的东西。
+    """
+    flat = re.sub(r"\\\n\s*", " ", job)
+    adds = re.findall(r"git add (.+)", flat)
+    assert adds, "这个 job 里找不到 `git add`"
+    return " ".join(a.strip() for a in adds)
+
+
+def _whitelist_res(job: str) -> list[str]:
+    """那个 job 白名单守卫用的正则，**去掉转义**再返回（好看它有没有放行某件生成物）。"""
+    pats = re.findall(r"grep -v -E '([^']+)'", job)
+    assert pats, "这个 job 里找不到白名单守卫"
+    return [re.sub(r"\\(.)", r"\1", p) for p in pats]
+
+
+@test
+def test_pr_path_carries_no_whole_tree_artifact():
+    """**PR 路径不许提交整树生成物** —— 这条就是"并发 PR 不再冲突"的那个结构保证。
+
+    **它挡的是什么**：`release-manifest.json` 与 `SHA256SUMS` 记的是 `GLOBS` 里
+    **每一个文件**的 sha256。这种文件放在 PR 路径上时，两个**各改互不相干文件**的 PR
+    写的是它里面**相邻的行** —— 而 git 的合并上下文只有 3 行 ⇒ 必冲突。实测
+    （`docs/254` §1）：两个分支各加一份不同的 doc，谁都没碰别人的东西，试合时冲突
+    就在那两件台账上，别处干净；当时唯一开着的 `CONFLICTING` PR（#436）5 个文件里
+    3 个是生成物，冲突点同样是它们。
+
+    **为什么不是"少收几条"而是"整件挪走"**：见 `docs/254` §2 —— `merge=union` 在同一行
+    两改时会留下同一路径的两条哈希（**静默损坏**），GitHub 侧又不跑自定义 merge driver；
+    而"入库但不核新鲜度"等于存一份**没人核**的账，比不存更坏。
+
+    **反向也钉**：PR 侧**必须**仍然重算与"这个 PR 改了什么"一一对应的那两件 —— 种子
+    （随 `loment/selfhost/*.lomt` 变）与 `surface_data.lomt`（随内建表/诊断码变）。
+    它们动了就是**真**冲突，该让人看见；一起挪走会让 PR 的树上带着过期种子。
+    """
+    job = _job_block(_workflow(), "emit")
+    added = _add_list(job)
+    bad = [a for a in WHOLE_TREE_ARTIFACTS if a in added]
+    assert not bad, (
+        f"PR 路径（`emit` job）又在提交整树生成物了：{bad}。它们的每一行都是**别人的"
+        f"文件**，两个并发 PR 必在同一片相邻行上对撞 —— 见 `docs/254`。"
+        f"重算它们的是 `emit-main`（`main` 上的单一写者），不是这里。")
+    for pat in _whitelist_res(job):
+        for a in WHOLE_TREE_ARTIFACTS:
+            assert a not in pat, f"PR 侧的白名单放行了整树生成物 `{a}`：{pat!r}"
+    for cmd in ("loment_seed.py --emit", "loment_diag.py --dump-surface"):
+        assert cmd in job, (
+            f"PR 侧不再重算 `{cmd}` —— 它是**与这次改动一一对应**的生成物，"
+            f"不该静默退出 PR 路径")
+    print("      PR 路径只带种子 + surface_data（与这次改动一一对应），不带整树生成物")
+
+
+@test
+def test_main_writer_is_not_behind_the_gate():
+    """**`main` 上有一个单一写者，而且它不排在门禁后面。**
+
+    **"不排在门禁后面"为什么要单独钉**：这条路上最容易写成的形状是
+    `workflow_run: [gate]` 或 `needs: [static-*]` —— 两种都把重算**串在门禁之后**，
+    于是每一次合并变成"先等门禁、再等重算"。2026-10-16 明确否掉了这个形状：重算只读树、
+    只写生成物，没有任何理由等门禁，**并行**才是对的。
+
+    **"写者存在"为什么要钉**：整树生成物从 PR 路径上撤下来之后，"台账与树一致"就
+    **只**由这个写者保证（`lom_audit` 的 M93/M95 按滞后容差接着判，见 `docs/254` §3）。
+    它被删掉或被改名，门禁不会有别的判据发现 —— 就是这一条。
+    """
+    src = _workflow()
+    on_m = re.search(r"^on:\s*$", src, re.M)
+    perms_m = re.search(r"^permissions:", src, re.M)
+    assert on_m and perms_m, "`manifest.yml` 的 `on:` / `permissions:` 结构变了"
+    assert "workflow_run" not in src[on_m.end():perms_m.start()], (
+        "`manifest.yml` 挂到 `workflow_run` 上了 —— 那是「等门禁跑完再重算」的形状")
+
+    job = _job_block(src, "emit-main")
+    assert "refs/heads/main" in job, "`emit-main` 没有钉在 `main` 上"
+    assert "github.event_name == 'push'" in job, "`emit-main` 不是由 `push` 触发的"
+    assert not re.search(r"^ {4}needs:", job, re.M), (
+        "`emit-main` 挂了 `needs:` —— 重算被排到别的 job 后面了（`docs/254` §3）")
+    for cmd in ("loment_seed.py --emit",
+                "loment_diag.py --dump-surface",
+                "loment_manual.py --emit docs/manual",
+                "loment_release.py --emit",
+                "loment_release.py --checksums"):
+        assert cmd in job, f"`emit-main` 少重算了一件：`{cmd}`"
+    # **顺序是硬的**：清单记的是**那一刻的树**，所以它必须排在种子 / surface / 手册之后。
+    order = [job.index(c) for c in ("loment_seed.py --emit",
+                                    "loment_diag.py --dump-surface",
+                                    "loment_manual.py --emit",
+                                    "loment_release.py --emit",
+                                    "loment_release.py --checksums")]
+    assert order == sorted(order), (
+        "`emit-main` 的重算顺序错了 —— 发布清单必须**最后**算，它记的是那一刻的树")
+    added = _add_list(job)
+    missing = [a for a in WHOLE_TREE_ARTIFACTS if a not in added]
+    assert not missing, f"`emit-main` 没有把整树生成物收进提交：{missing}"
+    # **推得动 `main` 的那个前提**：属主 PAT。`GITHUB_TOKEN` 不是 admin，推 `main` 会被分支
+    # 保护拒掉（`enforce_admins` 是 false）—— 于是重算出来的东西**永远落不到 `main` 上**，
+    # 而除了这一条，没有别的判据会发现（`docs/254` §3.2 与 §5 第 3 条）。
+    assert "secrets.MANIFEST_TOKEN" in job, (
+        "`emit-main` 推 `main` 用的不是 `secrets.MANIFEST_TOKEN` —— `GITHUB_TOKEN` 推不动"
+        "（它不是 admin，会撞分支保护），而它推不动这件事本身不会报错到任何人面前")
+    print("      main 侧单一写者：五件按硬顺序重算、与门禁并行、整树生成物收全、用属主 PAT 推")
+
+
 # ---------------------------------------------------------------- M55 格式化
 
 @test
@@ -1276,13 +1396,14 @@ def _gate_workflow() -> str:
 def _job_block(wf: str, job: str) -> str:
     """取 `jobs:` 下面那个 job 的整段（到下一个同缩进的 job 名为止）。
 
-    **为什么不用 YAML 解析**：`gate.yml` 是这个仓唯一需要被读的 YAML，而 PyYAML
-    不在 CI 镜像的包名单里 —— 引一个依赖只为读一个文件不值当（`ci-image.yml` 的
-    包名单有"不加"的纪律）。这里的形状是**固定**的（job 名两格缩进，键四格），
-    正则足够且看得见自己在断言什么。
+    **为什么不用 YAML 解析**：PyYAML 不在 CI 镜像的包名单里 —— 引一个依赖只为读
+    两个 workflow 文件不值当（`ci-image.yml` 的包名单有"不加"的纪律）。这里的形状是
+    **固定**的（job 名两格缩进，键四格），正则足够且看得见自己在断言什么。
+
+    两处调用：`gate.yml`（下面那一族）与 `manifest.yml`（生成物那条线）。
     """
     m = re.search(rf"^  {re.escape(job)}:\n(.*?)(?=^  \S|\Z)", wf, re.M | re.S)
-    assert m, f"gate.yml 里找不到 job `{job}`"
+    assert m, f"workflow 文件里找不到 job `{job}`"
     return m.group(0)
 
 
@@ -1387,17 +1508,27 @@ def test_gate_workflow_aggregation_fails_closed():
 
 
 @test
-def test_gate_container_image_tag_matches_the_recipe():
-    """镜像 tag 写在两处：`gate.yml` 各 job 的 `container.image` 与 `ci-image.yml` 的 `TAG`。
+def test_gate_container_image_matches_the_recipe():
+    """镜像的**属主与 tag** 都写在两处：`gate.yml` 各 job 的 `container.image`，
+    与 `ci-image.yml` 的 `TAG` + 它按 `github.repository_owner` **算出来**的那个属主。
 
     文件头第四条边界："改镜像要同时抬这两处 —— 抬 tag 是让各 job 用上新镜像的
     **唯一**动作"。两处不一致的后果是**静默**的：构建推的是新 tag，各 job 拉的还是
     旧镜像 —— 看起来改了，其实没改（而"看起来配上了、其实没配上"正是最费时间的一类）。
 
+    **属主那一半是 2026-10-17 补的**，因为当天搬家时差点让每一片都拉不到镜像：
+    `gate.yml` 里属主是**写死的**，`ci-image.yml` 里是**算的**，库一换组织两边就分叉，
+    而**没有任何东西会提醒**。这条判据在当时是**红的**（库已经住进 `Loment-Lang`，
+    `gate.yml` 还指着 `fujojtop`）—— 它就是为那一刻写的。
+
+    期望的属主取自 `loment_publish.ORG` —— "这个项目住在哪个组织"在本仓的单一真源。
+    转小写是因为 **ghcr 的仓库名必须全小写**（Docker 的硬要求，`ci-image.yml` 那儿也这么做）。
+
     没拉镜像的那个 job（`static-exclusive`）刻意留在 runner 上，见它自己那段注释；
-    所以这里只比**出现过的** tag 集合。
+    所以这里只比**出现过的**那些。
     """
-    tags = re.findall(r"image:\s*ghcr\.io/[^:\s]+:(\S+)", _gate_workflow())
+    wf = _gate_workflow()
+    tags = re.findall(r"image:\s*ghcr\.io/[^:\s]+:(\S+)", wf)
     assert tags, "gate.yml 里一个 `container.image` 都没有"
     recipe = (ROOT / ".github" / "workflows" / "ci-image.yml").read_text(encoding="utf-8")
     m = re.search(r'^  TAG: "([^"]+)"', recipe, re.M)
@@ -1405,7 +1536,17 @@ def test_gate_container_image_tag_matches_the_recipe():
     assert set(tags) == {m.group(1)}, (
         f"gate.yml 用 {sorted(set(tags))}，ci-image.yml 构建 {m.group(1)} —— "
         f"镜像抬了 tag 而各 job 没跟，是静默的")
-    print(f"      镜像 tag 两处一致: {m.group(1)}")
+
+    import loment_publish
+    owners = set(re.findall(r"image:\s*ghcr\.io/([^/:\s]+)/", wf))
+    want = loment_publish.ORG.lower()
+    assert owners == {want}, (
+        f"gate.yml 拉的是 {sorted(owners)} 名下的镜像，而库住在 `{loment_publish.ORG}`"
+        f"（ghcr 里该是 `{want}`）—— 库一换组织，`ci-image.yml` **算出来**的属主就变了、"
+        f"`gate.yml` 这一行**不会**跟着变，而两处谁都不提醒谁。"
+        f"换的顺序是硬的：先在新属主下把 tag 建出来、**再把它设成 public**"
+        f"（包默认私有，fork 的 PR 拉不到）、**最后**才改 gate.yml —— `docs/255` §2")
+    print(f"      镜像属主 `{want}` + tag `{m.group(1)}` 两处一致")
 
 
 @test
