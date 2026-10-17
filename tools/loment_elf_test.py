@@ -1944,7 +1944,7 @@ def test_lomelf_selfhost_reports_oversized_input():
         rc, err = _mirror_run(mir, _wsl_path(big), "/tmp/lomelf_oversized.probe")
         assert rc != 0, (f"{big.stat().st_size} B 的输入被接受了 (rc={rc}, 上限 {cap}) —— "
                          f"截断是静默的, 产出的二进制跑起来才会崩")
-        assert "上限" in err, f"拒了, 但没说清是上限的事: {err[:200]!r}"
+        assert "does not fit" in err, f"拒了, 但没说清是上限的事: {err[:200]!r}"
         print(f"      超限 {big.stat().st_size} B 的 .ll 被拒（上限 {cap} B, 从源码读的）")
 
 
