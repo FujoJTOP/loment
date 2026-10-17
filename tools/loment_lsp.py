@@ -58,25 +58,68 @@ def _parse(text: str):
     return mod
 
 
+def _line_span(text: str, line1: int) -> tuple[int, int]:
+    """那一行**第一个 token** 的跨界 `(起列, 止列)`（都 0 起）。**不是**"猜哪个符号错了"。
+
+    `#27`：这一层的 range 原先两端是常量 `0 → 200` —— 一条 14 字符的行与一条 300 字符的
+    行回来的是同一对数字，编辑器于是把**整行**画成波浪线，指不到出问题的那一格。
+
+    **能给到什么就给到什么**：参考实现的 `check()` 只报**行**（消息形如 `12: …`），列从来
+    没有算过（`#5` 记的就是这件事）—— 所以这一层**拿不到**真正的列。但拿不到不等于编一个：
+    这里退到"这一行的第一个 token"，那是词法器真算出来的位置，且**确定落在对的那一行**上。
+
+    **为什么不按消息里的符号名去行里找**：那是在猜，而"指到假的地方去"比"指得粗"更坏
+    （`lomc.LomError` 那段注释：编一个 `1:1:` 是撒谎）。猜错的代价由读者付，粗的代价只是
+    少一点信息。
+    """
+    for t in lomc.lex(text):
+        if t.line == line1:
+            return max(0, t.col - 1), max(0, t.col - 1) + max(1, t.len)
+    return 0, 1
+
+
 def _diagnostics(text: str, path: str) -> list[dict]:
     try:
         mod = _parse(text)
         errs = lomentc.check(mod)
     except lomc.LomError as e:
-        return [{"range": {"start": {"line": max(0, e.line - 1), "character": 0},
-                           "end": {"line": max(0, e.line - 1), "character": 200}},
+        # **解析期**这一支有真列（`LomError` 带 `col`），所以给得比 `_line_span` 更准；
+        # `line <= 0` = 这一档指不出位置（见 `LomError` 的注释），那就别编。
+        ln = max(0, e.line - 1) if e.line > 0 else 0
+        c0 = max(0, e.col - 1) if e.line > 0 else 0
+        return [{"range": {"start": {"line": ln, "character": c0},
+                           "end": {"line": ln, "character": c0 + 1}},
                  "severity": 1, "source": "loment", "message": str(e)}]
     out = []
     for msg in errs:
-        line = 0
+        line1 = 0
         head = msg.split(":", 1)[0]
         if head.strip().isdigit():
-            line = max(0, int(head.strip()) - 1)
+            line1 = int(head.strip())
             msg = msg.split(":", 1)[1].strip()
-        out.append({"range": {"start": {"line": line, "character": 0},
-                              "end": {"line": line, "character": 200}},
+        c0, c1 = _line_span(text, line1) if line1 > 0 else (0, 1)
+        ln = max(0, line1 - 1)
+        out.append({"range": {"start": {"line": ln, "character": c0},
+                              "end": {"line": ln, "character": c1}},
                     "severity": 1, "source": "loment", "message": msg})
     return out
+
+
+def _name_span(text: str, line0: int, word: str) -> tuple[int, int]:
+    """声明那一行里 `word` 占哪几列。**行与名字都是已知的**，这里只是把它找出来。
+
+    `#27`：跳转原先回 `{line, character: 0} → {line, character: 200}`，编辑器只能把光标
+    扔到行首，而声明通常缩进着。这不是猜"哪个符号错了"（`_line_span` 那段说的那件事）——
+    名字是调用方传进来的、行是符号表里存的，两边都确定。
+    """
+    lines = text.splitlines()
+    if not (0 <= line0 < len(lines)):
+        return 0, 0
+    import re as _re
+    m = _re.search(rf"\b{_re.escape(word)}\b", lines[line0])
+    if not m:
+        return 0, 0
+    return m.start(), m.end()
 
 
 def _decls(text: str) -> dict[str, dict]:
@@ -150,9 +193,10 @@ def handle(msg: dict, docs: dict[str, str]) -> list[dict]:
             sym = None
         if not sym:
             return [{"jsonrpc": "2.0", "id": rid, "result": None}]
+        s0, s1 = _name_span(text, sym["line"], word)
         return [{"jsonrpc": "2.0", "id": rid, "result": {
-            "uri": uri, "range": {"start": {"line": sym["line"], "character": 0},
-                                  "end": {"line": sym["line"], "character": 200}}}}]
+            "uri": uri, "range": {"start": {"line": sym["line"], "character": s0},
+                                  "end": {"line": sym["line"], "character": s1}}}}]
     if method == "textDocument/completion":
         uri = (params.get("textDocument") or {}).get("uri", "")
         items = [{"label": k, "kind": 14} for k in KEYWORDS]
