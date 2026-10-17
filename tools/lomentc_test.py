@@ -2950,6 +2950,74 @@ def _gc_emit(src: str) -> str:
     return lomentc.emit_llvm(mod, ROOT)
 
 
+#: 触发挂点该挂在**哪儿**（issue #367）：三份源只差"分配走哪条路"，外加默认档那一格。
+_GC_TRIGGER_ALLOC_SRC = """module trigalloc
+@@CHOOSE@@
+choose runtime
+
+fn _start() {
+    let p: ptr = alloc(32);
+    store8(p, 0, 1);
+    syscall4(60, load8(p, 0) as u64, 0, 0);
+}
+"""
+_GC_TRIGGER_CONCAT_SRC = """module trigconcat
+@@CHOOSE@@
+choose runtime
+
+fn _start() {
+    let s: str = "abcd";
+    let t: str = str_concat(s, "efgh");
+    syscall4(60, str_len(t) as u64, 0, 0);
+}
+"""
+_GC_TRIGGER_BOTH_SRC = """module trigboth
+@@CHOOSE@@
+choose runtime
+
+fn _start() {
+    let p: ptr = alloc(8);
+    store8(p, 0, 1);
+    let s: str = "abcd";
+    let t: str = str_concat(s, "efgh");
+    syscall4(60, (str_len(t) + load8(p, 0)) as u64, 0, 0);
+}
+"""
+
+
+@test
+def test_gc_trigger_is_attached_where_the_bytes_are_asked_for():
+    """触发挂点挂在**真向堆要字节的那一处**（issue #367）—— 而不是挂在它某个调用点上。
+
+    **Why**：触发量的是"这次向堆要了多少字节"，所以报账的地方只能是**真向堆要字节的那一处**
+    （参考侧 `alloc_ir` / 自举侧 `emit_alloc_seq`）。原先它挂在 `alloc` 那一支上，而
+    `str_concat` 是同一个 `alloc_ir` 的**另一个**调用点 ⇒ 拼接分配的字节从不进计数 ⇒
+    **纯拼接的程序一次都不收**，64 KiB 填满就 `abort`。拼接是语言的主字符串操作，所以这
+    不是边角：文本处理那类程序在自动档下**从第一次分配起就在超支**。
+
+    **这一半只钉"挂点有几条"**（便宜、不跑程序）。"真的收得回来"是动态那一半的活
+    （`loment_elf_test::test_gc_alpha_collects_a_concat_only_program`），两者缺一不可 ——
+    挂点齐了而收集器是空函数，这条照样绿。
+
+    **反证**：把触发挪回 `alloc` 那一支，第二、三格立刻变 0（实测）。
+    """
+    n = "call void @__loment_maybe_collect(i32 "
+    alloc_only = _gc_emit(_GC_TRIGGER_ALLOC_SRC.replace("@@CHOOSE@@", "choose gc_auto"))
+    concat_only = _gc_emit(_GC_TRIGGER_CONCAT_SRC.replace("@@CHOOSE@@", "choose gc_auto"))
+    both = _gc_emit(_GC_TRIGGER_BOTH_SRC.replace("@@CHOOSE@@", "choose gc_auto"))
+    manual = _gc_emit(_GC_TRIGGER_BOTH_SRC.replace("@@CHOOSE@@", "choose gc_manual"))
+    assert alloc_only.count(n) == 1, (
+        f"只走 `alloc` 的源该有 1 条挂点，得到 {alloc_only.count(n)}")
+    assert concat_only.count(n) == 1, (
+        f"只走 `str_concat` 的源也该有 1 条挂点，得到 {concat_only.count(n)} —— "
+        "挂点漏在拼接那条路上，程序会一次都不收，直到 arena 耗尽")
+    assert both.count(n) == 2, (
+        f"两条分配路各一处，该有 2 条挂点，得到 {both.count(n)}")
+    assert manual.count(n) == 0, (
+        f"`gc_manual` 不该有挂点（默认档一行都不动），得到 {manual.count(n)} —— "
+        "挂点的门跟收集器是同一条 `gc_any`")
+
+
 @test
 def test_gc_auto_collector_text():
     """`choose gc_auto` 的收集器**只在这一档**追加（`docs/210` §2.1）—— 三档的文本。
