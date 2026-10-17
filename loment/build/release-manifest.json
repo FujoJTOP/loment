@@ -63,15 +63,15 @@
   },
   {
    "path": "loment/patches/0001-runtime-refusal-is-its-own-code.lomf",
-   "sha256": "c58d4d342316593a17263bb2273a8f5ab04628605fc178325e1cd1896003eea8"
+   "sha256": "1e433c6f0fad974a300df9a943512b324bf34d07774fde76d67eb19140e1d4b9"
   },
   {
    "path": "loment/patches/0002-literal-index-is-a-language-rule.lomf",
-   "sha256": "7cba2b6b1d0c9438e87d2ab0ec93f7f5496b45d540159dad86440146c393e644"
+   "sha256": "0459ce79ff5b4fc4fd9a2de54e631e88f898f52c685303518b59298bc345e9ad"
   },
   {
    "path": "loment/patches/0003-capacities-speak.lomf",
-   "sha256": "26083ceb411a133c7dd415821e811eb56be846bd62320ee5a6a39ad30d050aaa"
+   "sha256": "b462d5c29dc4cb42bb4fa15f28fe921b27da0c8440daacef1710a058156ea4e1"
   },
   {
    "path": "tools/lomdoc.py",
@@ -119,11 +119,11 @@
   },
   {
    "path": "tools/loment_caps.py",
-   "sha256": "9bfb5625e7022d967fda69f8064abac5bdb47d0ebed65f19b17b78f0fde8035d"
+   "sha256": "9ae5cd98a71adb7661c0bfea057df5f4525064274a81738dd9f7da8eb8bfbd20"
   },
   {
    "path": "tools/loment_caps_test.py",
-   "sha256": "db550cb951b3a37c34be9928a2d791cf2339fde0baa2a1e45d19093f5b84d754"
+   "sha256": "645d73c5100e021d9ccd1a4a99a4bc24c31a8ebd7e26d0a63c9c6a6002f22287"
   },
   {
    "path": "tools/loment_err_test.py",
@@ -2227,7 +2227,7 @@
   },
   {
    "path": "docs/205-loment-015-alpha1-target.md",
-   "sha256": "a42f2d2ffde3ee9cefd3158b37850eeec3f68b78b6f0ffcb8809b98305dc4dd9"
+   "sha256": "fe76770c651ca5d8887fa9813d354b44a1c7389518d437083126274e1e708d9d"
   },
   {
    "path": "docs/206-loment-ownership-boundary.md",
@@ -2431,7 +2431,7 @@
   },
   {
    "path": "docs/251-capacities.md",
-   "sha256": "a9f8a9a45bf9486aeeaa71cd7f4f31ba9fe9ed118e185c0b026b20f283369991"
+   "sha256": "de4a3ec94d265d410f5570142ffeafe848f2d1c61d3ae7c7a30e33fd440186d9"
   },
   {
    "path": "docs/252-lomelf-mirror-globals-and-switch.md",
@@ -2442,20 +2442,20 @@
    "sha256": "571b41ae55c42bc2a295ec6f45682cebb75d190858974270e127e494ee50683c"
   },
   {
-   "path": "docs/254-loment-modification-files.md",
-   "sha256": "7e1e4ac6d937f24a5f21e30c2c338393a5a5ea9f5a196d56093ec94d831b8fbf"
-  },
-  {
    "path": "docs/254-the-artifacts-are-not-a-shared-register.md",
    "sha256": "2d1e62df2fd9cbf74a37f66c7114c6ffec455af3025c1f574b1a8cf44d2fab13"
   },
   {
-   "path": "docs/255-compiler-capacity-decision.md",
-   "sha256": "4c66fac6a48c5181eb7f8fa7b6e6f1338e687143b95e7a46a702c3c3bb996c4e"
-  },
-  {
    "path": "docs/255-org-loment-lang.md",
    "sha256": "20ad398ebab275ed3c7f690fdffcb4fa3fe65b85a0ba2773d408adef9f8ddea1"
+  },
+  {
+   "path": "docs/256-loment-modification-files.md",
+   "sha256": "34cb3ea7fc88d1ec2f21e41ce14d6e5ceb8aaae22fd755fdb668974a7c3a3bdc"
+  },
+  {
+   "path": "docs/257-compiler-capacity-decision.md",
+   "sha256": "ae92f020e7504d3874ef118505c34413bd7d2fe7205d6b1e9fe97592d47f880b"
   },
   {
    "path": "docs/manual/index.md",
@@ -2683,7 +2683,7 @@
   },
   {
    "path": "tools/loment_release.py",
-   "sha256": "1f6e1faec62a5027257b5aaaa5d26b2942f3fca0b32dd70402cdea36131e7065"
+   "sha256": "334332019658d2787b089c390afc3ef192a0599e645f7d756654f313f1d7d7f7"
   },
   {
    "path": "tools/loment_status.py",

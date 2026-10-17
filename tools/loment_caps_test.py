@@ -246,7 +246,7 @@ def test_the_front_end_has_no_silent_capacity():
     **必须都在 `EXPLAINED` 里有一条写清来路的记录**，否则这条红。2026-10-16 补完四处
     （`SLOT` / `DIR_CAP` / `SUBP_CAP` / `EXT_CAP`）之后，剩下的那一条是 `MAX_LANG` ——
     它的来路写在 `EXPLAINED` 里（有守卫、不写穿；丢的是第 17 条语言声明，而那要先把
-    "一个单元最多声明几门语言"定成语言规则，见 `docs/255` §4）。
+    "一个单元最多声明几门语言"定成语言规则，见 `docs/257` §4）。
     """
     fe = [r for r in loment_caps.scan() if Path(r["file"]).name in loment_caps.FRONTEND]
     gap = loment_caps.gaps(fe)

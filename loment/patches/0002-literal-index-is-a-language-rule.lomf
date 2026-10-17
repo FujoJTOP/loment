@@ -17,7 +17,7 @@ about `_walk_expr` 与自举检查器的那段 `if`。两边一起改、而且�
 about 只对裸字面量），正是这份格式要站的那个岗。
 about 
 about 附带：`_walk_expr` 的 `lms` 形参随之下线（那是普通改动 —— 它不是一个片段、
-about 25 处调用点也各不同，按 `docs/254` §4 落成普通 diff）。
+about 25 处调用点也各不同，按 `docs/256` §4 落成普通 diff）。
 
 edit loment/selfhost/checker.lomt expect 1
 old <<<
