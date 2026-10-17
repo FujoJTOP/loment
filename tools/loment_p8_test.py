@@ -1968,7 +1968,7 @@ def test_m85_codegen_table_capacity():
     cur_base = cst("CG_CUR")                          # 当前函数参数替换表
     enum_base, enum_stride = cst("CG_ENUM"), 80
     local_base = cst("CG_LOCAL")                      # 枚举表的上界 = 局部表基址
-    param_base, param_stride = cst("CG_PARAM"), 80
+    param_base, param_stride = cst("CG_PARAM"), 160   # `#265`: 20 槽 x 8
     bytes_total = cst("CG_BYTES")
     # 守卫必须用**同一个**常量, 否则表放大了守卫还卡在旧数 (或反过来写穿)
     assert f"n >= CG_MAXFN" in src, "函数表的守卫没和容量常量同源"
