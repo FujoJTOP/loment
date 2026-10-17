@@ -1111,6 +1111,55 @@ def test_m90_gc_auto_collector_is_byte_identical():
 
 
 @test
+def test_m92_lms_entry_a_rescue_is_byte_identical():
+    """LMS 第 3 级入口 A（`docs/253` §5.3）：`alloc` 分配不出时**先收一次再试** ——
+    **两个实现逐字节一致**。
+
+    ⚠ **这一条是为一个"孪生看不见的分歧"专门立的。**
+    `loment_p8_test` / `loment_potato_emit_test` 的语料里**没有一个用 `lms_open`**，
+    所以"参考侧发了 rescue、自举侧没发"在那两条判据下**照样绿** ——
+    孪生只证"一致"，而这是**它没量到的那一段**（`feedback_twin_proves_agreement_not_correctness`）。
+    **实测过一次**：自举侧第一轮只改了 `emit_heap`（sealed）、**漏了 `emit_heap_hosted`**，
+    两边 `hosted` 那一支当场差 462 字节 —— 这正是这条判据要挡的形状。
+
+    **三格**覆盖所有能成立的情形（`gc_manual` 不在表里 —— 它没有收集器，
+    入口 A 在那档下**一个字都不该发**；那半由 `lomentc_test` 的 3×2 网格管）。
+    """
+    if not _clang():
+        print("      SKIP: 无 clang")
+        return
+    # ⚠ 尺寸走 `const` 名，**不能是字面量** —— 否则 `gc_auto_alpha` 会把 `alloc`
+    # 静态提升到栈上（L0），产物里**根本不需要堆**，这三格会**空转着全绿**。
+    probe = ("module m\nchoose runtime\nconst N: u32 = 64;\n%s\n\n"
+             "fn f() -> u32 {\n    let p: ptr = alloc(N);\n"
+             "    return load8(p, 0);\n}\n")
+    cases = (
+        ("gc_auto", "choose gc_auto\nchoose lms_open"),
+        ("gc_auto_alpha", "choose gc_auto_alpha\nchoose lms_open"),
+        ("gc_auto_hosted", "choose hosted\nchoose gc_auto\nchoose lms_open"),
+    )
+    with tempfile.TemporaryDirectory() as td:
+        exe = _build_codegen(td)
+        outs: dict[str, str] = {}
+        for tag, chooses in cases:
+            target = Path(td) / f"lms_{tag}.lomt"
+            target.write_text(probe % chooses, encoding="utf-8", newline="\n")
+            want = _unit_ll(target)
+            got = _run_codegen(exe, target, td)
+            outs[tag] = got
+            if got != want:
+                i = next((k for k in range(min(len(got), len(want))) if got[k] != want[k]), None)
+                a = max(0, (i or 0) - 60)
+                raise AssertionError(
+                    f"lms_{tag} 首个差异 @{i}:\n"
+                    f" loment {got[a:(i or 0) + 80]!r}\n python {want[a:(i or 0) + 80]!r}")
+    # 不许空转：三格都必须**真的**带那条救援路径，且**两条成功返回各清一次**标记
+    for tag, out in outs.items():
+        assert "@__loment_lms_retry" in out, f"{tag}: 没有入口 A —— 这条判据在空转"
+        assert out.count("store i1 false, ptr @__loment_lms_retry") == 2, tag
+
+
+@test
 def test_m91_l1_definite_lifetime_is_byte_identical():
     """L1（**定活**，`docs/210` §2.5）：那一份真值表源，在**两个实现**上逐字节一致。
 
