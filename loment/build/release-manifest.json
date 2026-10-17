@@ -819,7 +819,7 @@
   },
   {
    "path": "tools/loment_lsp.py",
-   "sha256": "6a7a5f106da239a055c7022f21cb15d91b8676bbdd79a8e5933b928ffd1a9f9f"
+   "sha256": "75c52ee4d689ef391dc05d368818e9c51db3ef10db4a5e84b282fbaad0af47b7"
   },
   {
    "path": "tools/loment_tools_test.py",
@@ -1163,7 +1163,7 @@
   },
   {
    "path": "tools/loment_lsp_test.py",
-   "sha256": "aaf3b6cc263c99f46f7738947a52545cff7ae5239ba32aa36e9e1e1fe2fb0467"
+   "sha256": "8dc847d3593fbaead74d49dae37fd1b99d2272c2ef8193114fa5be3066677a9e"
   },
   {
    "path": "tools/loment_editors_test.py",
@@ -1359,7 +1359,7 @@
   },
   {
    "path": "loment/tools/lsp.lomt",
-   "sha256": "5086907cb3d31c83d30606210badeb2c52d2b34f5f56ab93fa918675b131787e"
+   "sha256": "d978cea469cf42019e6fa4f10fa91fa893c947ee821e2c251bb461cd023e148e"
   },
   {
    "path": "loment/tools/lvm.lomt",
