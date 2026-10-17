@@ -34,6 +34,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc           # noqa: E402
 import lomelf            # noqa: E402
 import loment_ffi_test as ffitest   # noqa: E402  (共用 FFI 那份 C 夹具与 Loment 源码)
@@ -746,27 +747,30 @@ def test_gc_auto_collects_while_manual_exhausts():
           f"manual 耗尽 (rc={got[1]}) —— 自动回收是真的")
 
 
-#: `#367` 的语料：**一次 `alloc` 都不写**，只靠 `str_concat` 分配。6000 次拼接 × 56 字节
-#: （44 的请求取整成 56）≈ 336 KB，**远远**过 64 KiB arena。
+#: `#367` 的语料：**一次 `alloc` 都不写**，只靠 `str_concat` 分配。6000 次拼接 × 16 字节
+#: （8 的请求取整成 16）≈ 94 KB，**远远**过 64 KiB arena。
 #:
-#: **后缀为什么是 40 字节而不是 4**：`gc_auto` 的触发按**请求字节**计，而堆按**块字节**
-#: 消耗（请求 + 8 字节头、再向上取整到 8）。4 字节后缀那个比值是 2，于是计数器攒到 32768
-#: 的那一刻 arena 也正好满 —— 掐在临界上，`gc_auto` 那边会**先耗尽后收集**，判据变成
-#: 在测那个比值而不是在测触发。40 字节后缀把比值压到 56/44 ≈ 1.27，触发稳稳先到。
-#: （`gc_auto_alpha` 两种都一样过 —— 它另有一条**空间触发**，不靠这个计数器。）
+#: **后缀为什么是 4 字节、而不是当年那个 40**：这一格原先是 40 字节，用来**绕开**时钟的
+#: 缺陷 —— 触发按**请求字节**计，而堆按**块字节**消耗（请求 + 8 字节头、再向上取整到 8）；
+#: 4 字节后缀那个比值是 2，于是计数器攒到 32768 的那一刻 arena 也正好满，`gc_auto` 会
+#: **先耗尽后收集**，判据变成在测那个比值而不是在测触发。**时钟修好之后**（它算的就是分配器
+#: 真正吃掉的那两行 `(sz + 15) & -8`）那个绕开不再需要，于是回到 4 字节 —— 这一版才
+#: **钉得住**这个修复：把时钟改回只数载荷，`gc_auto` 那一只立刻变 132。
+#: （`gc_auto_alpha` 两种后缀都一样过 —— 它另有一条**空间触发**，不靠这个计数器。）
 _CONCAT_ONLY_SRC = (
     "module concatonly\n%s\nchoose runtime\n\n"
     "fn _start() {\n"
     "    let s: str = \"abcd\";\n"
     "    let i: u64 = 0;\n"
     "    while i < 6000 {\n"
-    "        let t: str = str_concat(s, \"0123456789012345678901234567890123456789\");\n"
+    "        let t: str = str_concat(s, \"efgh\");\n"
     "        i = i + 1;\n"
     "    }\n"
     "    syscall4(60, 7, 0, 0);\n"
     "}\n")
 
 
+@test
 def test_a_concat_only_program_still_collects():
     """只靠 `str_concat` 分配的程序也**必须**触发收集（`#367`）—— 两档各一只，退出码 7。
 
@@ -2316,6 +2320,7 @@ _FREE_LIST_SRC = (
     "    syscall4(60, 3, 0, 0);\n}\n")
 
 
+@test
 def test_a_collection_keeps_the_free_list():
     """一次收集**不许**把当前空闲块丢掉（`#366`）—— 两档各一只，退出码 7 = 拿回了那片区域。
 
@@ -2475,16 +2480,7 @@ def test_the_runtime_guard_does_not_need_a_windows_binary():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_elf_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_elf_test")
 
 
 if __name__ == "__main__":

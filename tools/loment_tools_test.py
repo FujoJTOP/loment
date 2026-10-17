@@ -16,6 +16,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomc  # noqa: E402
 import lomentc  # noqa: E402
 
@@ -1102,29 +1103,434 @@ def test_gate_reports_how_many_criteria_did_not_run():
             "    print('      SKIP: 需要 WSL')\n"
             "    print('  PASS  c  # 这一行只是提到 SKIP')\n"
             "    return 0\n", encoding="utf-8", newline="\n")
+        # 另一份**走共享运行器**的探针：它把 `SKIP` 连**判据名**打出来，逐条预算才对得了账。
+        (probe / "loment_namedskip_probe.py").write_text(
+            "import loment_suite\n"
+            "\n"
+            "TESTS = []\n"
+            "\n"
+            "def test(fn):\n"
+            "    TESTS.append((fn.__name__, fn))\n"
+            "    return fn\n"
+            "\n"
+            "@test\n"
+            "def test_needs_wsl():\n"
+            "    print('      SKIP: 需要 WSL')\n"
+            "\n"
+            "@test\n"
+            "def test_runs():\n"
+            "    print('      跑过了')\n"
+            "\n"
+            "def main() -> int:\n"
+            "    return loment_suite.run(TESTS, 'loment_namedskip_probe')\n",
+            encoding="utf-8", newline="\n")
         sys.path.insert(0, str(probe))
         try:
-            _name, ok, _tail, _dt, skips = ci._run_one_check("loment_skipcount_probe")
+            r0 = ci._run_one_check("loment_skipcount_probe")
+            r1 = ci._run_one_check("loment_namedskip_probe")
         finally:
             sys.path.remove(str(probe))
             sys.modules.pop("loment_skipcount_probe", None)
-        assert ok, "探针模块自己没跑通"
-        assert skips == 2, f"跳过数该是 2（两条行首的算、提到的不算），得到 {skips}"
+            sys.modules.pop("loment_namedskip_probe", None)
+        assert r0.ok, "探针模块自己没跑通"
+        assert r0.skips == 2, f"跳过数该是 2（两条行首的算、提到的不算），得到 {r0.skips}"
+
+        # (4) `#371` 的**判定面**（2026-10-15 补）：跳过必须**认得出是哪一条**，否则
+        #     `ci.check_budget` 没法逐条对账签入的 `.github/gate-skips.txt`。这一条与上面
+        #     钉"条数"的那条是一对：数得出条数却认不出名字，等于预算对那个套件失明。
+        assert r1.ok, "走共享运行器的探针自己没跑通"
+        assert r1.skips == 1 and r1.skipped == ("test_needs_wsl",), \
+            f"跳过要连名字认出来，得到 {r1.skipped!r}"
+        assert r1.passed == ("test_runs",), f"通过的那条也要认得出来，得到 {r1.passed!r}"
+        assert r1.declared == 2, f"len(TESTS) 要读出来，得到 {r1.declared}"
     finally:
         shutil.rmtree(probe, ignore_errors=True)
 
 
+@test
+def test_gate_budget_matches_the_suites():
+    """`#371` 两道棘轮的**签入文件本身**说得通吗。
+
+    `.github/gate-floors.txt` 说每个套件该有多少条判据，`.github/gate-skips.txt` 说哪些判据
+    允许在这台机器上不跑。`ci.check_budget` 拿它们判成败 —— 所以文件本身错了就是整个机制错了。
+    这条钉四件事：
+
+    1. 两份都能被 `ci.read_budget()` 读出来（格式对）；
+    2. **每个有 `TESTS` 的套件都在地板里，且数字 == `len(TESTS)`** —— 漏一个套件就等于它
+       从此不受地板约束（「把判据删光」那条路又通了）；
+    3. 两份里点到的套件名都在 `STATIC_CHECKS` 里（写错名字 = 那一行永远不生效）；
+    4. 跳过表里点到的**判据名**在那个套件里真的存在（判据改名或删掉之后，那条豁免会变成
+       一句永远不生效的谎话）。
+    """
+    import ci
+
+    floors, skips = ci.read_budget()
+
+    declared: dict[str, int] = {}
+    for name in ci.STATIC_CHECKS:
+        tests = getattr(__import__(name), "TESTS", None)
+        if tests:
+            declared[name] = len(tests)
+
+    missing = sorted(set(declared) - set(floors))
+    assert not missing, f"这些套件有判据却不在 gate-floors.txt 里: {missing}"
+    wrong = {n: (floors[n], c) for n, c in declared.items() if floors.get(n) != c}
+    assert not wrong, f"地板与实测不符（文件, 实测）: {wrong}"
+
+    unknown = sorted({s for s, _ in skips if s not in ci.STATIC_CHECKS})
+    assert not unknown, f"预算里点到了 STATIC_CHECKS 里没有的套件: {unknown}"
+
+    for suite, crit in sorted(skips):
+        if crit == "*":
+            continue
+        tests = getattr(__import__(suite), "TESTS", None)
+        if tests:
+            # 归一走 `loment_suite.entries` —— `TESTS` 有 `(名字, 函数)` 与裸函数两种写法
+            names = {n for n, _ in loment_suite.entries(tests)}
+        else:
+            # 没搬上共享运行器的套件（`check()` 那一族）没有 `TESTS` —— 名字从**源码**里认：
+            # 那里必须有 `SKIP  <判据名>:` 这么一行。少了这一路，那几家的豁免写错名字
+            # 也没人管（一条永远不生效的谎话）。
+            src = (Path(__file__).parent / f"{suite}.py").read_text(
+                encoding="utf-8", errors="replace")
+            # f-string 里的 `{pair['label']}` 在**源码**里是字面量，而量出来的名字是渲染后的
+            # （`lompi_sync[指南]`）—— 所以占位符当通配符比。
+            pats = [re.compile("^" + ".*".join(
+                        re.escape(p) for p in re.split(r"\{[^}]*\}", n)) + "$")
+                    for n in re.findall(r"SKIP\s+([^:\n]+?):", src)]
+            assert any(p.match(crit) for p in pats), (
+                f"gate-skips.txt 里 {suite} 的 {crit} 在那个套件里找不到（改名了？）")
+            continue
+        assert crit in names, f"gate-skips.txt 里 {suite} 的 {crit} 不在那个套件里（改名了？）"
+    print(f"      gate-floors {len(floors)} 个套件 / gate-skips {len(skips)} 条豁免，都对得上")
+
+
+@test
+def test_every_criterion_is_registered():
+    """套件里每个 `def test_*` 都必须**有人跑它**：进 `TESTS`，或者在别处被点名过。
+
+    没人跑的后果是**它从不运行，而套件照样绿** —— 与 `#371` 同一个形状（有一层安全检查
+    看不见洞）。新写一条判据、忘了装饰器，是最容易发生也最难发现的一种。
+
+    **为什么不去认"必须挂 `@test`"**：仓里有四种注册惯用法 —— `@test` 装饰器（多数套件）、
+    `check()` 闭包往 `RESULTS` 里塞（`loment_dist_test` / `loment_sign_test`）、手写 `main`
+    里直接调、以及按名字约定收（`lvm_test` / `lvm_twin_test` 的
+    `sorted(globals().items())`）。所以**不去猜惯用法，直接问套件自己**：把模块 import
+    进来，看 `def test_*` 的名字在不在那份 `TESTS` 里。对没有 `TESTS` 的套件
+    （`check()` 闭包那几个）退回到**可达性**：名字在模块里被读到过就算有人跑。
+
+    这条与 `test_gate_budget_matches_the_suites` 一样要 import 全部套件 —— 那份代价那边
+    已经付过了（`len(TESTS)` 只能从 import 拿），这里是同一笔账。
+    """
+    import ast
+
+    import ci
+
+    def registered(mod) -> set[str] | None:
+        """套件自己说"我要跑哪些"；没有 `TESTS` 就返回 `None`（退回可达性）。"""
+        tests = getattr(mod, "TESTS", None)
+        if not tests:
+            return None
+        out: set[str] = set()
+        for e in tests:
+            if isinstance(e, tuple) and len(e) >= 2:
+                out.add(str(e[0]))          # `(名字, 函数)`；名字可能就是显示名
+                if callable(e[1]):
+                    out.add(getattr(e[1], "__name__", ""))
+            elif callable(e):
+                out.add(e.__name__)         # 裸函数
+        return out
+
+    offenders = []
+    for name in ci.STATIC_CHECKS:
+        p = Path(__file__).resolve().parent / f"{name}.py"
+        if not p.exists():
+            continue
+        tree = ast.parse(p.read_text(encoding="utf-8"))
+        loaded = {n.id for n in ast.walk(tree)
+                  if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+        loaded |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        reg = registered(__import__(name))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test_"):
+                continue
+            decs = [ast.unparse(d) for d in node.decorator_list]
+            if any(d == "test" or d.endswith(".test") for d in decs):
+                continue
+            if node.name in loaded:
+                continue          # 被别处点名（`check()` 闭包 / 手写 main）—— 有人跑它
+            if reg is not None and node.name in reg:
+                continue          # 进了 `TESTS` —— 有人跑它（按名字收的那种套件走这条）
+            offenders.append(f"{name}.py:{node.lineno} {node.name}")
+    assert not offenders, ("这些 def test_* 既没挂 @test 也没进 TESTS，因而从不运行: "
+                           + ", ".join(offenders))
+    print("      每个 def test_* 都有人跑（进了 TESTS 或挂 @test）")
+
+
+# ------------------------------------------------- 门禁 workflow 自己的形状（`#371`）
+
+def _gate_workflow() -> str:
+    return (ROOT / ".github" / "workflows" / "gate.yml").read_text(encoding="utf-8")
+
+
+def _job_block(wf: str, job: str) -> str:
+    """取 `jobs:` 下面那个 job 的整段（到下一个同缩进的 job 名为止）。
+
+    **为什么不用 YAML 解析**：`gate.yml` 是这个仓唯一需要被读的 YAML，而 PyYAML
+    不在 CI 镜像的包名单里 —— 引一个依赖只为读一个文件不值当（`ci-image.yml` 的
+    包名单有"不加"的纪律）。这里的形状是**固定**的（job 名两格缩进，键四格），
+    正则足够且看得见自己在断言什么。
+    """
+    m = re.search(rf"^  {re.escape(job)}:\n(.*?)(?=^  \S|\Z)", wf, re.M | re.S)
+    assert m, f"gate.yml 里找不到 job `{job}`"
+    return m.group(0)
+
+
+@test
+def test_gate_workflow_shard_shape_matches_ci():
+    """分片那个数**写在三处**：`GATE_SHARDS`、矩阵每条的 `total`、`ci.py` 现算的片数。
+
+    文件头写着"改分片形状要同时改 `ci.py` 和这里" —— 而此前**没有任何东西**钉住它。
+    这个数一偏，分片划分就变、并集不再是 `STATIC_CHECKS`，`static` 那步的条数校验
+    会红 —— 但那是**跑完之后**才发现。三处对齐让它当场红。
+
+    片 1 归 `static-exclusive`（独占那一片串在其余片前面），所以矩阵该是 `2..N`；
+    这里连"少一片"也一起钉 —— 少的那一片就是**从此不跑**的那几条判据。
+    """
+    import ci
+
+    wf = _gate_workflow()
+    m = re.search(r'^  GATE_SHARDS: "(\d+)"', wf, re.M)
+    assert m, "gate.yml 里找不到 `GATE_SHARDS`"
+    n = int(m.group(1))
+
+    trips = re.findall(r"-\s*\{\s*shard:\s*(\d+),\s*total:\s*(\d+)\s*\}", wf)
+    assert trips, "矩阵 `include:` 一条都没有 —— 分片那几条判据从此不跑"
+    totals = {int(t) for _, t in trips}
+    assert totals == {n}, f"矩阵里的 total {sorted(totals)} 与 GATE_SHARDS={n} 不一致"
+    ids = sorted(int(s) for s, _ in trips)
+    assert ids == list(range(2, n + 1)), (
+        f"矩阵该是 2..{n}（片 1 归 static-exclusive），实际 {ids}")
+
+    excl = _job_block(wf, "static-exclusive")
+    assert '--shard "1/$GATE_SHARDS"' in excl, "`static-exclusive` 没在跑片 1"
+
+    plan = ci.shards(n)
+    assert len(plan) == n, f"`ci.shards({n})` 切出 {len(plan)} 片，与 GATE_SHARDS={n} 不符"
+    flat = [x for s in plan for x in s]
+    assert sorted(flat) == sorted(ci.STATIC_CHECKS), "分片不是 STATIC_CHECKS 的一个划分"
+    print(f"      分片形状三处一致: GATE_SHARDS={n}, 矩阵 2..{n}, ci.shards({n}) 切出 {n} 片")
+
+
+@test
+def test_gate_workflow_keeps_the_required_check_name():
+    """`static` 那个 job 的 `name:` **就是**保护规则里挂着的必需检查名。
+
+    文件头第三条边界：名字一没，保护规则就永远等不到它，PR 会**全部**卡住
+    （不是松开）。这条钉两件事：它还是那个名字，而且**只有一个** job 叫这个名字
+    —— 两个同名 job 会让"必需检查"的归属变成看谁先报。
+
+    `static-manual` 特意起了别的名字（它是手工诊断，不该顶替 PR 上那道门），
+    这里把那条也钉住。
+    """
+    wf = _gate_workflow()
+    req = "ci.py --static-only"
+    names = re.findall(r"^    name: (.+)$", wf, re.M)
+    assert names.count(req) == 1, (
+        f"`{req}` 在 job 名里出现 {names.count(req)} 次（应为 1 次）—— {names}")
+    assert f"    name: {req}" in _job_block(wf, "static"), (
+        f"job `static` 的 name 不再是 `{req}`：保护规则等的就是这个字符串")
+    print(f"      必需检查名 `{req}` 仍由唯一一个 job 扛着")
+
+
+@test
+def test_gate_workflow_aggregation_fails_closed():
+    """聚合那两步里各有一条"不许静默变绿"，以及两处"基线不见了就判失败"。
+
+    堵的是两个**静默通过**的形状：
+
+    * 少一片就少几条判据，而门禁照样绿 —— 所以聚合要**数**条数并对不上就红；
+    * `needs` 的默认行为是"依赖失败就**跳过**"，而跳过不算失败 —— 保护规则会一直
+      等下去。所以那里必须显式看 `needs.*.result`。
+
+    以及基线文件**不见了**时不能当成"没有基线"放行：两个跑片的 job 各有一处守卫。
+    """
+    wf = _gate_workflow()
+    agg = _job_block(wf, "static")
+    assert "len(ci.STATIC_CHECKS)" in agg, "聚合那步没拿 STATIC_CHECKS 的条数当基准"
+    assert 'if [ "$got" != "$want" ]' in agg, "聚合那步没在条数对不上时判失败"
+    assert "needs.static-exclusive.result != 'success'" in agg, (
+        "少了分片红就是红那一步 —— 依赖失败会跳过，而跳过不算失败，"
+        "保护规则会一直等")
+    assert "needs.static-shard.result != 'success'" in agg, "同上（另一片）"
+
+    guard = wf.count("基线文件 .github/gate-baseline.txt 不见了")
+    assert guard == 2, (
+        f"基线缺失的守卫有 {guard} 处，应为 2（独占片 / 分片各一处）—— "
+        f"少了就是那一类 job 会把'基线没了'当成'没有基线'放行")
+
+    # 基线棘轮（**只许变短**）本身也要有人钉 —— 否则它自己会被悄悄删掉。
+    # **钉步骤名，不钉那几个字**：段落里那句 `echo "基线只许变短: OK…"` 与注释都含着
+    # 同样几个字，按字面子串判会在步骤被删掉之后**照样绿**（第一版就是这样，
+    # 变异验证时两条棘轮改动一条都没抓住）。
+    assert re.search(r"^\s*- name: 基线只许变短$", agg, re.M), (
+        "少了基线棘轮那一步 —— 往基线里**加**一条就没人拦了，"
+        "而那条路等于把一条新红登记成合法")
+    # 判失败要**带 `::error::`**：变异成一句普通 echo 之后 GitHub 不会红那一步
+    assert 'echo "::error::取对照面失败' in agg, (
+        "棘轮取不到对照面时没判失败（fail closed）—— 静默跳过的棘轮会变成"
+        "一句永远不生效的谎话")
+    assert 'echo "::error::对照面（$base）里读不到' in agg, "同上（读不到基线那一处）"
+    assert "comm -13 old.txt new.txt" in agg, "棘轮没在算'新增'（comm -13 那一列）"
+    assert "norm .github/gate-baseline.txt > new.txt" in agg, "棘轮比的不是树里那份基线"
+    print("      聚合的两条防静默 + 两处基线缺失守卫 + 基线棘轮都在")
+
+
+@test
+def test_gate_container_image_tag_matches_the_recipe():
+    """镜像 tag 写在两处：`gate.yml` 各 job 的 `container.image` 与 `ci-image.yml` 的 `TAG`。
+
+    文件头第四条边界："改镜像要同时抬这两处 —— 抬 tag 是让各 job 用上新镜像的
+    **唯一**动作"。两处不一致的后果是**静默**的：构建推的是新 tag，各 job 拉的还是
+    旧镜像 —— 看起来改了，其实没改（而"看起来配上了、其实没配上"正是最费时间的一类）。
+
+    没拉镜像的那个 job（`static-exclusive`）刻意留在 runner 上，见它自己那段注释；
+    所以这里只比**出现过的** tag 集合。
+    """
+    tags = re.findall(r"image:\s*ghcr\.io/[^:\s]+:(\S+)", _gate_workflow())
+    assert tags, "gate.yml 里一个 `container.image` 都没有"
+    recipe = (ROOT / ".github" / "workflows" / "ci-image.yml").read_text(encoding="utf-8")
+    m = re.search(r'^  TAG: "([^"]+)"', recipe, re.M)
+    assert m, "ci-image.yml 里找不到 `TAG`"
+    assert set(tags) == {m.group(1)}, (
+        f"gate.yml 用 {sorted(set(tags))}，ci-image.yml 构建 {m.group(1)} —— "
+        f"镜像抬了 tag 而各 job 没跟，是静默的")
+    print(f"      镜像 tag 两处一致: {m.group(1)}")
+
+
+@test
+def test_gate_workflow_fails_when_the_budget_disagrees():
+    """判据预算对不上时，门禁必须**真的红** —— 而这一步得在 workflow 里**单独**认出来。
+
+    `ci.py` 在**每条判据都 PASS** 的情况下也可能判失败：有人漏登记一条跳过、或者动了
+    地板。那种失败**不在** `:: [static] … FAIL` 里（没有任何一条套件失败），而各分片
+    "对照基线（新红，单跑确认）"那一步只读那些 FAIL 行 —— 于是**预算不符的片会报绿**，
+    每条套件都写着 PASS。这正是这一整版要堵的形状，落在它自己身上就太讽刺了。
+
+    （落这一版时实测：`gate-skips.txt` 空着，若少了这一步，那几片确实会报绿。）
+
+    两个跑片的 job（`static-exclusive` / `static-shard`）各要一处，且判失败要带
+    `::error::` —— 少一个前缀，GitHub 不会红那一步。
+    """
+    wf = _gate_workflow()
+    steps = re.findall(r"^\s*- name: .*$", wf, re.M)
+    n = sum(1 for s in steps if s.strip() == "- name: 判据预算（#371）")
+    assert n == 2, (
+        f"认预算那一步有 {n} 处，应为 2（独占片 / 分片各一处）—— "
+        f"少了就是预算不符时门禁**报绿**")
+    assert wf.count("grep -q 'fujoci: 判据预算对不上' gate.out") == 2, (
+        "两处都要认 `ci.py` 那句原话（只看退出码分不清预算不对与某条套件红）")
+    assert wf.count('echo "::error::判据预算对不上') == 2, (
+        "两处判失败都要带 `::error::`，否则那一步不会红")
+    print("      判据预算对不上时，两个跑片的 job 都会红")
+
+
+@test
+def test_gate_checks_the_budget_even_when_a_suite_is_red():
+    """有套件红的时候，判据预算**照样要查** —— 否则最需要它的时候它不跑。
+
+    形状（2026-10-15 在 CI 上实测到）：`main()` 原先在"有红就中止"那一步就 `return 1`，
+    而预算那一段写在它**后面** —— 于是任何一条套件红（哪怕那条红早就登记在基线里、
+    根本不算新红）都会把整段跳过。那天的第 5 片有 109 条判据跳过，**一条都没量到**，
+    就因为它有一条基线内的红。
+
+    这里把 `run_static` 换掉，喂它一条红的、一条带**未登记**跳过的，直接跑 `main()`：
+    要求输出里**同时**出现预算那句。
+    """
+    import contextlib
+    import io
+
+    import ci
+
+    red = ci.Result("probe_red_suite", False, "probe: 1/1 通过", 0.1,
+                    0, ("p",), (), 1, False)
+    skip = ci.Result("probe_skip_suite", True, "probe: 1/2 通过, 1 SKIP", 0.1,
+                     1, ("p",), ("test_needs_the_moon",), 2, False)
+    orig_run, orig_argv = ci.run_static, sys.argv
+    out = io.StringIO()
+    try:
+        ci.run_static = lambda *a, **k: [red, skip]
+        sys.argv = ["ci.py", "--static-only"]
+        with contextlib.redirect_stdout(out):
+            rc = ci.main()
+    finally:
+        ci.run_static, sys.argv = orig_run, orig_argv
+    text = out.getvalue()
+    assert "判据预算对不上" in text, (
+        "有套件红的时候预算那一段没跑 —— 跳过表与地板在那一次跑里完全没有约束力。"
+        f"输出尾部：{text[-300:]!r}")
+    assert rc == 1, "有红又有预算问题时，退出码必须是 1"
+    print("      有红的套件时预算照样查（两条一起报出来）")
+
+
+@test
+def test_gate_makes_an_unnamed_skip_loud():
+    """跳过**没有名字**时必须判失败 —— 没名字的跳过对预算完全不可见。
+
+    仓里当时有三个套件没搬上 `loment_suite.run`（`check()` 那一族：`loment_dist_test` /
+    `loment_sign_test` / `loment_eol`），它们打的是 `SKIP <原因>` 这种没名字的写法：
+    `count_skips` 数得到（所以 `N SKIP` 那一栏会报），而**名字**认不出来 —— 于是
+    `gate-skips.txt` 对它们毫无约束力，`CONTRIBUTING.md` 禁的那条路
+    （"给一条既有判据加个环境门让它不跑"）在这三个套件里一直开着。
+
+    这条直接跑 `check_budget`：一条"打了 2 条 SKIP、0 条带名字"的结果必须出问题；
+    反过来"1 条带名字且登记过"不能出问题（否则判据本身在滥杀）。
+    """
+    import ci
+
+    r = ci.Result("probe_unnamed", True, "probe: 1/1 通过", 0.1, 2, ("p",), (), 1, False)
+    bad = ci.check_budget([r], {"probe_unnamed": 1}, set(), in_ci=False)
+    assert any("没有名字" in b for b in bad), f"没名字的跳过没被判失败：{bad}"
+
+    r2 = ci.Result("probe_named", True, "probe: 1/2 通过, 1 SKIP", 0.1,
+                   1, ("p",), ("test_x",), 2, False)
+    assert not ci.check_budget([r2], {"probe_named": 2}, {("probe_named", "test_x")},
+                               in_ci=False), "登记好的跳过不该被判失败"
+    print("      跳过没名字 = 判失败；有名字且登记过 = 放过")
+
+
+@test
+def test_gate_only_reports_a_stale_skip_for_a_suite_it_ran():
+    """「登记了却没跳」的 notice **只能对"这一趟跑过的套件"打**。
+
+    分片跑的时候 `results` 只是这一片的套件。若直接拿 `skips - seen` 去滤，表里所有
+    **不在这一片**的条目都会被点成"这次没跳" —— 于是那句"照 notice 把表削短"会变成
+    **把整张表删光**。实测过：合并 `#382` 之后那一轮（run 38817007229），六个分片的
+    notice 合起来正好覆盖整张 140 条的表；按它削，表会被清空而不是变短。
+
+    这里直接跑 `check_budget`：一个"这一趟没跑的套件"的条目**不许**出现在 notice 里。
+    """
+    import contextlib
+    import io
+
+    import ci
+
+    ran = ci.Result("probe_ran", True, "probe: 1/1 通过", 0.1, 0, ("p",), (), 1, False)
+    skips = {("probe_ran", "test_never_runs"),        # 这一趟跑了 → 该点它
+             ("probe_absent", "test_other")}          # 这一趟没跑 → 不许点它
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        ci.check_budget([ran], {"probe_ran": 1}, skips, in_ci=True)
+    text = out.getvalue()
+    assert "probe_ran test_never_runs" in text, (
+        f"这一趟跑过、而它没跳的条目没被点名（削表就少了依据）：{text!r}")
+    assert "probe_absent" not in text, (
+        "把**这一趟没跑**的套件的条目也点成没跳 —— 照它削表会把整张表删光")
+    print("      只点「跑了却没跳」的条目（没跑的套件不点）")
+
+
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_tools_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_tools_test")
 
 
 if __name__ == "__main__":

@@ -226,6 +226,7 @@ tools/loment_syscalls.py
 tools/loment_manual.py
 tools/ci.py
 tools/loment_invariant_test.py
+tools/loment_suite.py
 tools/vscode_ext.py
 tools/vscode_ext_test.py
 tools/loment_dap.py
