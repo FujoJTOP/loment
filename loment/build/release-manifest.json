@@ -7,7 +7,7 @@
   },
   {
    "path": "tools/lom_audit.py",
-   "sha256": "68f20f03991795eb21f2f3826779eb02960195302a9bb1dbca5212d5cc110a83"
+   "sha256": "8448c2811bc6fba293debcab7df568d5244414e644333b2897afa1e3b6ab53f3"
   },
   {
    "path": "tools/lomc_test.py",
@@ -815,11 +815,11 @@
   },
   {
    "path": "tools/loment_publish.py",
-   "sha256": "438926202bfeb76a07121fda59178b5bbe9dd4c93bd91999e964f10a15cbe6b2"
+   "sha256": "9e868ae7d9b12930c599187e1a19a0911db57974b04db05e2b3fb162bacc84ea"
   },
   {
    "path": "tools/lompicheck_test.py",
-   "sha256": "710adf5538424678378bdf042418ae111febc229711dfcd86f606a6e270c934a"
+   "sha256": "21da4c1de95e4603e78f6a2cb09025c45670875dc5d45d4209c4b7a7eac24828"
   },
   {
    "path": "tools/loment_register_test.py",
@@ -839,7 +839,7 @@
   },
   {
    "path": "tools/loment_tools_test.py",
-   "sha256": "411fbfcd38db79be4d8f65a8749899b297434d2332dd9ddbadca2cf6a14ea835"
+   "sha256": "ecf2bd2537b21071b2f8c5a6b4beb4f33329ba4bfb0abb63dda9af6ca9bd9634"
   },
   {
    "path": "tools/loment_boot.py",
@@ -903,7 +903,7 @@
   },
   {
    "path": "tools/ci.py",
-   "sha256": "dc554b6d334ddf04102e5800ac17e22e4b4f7c07ffffaf3b9c84641dce1a31ac"
+   "sha256": "d19bdd1ca96a5b2bfa3a2b72fc5f84499906568594204736c26bccebab7774cc"
   },
   {
    "path": "tools/loment_invariant_test.py",
@@ -963,7 +963,7 @@
   },
   {
    "path": "tools/loment_audit.py",
-   "sha256": "213a2815cfa567cc98970fb7b459a5a690dea08f78c1bcfa34f7b36296bc8ffa"
+   "sha256": "0d7541bc669228c20e1f026f9fa1bc6301777048c2785fe0c56d33859f24aa39"
   },
   {
    "path": "tools/loment_doc_test.py",
@@ -1123,7 +1123,7 @@
   },
   {
    "path": "tools/loment_rel_test.py",
-   "sha256": "e18a25398d76709c72e74d4f9d5b4a41e336ed08e9b31409d1c1d2c72ba54e7a"
+   "sha256": "cc873c44d9fd5f5b144b45c707eb8b589ae2f4e778a09a5e18559759476caac8"
   },
   {
    "path": "tools/loment_pkg_test.py",
@@ -1327,7 +1327,7 @@
   },
   {
    "path": "loment/tools/lompicheck.lomt",
-   "sha256": "0921333d79765453c7169b63cf5248cae60a75f4ad5911f9153e11b5aea5e0ae"
+   "sha256": "bb7168e4fb9d5c3262fcbc3a6e8170a8b94289e3873eff8051560ad724c8deee"
   },
   {
    "path": "loment/tools/lompkg.lomt",
@@ -1395,7 +1395,7 @@
   },
   {
    "path": "editors/vscode/package.json",
-   "sha256": "4cd2ac57a631d5bee87a8d5e67a3f60d03bde99b2d39cd64b86403d12c91808b"
+   "sha256": "0b8e91241f13a0e03ff487ca0629cb95a1d6d14e740c0534c59292199af55a61"
   },
   {
    "path": "editors/vscode/language-configuration.json",
@@ -1407,7 +1407,7 @@
   },
   {
    "path": "editors/vscode/LICENSE",
-   "sha256": "1ffc3c55d5115fdfc52265d5ca499e081ff0ab1cff527fbbec82b5b4136d6f45"
+   "sha256": "c59612f6ab420c52cffed7913df6850ec47f4b289b21fff796bad80b54fc32e0"
   },
   {
    "path": "editors/vscode/loment-icon.png",
@@ -1415,7 +1415,7 @@
   },
   {
    "path": "editors/vscode/README.md",
-   "sha256": "f9252c0c254f5f6275536eae90ab0182e4879608caca1ad39ac6239e66d4cb3d"
+   "sha256": "34342d249b5dafe8ca3d4557390c45717bfd82c6677316cfa97334ff0c175108"
   },
   {
    "path": "editors/vscode/src/build-cmd.js",
@@ -2059,7 +2059,7 @@
   },
   {
    "path": "docs/160-loment-audit-kit.md",
-   "sha256": "a76418c12ee1322bdedbe1a75b5d7d43f1314f4a821515946786c84323b8ba83"
+   "sha256": "645f866ad318b7c96ad21e4e3e8fecdf992ed8f8f34263dcca410b2d4d9910a9"
   },
   {
    "path": "docs/161-loment-checkout-eol.md",
@@ -2103,7 +2103,7 @@
   },
   {
    "path": "docs/171-loment-publish-outlets.md",
-   "sha256": "20981f3ea2a6add8ae74e774b9ec8e8a94d76c6185ac20f9ec39b0b4f4a9b04f"
+   "sha256": "b511bd23b3895de4a0eb92fab7fe8cf7caa034e644cfa0084f3886095f7839af"
   },
   {
    "path": "docs/172-loment-014-pre1.md",
@@ -2446,8 +2446,16 @@
    "sha256": "7e1e4ac6d937f24a5f21e30c2c338393a5a5ea9f5a196d56093ec94d831b8fbf"
   },
   {
+   "path": "docs/254-the-artifacts-are-not-a-shared-register.md",
+   "sha256": "2d1e62df2fd9cbf74a37f66c7114c6ffec455af3025c1f574b1a8cf44d2fab13"
+  },
+  {
    "path": "docs/255-compiler-capacity-decision.md",
    "sha256": "4c66fac6a48c5181eb7f8fa7b6e6f1338e687143b95e7a46a702c3c3bb996c4e"
+  },
+  {
+   "path": "docs/255-org-loment-lang.md",
+   "sha256": "20ad398ebab275ed3c7f690fdffcb4fa3fe65b85a0ba2773d408adef9f8ddea1"
   },
   {
    "path": "docs/manual/index.md",
