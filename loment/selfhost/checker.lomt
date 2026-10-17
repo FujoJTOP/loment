@@ -3363,7 +3363,36 @@ fn chk_syntax_prepass(src: ptr, t: ptr, out: ptr, o: u32) -> u32 {
         if chk_bad_num_suffix(src, t, i) {
             o = sym_pub(src, t, out, o, E_PARSE, i);
         }
+        // **语句之间少一个 `;`**（`#48`）：`let` 只能**起头** —— 前面是 `{` `}` `;` `if`
+        // `comefor` `else` `=>`。前面是个**值**（标识符 / 字面量 / `)` / `]`）就说明上一句
+        // 没写完；参考实现在解析期报「期望 ;」，而自举侧原先**一声不吭**，于是
+        // `loment check` 退出 0、零输出。
+        // **例外**：`command c` / `foruse py` 之后那个词是**语言名**，紧跟的 `let c {` 是
+        // 外部代码块声明（`loment/extblock/evil.lomt` 就是这一格），不是变量绑定 —— 全仓
+        // 扫过，这是唯一一处。
+        if chk_tok_kind(t, i) == 0 && chk_tok_is(src, t, i, "let") && i > 0 && o == 0 {
+            let ok: u32 = 0;
+            if chk_tok_is(src, t, i - 1, "{") || chk_tok_is(src, t, i - 1, "}")
+                    || chk_tok_is(src, t, i - 1, ";") || chk_tok_is(src, t, i - 1, "if")
+                    || chk_tok_is(src, t, i - 1, "comefor")
+                    || chk_tok_is(src, t, i - 1, "else")
+                    || chk_tok_is(src, t, i - 1, "=>") {
+                ok = 1;
+            }
+            if i >= 2 && (chk_tok_is(src, t, i - 2, "command")
+                          || chk_tok_is(src, t, i - 2, "foruse")) {
+                ok = 1;
+            }
+            if ok == 0 {
+                o = sym_pub(src, t, out, o, E_PARSE, i);
+            }
+        }
         i = i + 1;
+    }
+    // **块没闭合**（`#48`）：参考实现在解析期就报「的块没闭合」；自举侧原先一路数到结束、
+    // 一声不吭 —— `loment check` 于是退出 0、零输出。
+    if depth != 0 && o == 0 {
+        o = sym_pub(src, t, out, o, E_PARSE, i);
     }
     return o;
 }

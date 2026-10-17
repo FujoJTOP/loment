@@ -1129,6 +1129,34 @@ fn on_completion(mem: ptr, src: ptr, arena: ptr, root: u32, id: u32, toks: ptr) 
     let idx: u32 = doc_find(mem, ubuf, un);
     let b: ptr = out_body(mem);
     let o: u32 = resp_prefix(mem, src, arena, id);
+    // `#28`：`p.` 之后要给 `Point` 的**字段**，不是一屏关键字。算不出类型就原样走通用补全 ——
+    // 覆盖了 `b` 里已经写下的那一段（`o` 之后重写即可）。
+    if idx != 4294967295 {
+        let params: u32 = json_get(src, arena, root, "params");
+        let pos: u32 = json_get(src, arena, params, "position");
+        let ln: u32 = json_as_u32(src, arena, json_get(src, arena, pos, "line"));
+        let ch: u32 = json_as_u32(src, arena, json_get(src, arena, pos, "character"));
+        let text: ptr = doc_text(mem, idx);
+        let tn: u32 = doc_txtlen(mem, idx);
+        let rc: u64 = lsc_member_recv(text, ln, ch);
+        if rc != 0 {
+            let nt: u32 = lex(text, tn, toks);
+            let nt: u32 = switchify(mem, text, toks, nt);
+            let tp: u64 = lsc_local_type(text, toks, nt, (rc / 4294967296) as u32,
+                                         (rc % 4294967296) as u32, ln + 1);
+            if tp != 0 {
+                let o2: u32 = json_emit_lit(b, o, "{\"isIncomplete\": false, \"items\": [");
+                let o3: u32 = lsc_emit_fields(mem, text, toks, nt, (tp / 4294967296) as u32,
+                                              (tp % 4294967296) as u32, o2);
+                if o3 != 4294967295 {
+                    let o4: u32 = json_emit_lit(b, o3, "]}}");
+                    out_done(mem, o4);
+                    send_pending(mem);
+                    return 0;
+                }
+            }
+        }
+    }
     let o2: u32 = json_emit_lit(b, o, "{\"isIncomplete\": false, \"items\": [");
     let o3: u32 = emit_words(mem, o2);
     let o4: u32 = emit_syms(mem, o3, idx, toks);
@@ -1227,6 +1255,112 @@ fn emit_syms(mem: ptr, o: u32, idx: u32, toks: ptr) -> u32 {
         o2 = json_emit_u32(b, o2, load32(np, 64));
         o2 = json_emit_lit(b, o2, "}");
         i = i + 1;
+    }
+    return o2;
+}
+
+// ---------------------------------------------------------------- 成员补全（`#28`）
+
+/// 光标前是不是 `recv.` —— 是就返回 `recv` 的跨度 `(起点<<32)|长度`，否则 0。
+///
+/// 认 `p.` 与 `p.x` 的前半截；`p[i].` / `a.b.` 不追（回 0 就走通用补全）。
+/// **宁可少给，不给错的** —— 补错一项比少补一项更打扰人。
+fn lsc_member_recv(text: ptr, line: u32, ch: u32) -> u64 {
+    let lstart: u32 = line_start(text, line);
+    let c: u32 = lstart + ch;
+    let e: u32 = c;
+    while e > lstart && is_wordc(load8(text, e - 1)) {
+        e = e - 1;
+    }
+    if e == 0 || load8(text, e - 1) != 46 {
+        return 0;
+    }
+    let s: u32 = e - 1;
+    let st: u32 = s;
+    while st > lstart && is_wordc(load8(text, st - 1)) {
+        st = st - 1;
+    }
+    if st == s {
+        return 0;
+    }
+    return ((st as u64) * 4294967296) + ((s - st) as u64);
+}
+
+/// `recv` 在**光标之前**被声明成什么类型（`let x: T` 或形参 `x: T`）—— 返回类型名的跨度。
+///
+/// 取**最后**一处：光标在后面的函数里时，那一处通常就在同一个函数体里。这一层**不做**
+/// 作用域分析（真正的块作用域是 `#364` 的事）—— 名字在两处都出现时会取靠后那处。
+fn lsc_local_type(text: ptr, toks: ptr, nt: u32, rs: u32, rl: u32, line: u32) -> u64 {
+    let best: u64 = 0;
+    let i: u32 = 2;
+    while i + 2 < nt {
+        if load32(toks, i * 20) == 0
+                && load32(toks, i * 20 + 8) == rl
+                && same_bytes(ptr_add(text, load32(toks, i * 20 + 4)), ptr_add(text, rs), rl)
+                && byte_is(text, load32(toks, (i + 1) * 20 + 4),
+                           load32(toks, (i + 1) * 20 + 8), ":")
+                && load32(toks, (i + 2) * 20) == 0
+                && load32(toks, i * 20 + 12) < line {
+            // 前面必须是 `let` / `(` / `,` —— 否则 `struct S { x: u32 }` 那种字段声明
+            // 也会被当成"变量 x 的类型"，然后在别处补出它自己的字段（指错地方）。
+            if byte_is(text, load32(toks, (i - 1) * 20 + 4),
+                       load32(toks, (i - 1) * 20 + 8), "let")
+                    || byte_is(text, load32(toks, (i - 1) * 20 + 4),
+                               load32(toks, (i - 1) * 20 + 8), "(")
+                    || byte_is(text, load32(toks, (i - 1) * 20 + 4),
+                               load32(toks, (i - 1) * 20 + 8), ",") {
+                best = ((load32(toks, (i + 2) * 20 + 4) as u64) * 4294967296)
+                       + (load32(toks, (i + 2) * 20 + 8) as u64);
+            }
+        }
+        i = i + 1;
+    }
+    return best;
+}
+
+/// `struct <名字>` 的字段做成补全项，追加到 `o`；**这个名字不是 struct** 就返回
+/// 4294967295（调用方据此回退到通用补全）。
+fn lsc_emit_fields(mem: ptr, text: ptr, toks: ptr, nt: u32, ns: u32, nl: u32,
+                   o: u32) -> u32 {
+    let b: ptr = out_body(mem);
+    let i: u32 = 0;
+    let body: u32 = 4294967295;
+    while i + 2 < nt {
+        if byte_is(text, load32(toks, i * 20 + 4), load32(toks, i * 20 + 8), "struct")
+                && load32(toks, (i + 1) * 20) == 0
+                && load32(toks, (i + 1) * 20 + 8) == nl
+                && same_bytes(ptr_add(text, load32(toks, (i + 1) * 20 + 4)),
+                              ptr_add(text, ns), nl) {
+            body = i + 2;
+            i = nt;
+        } else {
+            i = i + 1;
+        }
+    }
+    if body == 4294967295 {
+        return 4294967295;
+    }
+    // `{` 之后是 `字段 : 类型 ,` 的重复
+    let j: u32 = body + 1;
+    let first: u32 = 1;
+    let o2: u32 = o;
+    while j + 2 < nt && !byte_is(text, load32(toks, j * 20 + 4),
+                                 load32(toks, j * 20 + 8), "}") {
+        if load32(toks, j * 20) == 0
+                && byte_is(text, load32(toks, (j + 1) * 20 + 4),
+                           load32(toks, (j + 1) * 20 + 8), ":") {
+            if first == 0 {
+                o2 = json_emit_lit(b, o2, ", ");
+            }
+            first = 0;
+            o2 = json_emit_lit(b, o2, "{\"label\": ");
+            o2 = json_emit_str(b, o2, ptr_add(text, load32(toks, j * 20 + 4)),
+                               load32(toks, j * 20 + 8));
+            o2 = json_emit_lit(b, o2, ", \"kind\": 5}");
+            j = j + 3;
+        } else {
+            j = j + 1;
+        }
     }
     return o2;
 }

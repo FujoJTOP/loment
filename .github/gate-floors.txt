@@ -42,7 +42,7 @@ loment_channel_test 7
 loment_json_test 4
 loment_pkg_test 3
 loment_lomc_test 4
-loment_lsp_test 11
+loment_lsp_test 12
 loment_elf_test 39
 loment_pe_test 16
 loment_genesis_test 5

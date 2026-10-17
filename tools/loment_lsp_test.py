@@ -623,6 +623,65 @@ FOREIGN_SRC = ("choose write grammar python\n"
                "    return v + 1\n")
 
 
+#: `#28` 的探针源：光标停在 `q.` 后面（`Point` 的两个字段应该回来）。
+MEMBER_SRC = ("module demo\n"
+              "\n"
+              "struct Point {\n"
+              "    x: u32,\n"
+              "    y: u32,\n"
+              "}\n"
+              "\n"
+              "fn area(p: Point) -> u32 {\n"
+              "    return p.x + p.y;\n"
+              "}\n"
+              "\n"
+              "fn _start() {\n"
+              "    let q: Point = Point { x: 1, y: 2 };\n"
+              "    let v: u32 = q.\n"
+              "    syscall4(60, 0, 0, 0);\n"
+              "}\n")
+
+
+def _member_pos() -> tuple[int, int]:
+    """`q.` 之后那个位置（0 起的行列）。"""
+    lines = MEMBER_SRC.splitlines()
+    ln = lines.index("    let v: u32 = q.")
+    return ln, lines[ln].index("q.") + 2
+
+
+@test
+def test_completion_after_a_dot_lists_the_struct_fields():
+    """`#28`：`q.` 之后回来的是 `Point` 的**字段**，不是一屏关键字。
+
+    这条 issue 的另一半（"广告了 `.` / `:` 触发字符却什么都不给"）在更早的一次改动里已经
+    修掉 —— 触发字符不再广告。剩下的正题是**补全本身不看位置**，所以这一条量的是"给了什么"：
+    两个语言服务各判一次，字段集合必须**正好**是 `{x, y}`。
+    """
+    uri = "file:///member.lomt"
+    ln, ch = _member_pos()
+    req = {"jsonrpc": "2.0", "id": 2, "method": "textDocument/completion",
+           "params": {"textDocument": {"uri": uri},
+                      "position": {"line": ln, "character": ch}}}
+    got = PY_LSP.handle(req, {uri: MEMBER_SRC})[0]["result"]["items"]
+    assert {i["label"] for i in got} == {"x", "y"}, got
+    if not (_clang() and _wsl()):
+        print("      自举侧 SKIP: 无 clang/WSL（Python 侧已判）")
+        return
+    msgs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"method": "textDocument/didOpen",
+             "params": {"textDocument": {"uri": uri, "text": MEMBER_SRC}}},
+            dict(req),
+            {"jsonrpc": "2.0", "id": 3, "method": "shutdown", "params": {}},
+            {"method": "exit"}]
+    with tempfile.TemporaryDirectory() as tds:
+        td = Path(tds)
+        frames, rc, err = Batch(_build(td), td).run(msgs)
+    assert rc == 0, f"LSP 退出码 {rc}: {err[-300:]}"
+    items = frames[2]["result"]["items"]
+    assert {i["label"] for i in items} == {"x", "y"}, items
+    print("      两个语言服务：`q.` 之后正好回来 Point 的 {x, y}")
+
+
 @test
 def test_a_foreign_grammar_file_gets_one_info_and_no_fake_errors():
     """`#262`：`choose write grammar python` 的源**编得过**，所以拿 Loment 的规则去查它，
