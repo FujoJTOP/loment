@@ -214,6 +214,25 @@ RULES = [
      "控制流：可能从末尾掉出去",
      "让每条路径都 `return`（末尾补一个，或把收尾写成两支都返回的 `if`）。"
      "走到没有 `return` 的那条路是**非法指令**（SIGILL），不是返回一个默认值。"),
+    # E028 = **LMS 第 1 级检查器**（`docs/253` §5.1）。⚠ **码号从 E028 起**：本文初稿
+    # 写的 E024–E026 是按**旧树**读的，而 origin/main 上那三个码已被命令声明那批占了
+    # （`docs/223`），现行最高是 E027。
+    ("E028", r"越过定长数组的界",
+     "越界：字面量下标越过定长数组的界",
+     "这个下标是**字面量**，而数组的长度是**编译期已知**的 —— 所以「越界」在这里是一个"
+     "**编译期事实**，不是运行期的一种可能（`docs/253` §5.1）。改下标，或把数组声明改长。"
+     "⚠ `lms` 关着时这一条**不发** —— 那时它要么是 UB（走 clang），要么静默踩相邻字节"
+     "（走 `lomelf`），正是 `docs/253` §4.4 实测出来的那一格。"),
+    # E029 = **LMS 第 1 级检查器**（`docs/253` §5.1）：**用完再放**（use-after-free）。
+    # 与 E006（已被移动）**分开**：移走是**所有权**的事，释放是**合法性**的事 ——
+    # 两回事、两条诊断。⚠ `docs/210` §2.8 给 `free` 加的那五条检查管的是 **`free` 自己
+    # 那一端**（这块是不是真块、有没有重复释放），管不了"**之后再用**"。
+    ("E029", r"指向的块已经被 `free`",
+     "用完再放：这块内存已经被 `free`，不能再用",
+     "`free(p)` 之后 `p` 指向的块已经还回去了，再用它就是 use-after-free —— "
+     "而它**不一定会崩**：块可能还留着旧字节、直到被复用（`docs/253` §5.1）。"
+     "要么别 `free`（让 LGC 管），要么在 `free` 之后把 `p` 重新赋值或不再碰它。"
+     "⚠ `lms` 关着时这一条**不发**。"),
     ("E019", r"期望 .*得到|期望表达式|非法字符|顶层只允许|未知顶层关键字|"
              r"pub 之后需要一项声明|数组长度必须为正|第一个参数必须是 self|"
              r"`set choose` 后面要跟一个块|的块没闭合",
@@ -256,13 +275,15 @@ RULES = [
      "只有声明而没有 `command_main`，生成的入口就没有东西可调（链接时才炸，所以在这里拒）；"
      "签名不对则生成的入口调不动它 —— 入口固定是 "
      "`fn command_main(argv: ptr, argc: u32) -> u32`（`docs/223` §3.2）。"),
-
-    # ---- E028..E030（issue #8，2026-10-16）：**没有源码位置的失败**。
+    # ---- E030..E032（issue #8，2026-10-16）：**没有源码位置的失败**。
     #
     # 上面那些码全是"源码里哪一行写错了"。这三条不是 —— 它们说的是"**文件**／**产物**
     # 这一层出的事"：读不到输入、写不了输出、这台编译器装不下这个单元。所以它们的记录
     # `line` 是 **0**（= 没有位置，`lomenterr` 的 `num_raw` 就是这个口径），渲染器据此
     # **不印 `:行号`**、也不去源里切那两行。
+    #
+    # ⚠ **号是 30 起，不是 28**：E028/E029 已经被 LMS 第 1 级检查器占了（`docs/253` §5.1，
+    # 定长数组越界 / use-after-free）。合并 main 时撞的号，按"已落地的那份不改"顺延。
     #
     # **为什么各占一个码、而不是并进某一条**：按本仓那条老规矩 —— **码按修法分**。
     # 这三件事用户要做的**动作完全不同**：查路径 / 建目录或换 `-o` / 把单元拆小。
@@ -274,21 +295,22 @@ RULES = [
     # **它们与参考实现的关系**：参考实现在这几处**一句话都没有** —— 读不到文件是没接住的
     # `FileNotFoundError`，写不了输出是没接住的 `OSError`，两者都直接甩 Python 栈。自举侧
     # 一直在报，只是报的话给不了用户。这一轮两边都补：自举侧吐结构化记录，参考侧改吐一句话。
-    ("E028", r"cannot read |cannot open |打不开输入文件|读不了输入文件|是目录, 不是源文件"
+    ("E030", r"cannot read |cannot open |打不开输入文件|读不了输入文件|是目录, 不是源文件"
              r"|入口是空文件",
      "输入文件读不了",
      "编译器要读的那份源没拿到：可能是路径不存在、是个目录、没有读权限，或者是**空文件**。"
      "这与\"你的源码写错了\"是两件事 —— 源码一个字符都还没被看，所以没有行号可指。"),
-    ("E029", r"cannot write the output file|写不了输出文件|写不了输出",
+    ("E031", r"cannot write the output file|写不了输出文件|写不了输出",
      "输出文件写不了",
      "链接器把产物写到你给的那个 `-o` 路径上时失败了。**最常见的起因是那个目录不存在** —— "
      "`loment build a.lomt -o build/a` 而 `build/` 还没建。也与\"你的源码写错了\"无关。"),
-    ("E030", r"unit is too large|out of memory|单元太大|表容量|does not fit in the input buffer"
+    ("E032", r"unit is too large|out of memory|单元太大|表容量|does not fit in the input buffer"
              r"|超过 4 MiB 上限",
      "这个单元超出编译器装得下的量",
      "这套工具链是**自举**的：词法缓冲、符号表、codegen 表、回填表都是**固定容量**"
      "（它们开在程序映像里，而不是按需增长）。单元大过那些格就报这一条。"
      "它不是\"你的源码错了\" —— 同一份源码换个更小的形状就编得过。"),
+
 ]
 
 
@@ -334,9 +356,12 @@ ASCII_ONE_LINER: dict[int, str] = {
     25: "two process entries: `_start` and `command_main`",
     26: "a command declaration and `command_main` come in pairs (one missing, or a wrong signature)",
     27: "a non-() function may fall off the end of its body - every path must return",
-    28: "cannot read the input file - missing, a directory, unreadable, or empty",
-    29: "cannot write the output file - its directory is missing, or it is not writable",
-    30: "the unit is too large for this compiler's fixed buffers - split the facade",
+    28: "index past the end of a fixed-size array - the index is a literal and the length "
+        "is known at compile time",
+    30: "cannot read the input file - missing, a directory, unreadable, or empty",
+    31: "cannot write the output file - its directory is missing, or it is not writable",
+    32: "the unit is too large for this compiler's fixed buffers - split the facade",
+    29: "use after free - this block was already passed to `free`",
 }
 
 
@@ -378,9 +403,11 @@ TITLE_EN: dict[int, str] = {
     25: "two process entries",
     26: "`command_main` without a matching declaration",
     27: "control flow: this function may fall off the end of its body",
-    28: "cannot read this input file",
-    29: "cannot write the output file",
-    30: "this unit is too large for the compiler",
+    28: "index past the end of a fixed-size array",
+    30: "cannot read this input file",
+    31: "cannot write the output file",
+    32: "this unit is too large for the compiler",
+    29: "use after free",
 }
 
 
@@ -810,6 +837,38 @@ CARDS: dict[int, Card] = {
         no="末尾是 `while` / `for`（会正常结束）、末尾是表达式语句、末尾是**没有** `else` 的 `if`",
     ),
     28: Card(
+        what="一个字面量下标越过了**定长数组**的界（声明是 `[u32; 4]`，却写了 `a[10]`）。",
+        why="这里两边的数**都是编译期已知的** —— 所以它不是一个「运行期的一种可能」，"
+            "而是**一个编译期事实**（`docs/253` §5.1）。`lms` 关着时它有两种下场，而且"
+            "**都不报错**：走 clang 是 UB（`docs/253` §4.4 实测过，IR 里直接长出 "
+            "`getelementptr inbounds … i32 10`），走仓内 `lomelf` 是静默踩相邻字节。"
+            "能在这里说死，是 `lms` 第 1 级唯一要做的事。",
+        fixes=(
+            "把下标改回 `0..len-1` 之内。",
+            "数组确实该更长的话，把**声明**改长（`[u32; 16]` 之类）。",
+            "下标是**算出来的**（不是字面量）时这条发不出来 —— 那种情况改用定长数组配"
+            "一个显式的 `if` 判界。",
+        ),
+        yes="下标是字面量、且落在界内；下标是变量或表达式（这条不发）",
+        no="`lms` 关着（那时不发 —— 下场的两种可能见 `why`）",
+    ),
+    29: Card(
+        what="一个变量指向的块**已经被 `free`**，之后又用到了它。",
+        why="`free(p)` 之后那块内存已经还回分配器，再用 `p` 就是 use-after-free。"
+            "它**不一定会崩** —— 块可能还留着旧字节，一直到最后被下一次 `alloc` 复用"
+            "（`docs/253` §5.1），所以症状是那种「上线很久、某次分配把它盖掉」才炸的问题。"
+            "`docs/210` §2.8 给 `free` 加的那五条检查管的是 **`free` 自己那一端**"
+            "（是不是真块、有没有重复释放），管不了「之后再用」。与 E006 分开："
+            "移走是**所有权**的事，释放是**合法性**的事。",
+        fixes=(
+            "别 `free` —— 让 LGC 管这块（`gc_auto` / `gc_auto_alpha` 下 `alloc` 发的块"
+            "本来就由回收器管）。",
+            "确实要提前还：`free(p)` 之后把 `p` 重新赋成新块，别再用旧值。",
+            "把 `free` 挪到**最后一个使用点之后** —— 也就是 `p` 的生命周期真结束的地方。",
+        ),
+        yes="`free(p)` 之后没有再读/写 `p`；`free` 之后 `p` 被重新赋值",
+        no="`free` 之前的使用；`free` 之后重新赋值再使用",
+    ),    30: Card(
         what="编译器要读的那份源文件没拿到。**还没有看源码一个字符** —— 所以这条没有行号。",
         why="装载是编译的第一趟，而这一条发生在它之前。「文件读不到」与「文件里的源码写错了」"
             "是两件不同的事：前者无论如何改源码都解决不了，所以它单独一个码、"
@@ -824,7 +883,7 @@ CARDS: dict[int, Card] = {
         yes="路径存在、是普通文件、非空、可读",
         no="写错的路径；目录；0 字节的文件；没有读权限的文件",
     ),
-    29: Card(
+    31: Card(
         what="链接器把产物写到你给的 `-o` 路径上时失败了。",
         why="产物是编译的**最后一步**，所以这条与源码无关 —— 源码全对也可能写不出去。"
             "最常见的原因是**父目录不存在**：`loment build a.lomt -o out/a` 而 `out/` 还没建。"
@@ -838,7 +897,7 @@ CARDS: dict[int, Card] = {
         yes="`-o` 的父目录存在且可写",
         no="不存在的目录；只读目录；正在运行的 exe 占着的路径",
     ),
-    30: Card(
+    32: Card(
         what="这个单元超出了这套编译器**固定容量**的那几张表（词法缓冲 / 符号表 / "
              "codegen 表 / 回填表）。",
         why="这套工具链是**自举**的，没有优化器也没有动态容器：那几张表开在程序映像里，"
@@ -854,6 +913,7 @@ CARDS: dict[int, Card] = {
         yes="单元在词法缓冲 / 符号表 / codegen 表 / 回填表的容量之内",
         no="单个源文件里塞一整个库；几百个 `use`；几百个顶层声明",
     ),
+
 }
 
 
@@ -1451,6 +1511,49 @@ CARDS_EN: dict[int, Card] = {
            "statement, or an `if` **without** an `else`",
     ),
     28: Card(
+        what="A literal index runs past the end of a **fixed-size array** (declared "
+             "`[u32; 4]`, written `a[10]`).",
+        why="Both numbers here are **known at compile time**, so this is not \"one "
+            "possible runtime outcome\" - it is **a compile-time fact** (`docs/253` "
+            "section 5.1). With `lms` off it has two endings and **neither reports "
+            "anything**: through clang it is UB (measured in `docs/253` section 4.4 - "
+            "the IR literally grows a `getelementptr inbounds ... i32 10`), and through "
+            "the in-repo `lomelf` it silently writes into the neighbouring bytes. Being "
+            "able to say it here is the whole job of `lms` level 1.",
+        fixes=(
+            "Put the index back inside `0..len-1`.",
+            "If the array really should be longer, lengthen the **declaration** "
+            "(`[u32; 16]`).",
+            "When the index is **computed** rather than a literal this rule cannot fire - "
+            "use a fixed-size array plus an explicit `if` bound check instead.",
+        ),
+        yes="the index is a literal and is inside the bounds; the index is a variable or "
+            "an expression (this rule stays silent)",
+        no="`lms` is off (nothing is reported - see `why` for the two endings)",
+    ),
+    29: Card(
+        what="A variable points at a block that **was already passed to `free`**, and is "
+             "used again afterwards.",
+        why="After `free(p)` that block has gone back to the allocator, so using `p` again "
+            "is a use-after-free. It **does not necessarily crash** - the block may keep "
+            "its old bytes until some later `alloc` reuses it (`docs/253` section 5.1), "
+            "so it is the kind of bug that ships quietly and then blows up when an "
+            "allocation finally lands on it. The five checks `free` gained in `docs/210` "
+            "section 2.8 cover **`free`'s own end** (is this really a block, was it "
+            "already freed); they cannot cover \"used again afterwards\". Separate from "
+            "E006: moving is an **ownership** matter, freeing is a **legality** one.",
+        fixes=(
+            "Do not `free` it - let LGC own the block (under `gc_auto` / `gc_auto_alpha` "
+            "the blocks `alloc` hands out are the collector's anyway).",
+            "If you really must release early: after `free(p)` assign `p` a new block and "
+            "stop using the old value.",
+            "Move the `free` to **after the last use** - i.e. where `p`'s lifetime "
+            "actually ends.",
+        ),
+        yes="`p` is not read or written after `free(p)`; `p` is reassigned after the "
+            "`free`",
+        no="use before the `free`; reassignment followed by use after the `free`",
+    ),    30: Card(
         what="The compiler did not get the source file it was told to read. **Not one "
              "character of the source has been looked at** - so this one has no line number.",
         why="Loading is the compiler's first pass, and this happens before it. \"The file "
@@ -1471,7 +1574,7 @@ CARDS_EN: dict[int, Card] = {
         yes="the path exists, is a regular file, is not empty, and is readable",
         no="a misspelt path; a directory; a 0-byte file; a file you may not read",
     ),
-    29: Card(
+    31: Card(
         what="The linker failed to write the artifact to the `-o` path you gave it.",
         why="The artifact is the compiler's **last step**, so this has nothing to do with "
             "your source - the source can be perfect and the write still fail. The most "
@@ -1491,7 +1594,7 @@ CARDS_EN: dict[int, Card] = {
         yes="the parent directory of `-o` exists and is writable",
         no="a directory that does not exist; a read-only directory; a path held by a running exe",
     ),
-    30: Card(
+    32: Card(
         what="This unit outgrew the compiler's **fixed-capacity** tables (the lexer buffer, "
              "the symbol table, the codegen table, the backfill table).",
         why="This toolchain is **self-hosted**: it has no optimiser and no dynamic "
@@ -1513,6 +1616,7 @@ CARDS_EN: dict[int, Card] = {
         no="a whole library in one source file; hundreds of `use`; hundreds of top-level "
            "declarations",
     ),
+
 }
 
 

@@ -32,7 +32,15 @@ import struct
 import sys
 from pathlib import Path
 
-ELF_TEXT_VADDR, ELF_DATA_VADDR = 0x400000, 0x600000
+#: **文本段的容量**（`docs/253`，2026-10-16）。与自举侧 `lomelf.lomt` 的 `OUT_CAP`
+#: **同一个数** —— 那边就是代码缓冲的大小。数据段钉在它后面（见 `ELF_DATA_VADDR`），
+#: 所以这个数一旦被文本超过，数据段就会被压住（**不报错**，产物一启动就段错误）。
+#: 越过它的情形由 `compile_ll` 末尾那条判据点名拒 —— 原先没有这条，地板是**没标注的**。
+TEXT_CAP = 4194304                 # 4 MiB = 0x400000
+ELF_TEXT_VADDR = 0x400000
+#: 数据段在**代码缓冲之后**：文本段可用 `0x400000..0x800000`，正好是 `TEXT_CAP`。
+#: 原先钉 `0x600000`（2 MiB 窗口），实测 2026-10-15 `main` 自己已占 99.4%。
+ELF_DATA_VADDR = ELF_TEXT_VADDR + TEXT_CAP
 TEXT_VADDR, DATA_VADDR = ELF_TEXT_VADDR, ELF_DATA_VADDR   # 当前目标的活动值, PE 目标会改
 SCALAR_SIZE = {"i1": 1, "i8": 1, "i16": 2, "i32": 4, "i64": 8, "ptr": 8}
 
@@ -5444,6 +5452,17 @@ def compile_ll(text: str, objects: list | None = None,
                 struct.pack_into("<I", data, site, val & 0xFFFFFFFF)
             applied += 1
     text = em.asm.finalize()
+    # **文本段的容量是明写的**（`docs/253`）：数据段钉在 `TEXT_VADDR + TEXT_CAP`，
+    # 所以文本一旦超过 `TEXT_CAP` 就会盖到数据段上 —— 而**盖上去不报错**，产物一启动就
+    # 段错误（0 字节输出），看起来像编译器坏了。实测 2026-10-15：`main` 自己已占
+    # 2 084 579 / 2 097 152（99.4%），任何一笔中等改动都会顶破。所以这里**点名拒**。
+    # 自举侧 `lomelf.lomt` 同一处、同一个数（那边是 `OUT_CAP`）。
+    if len(text) > TEXT_CAP:
+        raise Unsupported(
+            f"文本段 {len(text)} 字节超过 {TEXT_CAP} —— 链接器把数据段钉在"
+            f" `TEXT_VADDR + {TEXT_CAP}`，再长就会盖住数据段，产物一跑就段错误。"
+            f" 抬 `loment/tools/lomelf.lomt` 的 `OUT_CAP`、和 `tools/lomelf.py` 的"
+            f" `TEXT_CAP` / `ELF_DATA_VADDR`（两个实现同一个数）")
     entry = em.asm.labels["__entry"]
     return build_elf(text, bytes(data), bss, entry), {
         "text": len(text), "data": len(data), "bss": bss, "entry": entry,

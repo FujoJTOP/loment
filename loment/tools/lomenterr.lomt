@@ -1108,7 +1108,7 @@ fn h_loc(ctx: ptr, o: u32, line: u32, col: u32, w: u32, plen: u32) -> u32 {
         k = k + 1;
     }
     // **`line == 0` = 编译器没有位置可指**（文件读不到 / 写不出去 / 单元太大 ——
-    // `E028`..`E030` 那几条）。那时**连冒号都不印** —— `file:` 后面空着的样子比
+    // `E030`..`E032` 那几条）。那时**连冒号都不印** —— `file:` 后面空着的样子比
     // `file:0` 更像坏了。与本文件 `h_snip` 的 `col == 0` 同一条口径：
     // **只印确实知道的那部分**。
     if line > 0 {
@@ -1955,7 +1955,7 @@ fn rec_short(ctx: ptr, line: u32, col: u32, mlen: u32, plen: u32, clen: u32) -> 
         o = em_byte(ctx, o, load8(ctx, C_PATH + k));
         k = k + 1;
     }
-    // `line == 0` = 编译器没有位置（`E028`..`E030`：文件读不到 / 写不出去 / 单元太大）。
+    // `line == 0` = 编译器没有位置（`E030`..`E032`：文件读不到 / 写不出去 / 单元太大）。
     // 那时只印文件名 —— `x.lomt:0: error[...]` 里那个 0 会被编辑器当成第 0 行。
     // 与 `h_loc` 同一条口径。
     if line > 0 {
@@ -2813,10 +2813,10 @@ fn _start() -> u32 {
                         let o: u32 = h_head(ctx, 0, cnum, clen);
                         let o2: u32 = h_loc(ctx, o, line, col, w, plen);
                         let o3: u32 = o2;
-                        // **没有位置就没有源码那一段**（`E028`..`E030` 全是这一类）。
+                        // **没有位置就没有源码那一段**（`E030`..`E032` 全是这一类）。
                         // 三条都不要：不去源里找第 0 行 —— 那会印 "(no such line in the
                         // source file)"，读者会以为源码有问题；也不印 "(cannot read the
-                        // source file)" —— `E029`/`E030` 的 `file` 正是一个**不该**被当成
+                        // source file)" —— `E031`/`E032` 的 `file` 正是一个**不该**被当成
                         // 源码读的产物路径。位置确实知道时才去源里切。
                         if line > 0 {
                             if have == 1 {
