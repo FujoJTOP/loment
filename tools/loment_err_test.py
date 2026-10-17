@@ -28,6 +28,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import loment  # noqa: E402  (build_lomenterr: 报错器在这里编一次, 全测复用)
 import lomentc  # noqa: E402
 
@@ -1670,18 +1671,7 @@ def test_err_twin_selfhost_compiles():
 def main() -> int:
     print(f"loment_err_test: {len(TESTS)} 条\n")
     bad = 0
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except AssertionError as e:
-            bad += 1
-            print(f"  FAIL  {name}: {e}")
-        except Exception as e:                                   # noqa: BLE001
-            bad += 1
-            print(f"  ERR   {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_err_test: {len(TESTS) - bad}/{len(TESTS)} 通过")
-    return 1 if bad else 0
+    return loment_suite.run(TESTS, "loment_err_test")
 
 
 if __name__ == "__main__":

@@ -34,6 +34,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomentc           # noqa: E402
 import lomelf            # noqa: E402
 import loment_ffi_test as ffitest   # noqa: E402  (共用 FFI 那份 C 夹具与 Loment 源码)
@@ -2319,6 +2320,7 @@ _FREE_LIST_SRC = (
     "    syscall4(60, 3, 0, 0);\n}\n")
 
 
+@test
 def test_a_collection_keeps_the_free_list():
     """一次收集**不许**把当前空闲块丢掉（`#366`）—— 两档各一只，退出码 7 = 拿回了那片区域。
 
@@ -2478,16 +2480,7 @@ def test_the_runtime_guard_does_not_need_a_windows_binary():
 
 
 def main() -> int:
-    failed = []
-    for name, fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {name}")
-        except Exception as e:  # noqa: BLE001
-            failed.append((name, e))
-            print(f"  FAIL  {name}: {type(e).__name__}: {e}")
-    print(f"\nloment_elf_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-    return 1 if failed else 0
+    return loment_suite.run(TESTS, "loment_elf_test")
 
 
 if __name__ == "__main__":
