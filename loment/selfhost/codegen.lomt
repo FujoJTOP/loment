@@ -5311,7 +5311,9 @@ fn emit_heap(s: ptr, out: ptr, lms: u32) -> u32 {
 ;
 ; 三条规则，各有它要挡的东西：
 ;   * **第一次适配 + 拆分**：空闲块大到有余（余量 ≥ 16）就切一块出来，余下的还回链上。
-;     不拆的话一次大分配会把整个链表吃光。
+;     不拆的话一次大分配会把整个链表吃光。**记录尺寸永远等于这块的实际跨度** ——
+;     不拆的时候**不把 size 改小**（余量不足 16 字节，改小它换不来可用空间，
+;     只让按 size 走的遍历掉进块内部，`FujoJTOP/loment#368`）。
 ;   * **地址序**：链表按地址升序，`free` 线性找插入点。顺序让「前沿回退」可判。
 ;   * **前沿回退**：释放的那一块**正好顶到 bump 前沿**时，直接把前沿退回去。
 ;     这是 LIFO（分配—释放—再分配）不涨内存的原因；没有它，`free` 只是把块挂起来，
@@ -5361,14 +5363,25 @@ take:
   %rest = load i32, ptr %tpp
   br i1 %cansplit, label %split, label %nosplit
 split:
+  ; **块的记录尺寸只在「真拆了」的时候才改小**（`FujoJTOP/loment#368`）——
+  ; 原来这句在 `taken:` 里无条件执行，于是**不拆分**那条路（余量 < 16 字节，
+  ; 块还是那么大，只是没切）也会把 size 改成 `need`。后果有两层：
+  ;   * 按 `size` 往前走的每一趟（`__loment_alloc` 的首次适配、`__loment_sweep`、
+  ;     `__loment_propagate`、以及收集器的两步）都会从 `cur + need` 继续，
+  ;     而那已经不是下一块了 —— 它掉进**块的内部**，把载荷当尺寸读；
+  ;   * 载荷里的字节多半是 0 ⇒ `i += 0` ⇒ **死循环**（实测：2 分钟不返回）。
+  ; 判据：`loment_elf_test::test_a_reused_block_keeps_its_recorded_extent`。
   %so = add i32 %cur, %need
   %spp = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %so
   store i32 %slack, ptr %spp
   %so4 = add i32 %so, 4
   %spp4 = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %so4
   store i32 %rest, ptr %spp4
+  store i32 %need, ptr %hp
   br label %relink
 nosplit:
+  ; 不拆：**尺寸原样留着**（就是 `%bsz`）—— 那几十字节的余量仍然在块里，
+  ; 只是不足以另立一块。改小它不会让那点余量变得可用，只会让遍历失步。
   br label %relink
 relink:
   %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
@@ -5383,7 +5396,6 @@ setprev:
   store i32 %newhead, ptr %ppp
   br label %taken
 taken:
-  store i32 %need, ptr %hp
   %t4b = add i32 %cur, 4
   %tppb = getelementptr [65536 x i8], ptr @__loment_heap, i32 0, i32 %t4b
   store i32 -1, ptr %tppb
@@ -5644,14 +5656,18 @@ take:
   %rest = load i32, ptr %tpp
   br i1 %cansplit, label %split, label %nosplit
 split:
+  ; **块的记录尺寸只在「真拆了」的时候才改小**（`FujoJTOP/loment#368`）—— 理由见
+  ; `_IR_HEAP` 同一条（这段与那一份逐字同源，只换 arena 的来处与寻址）。
   %so = add i32 %cur, %need
   %spp = getelementptr i8, ptr %hb, i32 %so
   store i32 %slack, ptr %spp
   %so4 = add i32 %so, 4
   %spp4 = getelementptr i8, ptr %hb, i32 %so4
   store i32 %rest, ptr %spp4
+  store i32 %need, ptr %hp
   br label %relink
 nosplit:
+  ; 不拆：**尺寸原样留着**（就是 `%bsz`）。
   br label %relink
 relink:
   %newhead = phi i32 [ %so, %split ], [ %rest, %nosplit ]
@@ -5666,7 +5682,6 @@ setprev:
   store i32 %newhead, ptr %ppp
   br label %taken
 taken:
-  store i32 %need, ptr %hp
   %t4b = add i32 %cur, 4
   %tppb = getelementptr i8, ptr %hb, i32 %t4b
   store i32 -1, ptr %tppb
@@ -6409,8 +6424,7 @@ done:
 }
 
 ; **全量回收的四趟**：清标记 → 扫根 → 传播到定点 → 清扫，一趟不少（`docs/210` §2.4）。
-");
-    let _r2: u32 = emit_str(s, out, "define internal void @__loment_collect() {
+define internal void @__loment_collect() {
 entry:
   %hb = call ptr @__loment_arena()
   br label %cl
@@ -6740,7 +6754,7 @@ fn root_count(s: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
     let j: u32 = 0;
     while j < nl {
         if root_ty_tok(src, toks, load32(s, CG_LOCAL + j * 8 + 4)) == 1 {
-            n = n + 1;
+            n = n + root_slots(s, src, toks, load32(s, CG_LOCAL + j * 8));
         }
         j = j + 1;
     }
@@ -6790,6 +6804,67 @@ fn emit_root_slot(s: ptr, out: ptr, src: ptr, toks: ptr, n0: u32, c: u32,
     return emit_str(s, out, "\n");
 }
 
+/// 这个名字是不是"L0 提升过"的：是就回它的**字节数**，不是回 0。
+///
+/// **两道闸与 `emit_l0_buf` 同一份**：非 alpha 档（槽 572 为 0）L0 表根本不建 —— 而
+/// `l0_size` 自己不看旗标，所以这里必须看；合成的名字（≥ 2^31）也不是提升对象。
+fn l0_bytes(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    if load32(s, 572) == 0 || nm >= 2147483648 {
+        return 0;
+    }
+    return l0_size(s, src, toks, nm);
+}
+
+/// 这个名字占几格根表：**L0 提升过的缓冲按它的字数算**（`FujoJTOP/loment#362`），其余一格。
+fn root_slots(s: ptr, src: ptr, toks: ptr, nm: u32) -> u32 {
+    let n: u32 = l0_bytes(s, src, toks, nm);
+    if n == 0 {
+        return 1;
+    }
+    return (n + 7) / 8;
+}
+
+/// 登记 L0 缓冲里的**一个字**（`FujoJTOP/loment#362`）：那一格存的是**栈**地址
+/// （`%NAME.buf + 8j` 的地址），根扫读它就知道缓冲里那个字像不像堆内地址。
+/// 三条 temp 的次序与 `emit_root_slot` 一致（`idx` / `gp` / `bp` / `v`）。
+fn emit_root_word(s: ptr, out: ptr, src: ptr, toks: ptr, n0: u32, c: u32,
+                  nm: u32, j: u32, kw: u32) -> u32 {
+    let idx: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, idx);
+    emit_str(s, out, " = add i32 ");
+    emit_temp_ref(s, out, n0);
+    emit_str(s, out, ", ");
+    emit_dec(s, out, c);
+    emit_str(s, out, "\n");
+    let gp: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, gp);
+    emit_str(s, out, " = getelementptr [1024 x i64], ptr @__loment_roots, i32 0, i32 ");
+    emit_temp_ref(s, out, idx);
+    emit_str(s, out, "\n");
+    let bp: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, bp);
+    emit_str(s, out, " = getelementptr [");
+    emit_dec(s, out, kw);
+    emit_str(s, out, " x i64], ptr %");
+    emit_local_name(s, out, src, toks, nm);
+    emit_str(s, out, ".buf, i32 0, i32 ");
+    emit_dec(s, out, j);
+    emit_str(s, out, "\n");
+    let v: u32 = alloc_temp(s);
+    emit_str(s, out, "  ");
+    emit_temp_ref(s, out, v);
+    emit_str(s, out, " = ptrtoint ptr ");
+    emit_temp_ref(s, out, bp);
+    emit_str(s, out, " to i64\n  store i64 ");
+    emit_temp_ref(s, out, v);
+    emit_str(s, out, ", ptr ");
+    emit_temp_ref(s, out, gp);
+    return emit_str(s, out, "\n");
+}
+
 /// `gc_auto`：把本帧"持有指针的槽"登记进根表（`docs/210` §4.2）。表满
 /// （1024 格，递归深了才可能）**点名拒**，不静默写穿 —— 溢出分支与参考侧同形。
 ///
@@ -6817,8 +6892,22 @@ fn roots_push(s: ptr, out: ptr, src: ptr, toks: ptr, k: u32, nl: u32) -> u32 {
     let j: u32 = 0;
     while j < nl {
         if root_ty_tok(src, toks, load32(s, CG_LOCAL + j * 8 + 4)) == 1 {
-            emit_root_slot(s, out, src, toks, n0, c, load32(s, CG_LOCAL + j * 8), 0);
-            c = c + 1;
+            let lnm: u32 = load32(s, CG_LOCAL + j * 8);
+            let lsz: u32 = l0_bytes(s, src, toks, lnm);
+            if lsz == 0 {
+                emit_root_slot(s, out, src, toks, n0, c, lnm, 0);
+                c = c + 1;
+            } else {
+                // **L0 提升的缓冲：一个字一格**（`FujoJTOP/loment#362`）。槽里存的是栈地址，
+                // 根扫拿它减堆基址得到巨大的无符号数 ⇒ 整块缓冲从来没人扫。
+                let kw: u32 = (lsz + 7) / 8;
+                let w: u32 = 0;
+                while w < kw {
+                    emit_root_word(s, out, src, toks, n0, c, lnm, w, kw);
+                    c = c + 1;
+                    w = w + 1;
+                }
+            }
         }
         j = j + 1;
     }
