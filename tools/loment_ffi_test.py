@@ -32,6 +32,7 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import loment_suite  # noqa: E402
 import lomelf                                                       # noqa: E402
 import lomentc                                                      # noqa: E402
 
@@ -1535,20 +1536,7 @@ def test_a_real_static_library_round_trips():
 
 
 def main() -> int:
-    failed = []
-    for fn in TESTS:
-        try:
-            fn()
-            print(f"  PASS  {fn.__name__}")
-        except Exception as e:                                      # noqa: BLE001
-            failed.append((fn.__name__, e))
-            print(f"  FAIL  {fn.__name__}: {type(e).__name__}: {e}")
-    print()
-    if failed:
-        print(f"loment_ffi_test: {len(TESTS) - len(failed)}/{len(TESTS)} 通过")
-        return 1
-    print(f"loment_ffi_test: {len(TESTS)}/{len(TESTS)} 通过")
-    return 0
+    return loment_suite.run(TESTS, "loment_ffi_test")
 
 
 if __name__ == "__main__":
