@@ -1,6 +1,6 @@
 # Loment 语言手册
 
-> 编译器版本戳: `lomentc-bc368358eeb3`（由 tools/loment_manual.py 生成）
+> 编译器版本戳: `lomentc-38767f0181cf`（由 tools/loment_manual.py 生成）
 
 ## 规范
 

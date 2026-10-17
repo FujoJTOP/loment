@@ -1218,6 +1218,65 @@ def test_p4_guard_bounds():
 
 
 @test
+def test_e028_literal_index_over_a_fixed_array():
+    """LMS 第 1 级（`docs/253` §5.1）：`lms` 开着时，**字面量下标越过定长数组的界**
+    是**编译期**的一个诊断，不是运行期的一种可能。
+
+    这一对是这一格**买到的全部**：同一份源，加不加 `choose lms_open`，判决相反 ——
+    而"关着"的那一半不是"没报错"而已，它是 `docs/253` §4.4 **实测**出来的那一格：
+    发出来的是 `getelementptr inbounds [4 x i32], ptr %a.addr, i32 0, i32 10`，
+    而 `inbounds` 在 LLVM IR 里**恰是"越界即 UB"的标记**（走 `lomelf` 则静默踩相邻字节）。
+    """
+    body = "fn f() -> u32 { let a: [u32; 4] = [1, 2, 3, 4]; let x: u32 = a[10]; return x; }\n"
+    # 关着（默认）：**一个字的检查都没有** —— 这是今天的形状（§4.4 那一格）
+    off = "module m\n" + body
+    assert errs(off) == [], errs(off)
+    # 开着：编译期拒
+    on = "module m\nchoose lms_open\n" + body
+    assert any("E028" in x for x in errs(on)), errs(on)
+    # **边界**：正好在界内的那个下标**不报** —— 否则这条会把"越界"读成"下标 >= 0 就报"
+    edge = "module m\nchoose lms_open\n" + body.replace("a[10]", "a[3]")
+    assert errs(edge) == [], errs(edge)
+    # **只对定长数组**：切片 `[T]` 的长度是运行期的，界不是编译期常量 ⇒ 这一格不报
+    sl = "module m\nchoose lms_open\nfn g(xs: [u32]) -> u32 { return xs[10]; }\n"
+    assert errs(sl) == [], errs(sl)
+
+
+@test
+def test_e029_use_after_free():
+    """LMS 第 1 级（`docs/253` §5.1）：**用完再放** —— `free(p)` 之后再用 `p`。
+
+    与 E006（已被移动）**分开**：移走是**所有权**的事，释放是**合法性**的事。
+    ⚠ `docs/210` §2.8 给 `free` 加的那五条检查管的是 **`free` 自己那一端**
+    （这块是不是真块、有没有重复释放），管不了"**之后再用**" —— 那正是这一格。
+
+    这一对同样是"同一份源，加不加 `choose lms_open` 判决相反"。
+    """
+    head = "module m\nchoose runtime\n%s\n"
+
+    def body(use_after: bool) -> str:
+        if use_after:
+            return ("fn f() -> u32 {\n    let p: ptr = alloc(8);\n    free(p);\n"
+                    "    let x: u32 = load8(p, 0);\n    return x;\n}\n")
+        return ("fn f() -> u32 {\n    let p: ptr = alloc(8);\n"
+                "    let x: u32 = load8(p, 0);\n    free(p);\n    return x;\n}\n")
+
+    # 关着（默认）：use-after-free 一个字的检查都没有
+    assert errs(head % "" + body(True)) == [], errs(head % "" + body(True))
+    # 开着：编译期拒
+    on = head % "choose lms_open" + body(True)
+    assert any("E029" in x for x in errs(on)), errs(on)
+    # **先读后 free** 合法 —— 这一半挡住"见过 free 就报"那种过头实现
+    ok = head % "choose lms_open" + body(False)
+    assert errs(ok) == [], errs(ok)
+    # **free 之后重新赋值** = 这个名字不再指那块死掉的块 ⇒ 不报（与自举侧 `chk_fr_del` 同口径）
+    re = head % "choose lms_open" + (
+        "fn f() -> u32 {\n    let p: ptr = alloc(8);\n    free(p);\n"
+        "    p = alloc(8);\n    return load8(p, 0);\n}\n")
+    assert errs(re) == [], errs(re)
+
+
+@test
 def test_m41_excluded_space_enforced():
     src = ('module m\nexcluded "network: 不申请网络"\n'
            'capability net : network[0..1]\nfn f() -> u32 { return 0; }\n')
@@ -3613,7 +3672,49 @@ _TIER_CHOOSES = (
     ("gc_auto_alpha/sealed", "choose gc_auto_alpha\nchoose runtime"),
     ("gc_manual/hosted", "choose hosted\nchoose runtime"),
     ("gc_auto/hosted", "choose hosted\nchoose gc_auto\nchoose runtime"),
+    # **LMS 第 3 级入口 A**（`docs/253` §5.3）：`alloc` 分配不出时先收一次再试。
+    # ⚠ 这两格是**故意**加进来的 —— 那一支 IR（`boom` 改成 `rescue`/`dead`、`floop`
+    # 的 phi 多一条入边）是本项目里**手写 IR 最容易写错**的一类，而孪生判据看不出来
+    # （两处实现一起错时它照样绿）。**只有过一遍 clang 才知道它是不是合法 LLVM。**
+    ("gc_auto/lms", "choose gc_auto\nchoose runtime\nchoose lms_open"),
+    ("gc_auto_alpha/lms", "choose gc_auto_alpha\nchoose runtime\nchoose lms_open"),
 )
+
+
+@test
+def test_lms_entry_a_rescue_needs_both_lms_and_a_collector():
+    """LMS 第 3 级入口 A（`docs/253` §5.3）：`alloc` 分配不出时**先收一次再试**。
+
+    **两个条件缺一不可** —— `lms` 开着（它属于 LMS 第 3 级）**而且**这份产物里真有
+    收集器（`gc_auto` / `gc_auto_alpha`）。`gc_manual` 下**没有东西可收**，
+    "拉回"在那里是一句空话 —— 所以那一格**必须一个字都不加**。这是这一级明写的边界。
+
+    网格：{gc_manual, gc_auto, gc_auto_alpha} × {关着, 开着}。
+    """
+    # ⚠ **尺寸必须走 `const` 名，不能是字面量**：`gc_auto_alpha` 会把
+    # `let p: ptr = alloc(<字面量>)` **静态提升到栈上**（L0），于是这份产物**根本不需要堆**
+    # —— `__loment_alloc` 一个字节都不发，"分配不出"也就无从谈起。
+    # 第一版探针就是栽在这儿的：alpha 那一格**静默为空**，看起来像"入口 A 没生效"，
+    # 实际是**测的那件事不在场**（`docs/210` §2.2 那条诊断教训的又一实例）。
+    # 走 `const` 名（或加一次 `as u64`）就取消提升资格。
+    probe = ("module m\nchoose runtime\nconst N: u32 = 64;\n%s\n\n"
+             "fn main() -> i32 {\n    let p: ptr = alloc(N);\n"
+             "    return load8(p, 0) as i32;\n}\n")
+
+    def ir(chooses: str) -> str:
+        return lomentc.emit_llvm(parse(probe % chooses), ROOT, [])
+
+    for gc in ("gc_manual", "gc_auto", "gc_auto_alpha"):
+        off = ir(f"choose {gc}")
+        assert "__loment_lms_retry" not in off, (gc, "关着时不许有")
+        on = ir(f"choose {gc}\nchoose lms_open")
+        if gc == "gc_manual":
+            assert "__loment_lms_retry" not in on, (gc, "没有收集器 ⇒ 没有东西可拉回")
+        else:
+            assert "__loment_lms_retry" in on, (gc, "开着且要收 ⇒ 该有")
+            # **只许重来一次**：重试标记在**每一条成功返回前**都要清掉。
+            # 不清的话"这一次"用掉的重试会留给下一次分配 —— 那是**假的能力**。
+            assert on.count("store i1 false, ptr @__loment_lms_retry") == 2, on
 
 
 @test
