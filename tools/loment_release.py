@@ -93,7 +93,10 @@ GLOBS = [
     "tools/lomentc_test.py", "tools/potato.py", "tools/potato_test.py",
     "tools/potato_cross.py", "tools/potato_from.py", "tools/potato_measure.py",
     "tools/potato_llm_arm.py",
-    "tools/potato_assert.py", "tools/loment.py", "tools/lomfmt.py", "tools/lomdoc.py",
+    "tools/potato_assert.py", "tools/loment.py", "tools/lomfmt.py",
+    # 修改件 (`.lomf`, docs/257): 套用器 + 树里那些补丁。**补丁本身也进清单** ——
+    # 它是"这一笔改了什么"的记录, 丢了就等于那一笔无从复核 (docs/179 §7.3 那条)。
+    "tools/lomf.py", "loment/patches/*.lomf", "tools/lomdoc.py",
     "tools/lompkg.py", "tools/lomlib.py", "tools/loment_lib_test.py",
     # std 核的行为判据 (docs/180): lib/ 里那些函数算得对不对 —— 与
     # `loment_lib_test`(库系统) 是两件事, 原先只测了后者

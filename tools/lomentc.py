@@ -3009,12 +3009,12 @@ def _check_borrows(args: list, line: int, errs: list[str]) -> None:
 
 
 def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[str, Struct],
-               errs: list[str], enums: dict[str, EnumDecl] | None = None,
-               lms: bool = False) -> None:
+               errs: list[str], enums: dict[str, EnumDecl] | None = None) -> None:
     """结构性问题 (未声明变量 / 未知函数 / 结构体字段 / 枚举变体) 的递归报告。
 
-    `lms`（`docs/253`）是**唯一一个"档"参数**：它开着时，`Index` 那一支多报一条 E028。
-    与 `enums` 同一条路数 —— 由 `check()` 从**根单元**的 `choose` 里读出来，一路传下去。
+    **这里没有档参数**（2026-10-16）：`lms` 曾经只喂 `Index` 那一支的 E028，而那条
+    已经**升成语言规则**（`docs/205` §1.1 C5：字面量越界编译期拒）—— 见下面那一段的注解。
+    另一个第 1 级检查（E029 用完再放）在 `_move_check` 里，它自己的参数自己带。
     """
     enums = enums or {}
     if isinstance(e, (IntLit, BoolLit, StrLit)):
@@ -3042,10 +3042,10 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             pt = ed.payloads[e.variant]
             if at is not None and at != pt:
                 errs.append(f"{e.line}: 载荷类型 {at}，声明为 {pt}")
-        _walk_expr(e.arg, scope, funcs, structs, errs, enums, lms)
+        _walk_expr(e.arg, scope, funcs, structs, errs, enums)
         return
     if isinstance(e, Cast):
-        _walk_expr(e.expr, scope, funcs, structs, errs, enums, lms)
+        _walk_expr(e.expr, scope, funcs, structs, errs, enums)
         st = expr_type(e.expr, scope, funcs, structs)
         if st == "ptr" and e.type in ("u64", "i64"):  # M67: 指针转整数
             return
@@ -3068,7 +3068,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
         errs.append(f"{e.line}: ? 只能用于 let 绑定 (let x: T = e?;)")
         return
     if isinstance(e, MethodCall):
-        _walk_expr(e.obj, scope, funcs, structs, errs, enums, lms)
+        _walk_expr(e.obj, scope, funcs, structs, errs, enums)
         ot = expr_type(e.obj, scope, funcs, structs)
         fn = funcs.get(f"{ot}_{e.name}") if ot else None
         if fn is None:
@@ -3076,7 +3076,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
         elif len(e.args) + 1 != len(fn.params):
             errs.append(f"{e.line}: 方法 {e.name} 需要 {len(fn.params) - 1} 个实参，得到 {len(e.args)}")
         for a in e.args:
-            _walk_expr(a, scope, funcs, structs, errs, enums, lms)
+            _walk_expr(a, scope, funcs, structs, errs, enums)
         return
     if isinstance(e, Call):
         if e.name == "slice_len":  # M3: 切片长度
@@ -3087,7 +3087,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                 if at is not None and not (_is_slice(at) or _is_array(at)):
                     errs.append(f"{e.line}: slice_len 实参 {at} 不是数组或切片")
             for a in e.args:
-                _walk_expr(a, scope, funcs, structs, errs, enums, lms)
+                _walk_expr(a, scope, funcs, structs, errs, enums)
             return
         if e.name in BUILTINS:
             want_t, _ret = BUILTINS[e.name]
@@ -3148,7 +3148,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
                     else:
                         errs.append(f"{e.line}: {e.name} 实参类型 {at}，期望 {p.type}")
         for a in e.args:
-            _walk_expr(a, scope, funcs, structs, errs, enums, lms)
+            _walk_expr(a, scope, funcs, structs, errs, enums)
         return
     if isinstance(e, StructLit):
         st = structs.get(e.name)
@@ -3163,13 +3163,13 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             elif fn in got:
                 errs.append(f"{e.line}: 结构体 {e.name} 字段 {fn} 重复初始化")
             got.add(fn)
-            _walk_expr(fe, scope, funcs, structs, errs, enums, lms)
+            _walk_expr(fe, scope, funcs, structs, errs, enums)
         for fn in want:
             if fn not in got:
                 errs.append(f"{e.line}: 结构体 {e.name} 缺字段 {fn}")
         return
     if isinstance(e, FieldAccess):
-        _walk_expr(e.obj, scope, funcs, structs, errs, enums, lms)
+        _walk_expr(e.obj, scope, funcs, structs, errs, enums)
         ot = expr_type(e.obj, scope, funcs, structs)
         st = structs.get(ot) if ot else None
         if st is None:
@@ -3182,7 +3182,7 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             errs.append(f"{e.line}: 数组字面量不能为空")
         ts = []
         for it in e.items:
-            _walk_expr(it, scope, funcs, structs, errs, enums, lms)
+            _walk_expr(it, scope, funcs, structs, errs, enums)
             ts.append(expr_type(it, scope, funcs, structs))
         concrete = {t for t in ts if t is not None}
         if len(concrete) > 1:
@@ -3191,39 +3191,48 @@ def _walk_expr(e, scope: dict[str, str], funcs: dict[str, Func], structs: dict[s
             errs.append(f"{e.line}: 数组字面量元素类型不一致 (整型字面量混入 {sorted(concrete)[0]})")
         return
     if isinstance(e, Index):
-        _walk_expr(e.obj, scope, funcs, structs, errs, enums, lms)
-        _walk_expr(e.idx, scope, funcs, structs, errs, enums, lms)
+        _walk_expr(e.obj, scope, funcs, structs, errs, enums)
+        _walk_expr(e.idx, scope, funcs, structs, errs, enums)
         ot = expr_type(e.obj, scope, funcs, structs)
         if ot is None or not (_is_array(ot) or _is_slice(ot)):
             errs.append(f"{e.line}: 对非数组/切片类型取下标")
         it = expr_type(e.idx, scope, funcs, structs)
         if it is not None and it not in INT_TYPES:
             errs.append(f"{e.line}: 下标类型 {it}，应为整型")
-        # **E028**（`docs/253` §5.1）：`lms` 开着时，**字面量下标越过定长数组的界**当场拒。
-        # 这一格今天**没有任何东西管** —— 实测（`docs/253` §4.4）：`let x: u32 = a[10]`
-        # 配 `[u32; 4]` 发出来的是 `getelementptr inbounds [4 x i32], ptr %a.addr,
-        # i32 0, i32 10`，而 `inbounds` 在 LLVM IR 里**恰是"越界即 UB"的标记**。
-        # ⇒ **不是新需求**：`docs/205` §1.1 C5 那句「越界访问在**字面量**时编译期拒」
-        #   早就写下了 —— 它只是**只覆盖 `guard` 那一格**。
-        # ⚠ **码号是 E028，不是 E024**：`docs/253` 初稿按旧检出写的 E024–E026，
-        #   而 origin/main 上那三个已被命令声明那批占了（`docs/223`），现行最高 E027。
-        # 只对**定长数组**成立：切片 `[T]` 的长度是运行期的，界不是编译期常量。
-        if lms and ot is not None and _is_array(ot) and isinstance(e.idx, IntLit):
+        # **E028**：**字面量下标越过定长数组的界**当场拒。
+        #
+        # **2026-10-16 起它不再看 `lms`**（issue #18）。原先这条只在 `choose lms_open`
+        # 时发 —— 而 `lms` 那一维是**开发通道的中间态**（`docs/253` §14.2：不进发行版），
+        # 于是发行版里的用户拿不到它。可它本来就不是一条 LMS 检查：`docs/205` §1.1 C5
+        # 早就把「越界访问在**字面量**时编译期拒」写成语言规则，只是那一格**只覆盖
+        # `guard`**（`docs/146` §3：`guard cap(9)` 对域 `[0..4]` 是编译错误）。
+        # 同一个"字面量越界"，两个构造两个答案 —— 那正是 issue #18 点名的那处不一致。
+        # 于是它升成语言规则：**默认档也拒**（`docs/253` §14.2 那条"默认档一个字的检查都
+        # 不加"说的是 LMS 那几级，与这条语言规则不是一回事）。
+        #
+        # 为什么这一格值得拒：实测（`docs/253` §4.4）：`let x: u32 = a[10]` 配 `[u32; 4]`
+        # 发出来的是 `getelementptr inbounds [4 x i32], ptr %a.addr, i32 0, i32 10`，
+        # 而 `inbounds` 在 LLVM IR 里**恰是"越界即 UB"的标记**。
+        #
+        # 只对**定长数组**成立：切片 `[T]` 的长度是运行期的，界不是编译期常量 ——
+        # 那一半的裁决见 `docs/205` §1.1 C5（`lms_open` 按站点发内联界检查；默认档
+        # 不检查，用 `slice_len` + 一个显式的 `if` 自己挡）。
+        if ot is not None and _is_array(ot) and isinstance(e.idx, IntLit):
             n = _array_len(ot)
             if e.idx.value >= n:
                 errs.append(f"{e.line}: E028: 下标 {e.idx.value} 越过定长数组的界"
                             f"（{ot} 的长度是 {n}）")
         return
     if isinstance(e, Un):
-        _walk_expr(e.expr, scope, funcs, structs, errs, enums, lms)
+        _walk_expr(e.expr, scope, funcs, structs, errs, enums)
         if e.op in ("&", "&mut"):
             inner = expr_type(e.expr, scope, funcs, structs)
             if inner is None or not _is_array(inner):
                 errs.append(f"{e.line}: {e.op} 只能作用于数组 (得到 {inner})")
         return
     if isinstance(e, Bin):
-        _walk_expr(e.left, scope, funcs, structs, errs, enums, lms)
-        _walk_expr(e.right, scope, funcs, structs, errs, enums, lms)
+        _walk_expr(e.left, scope, funcs, structs, errs, enums)
+        _walk_expr(e.right, scope, funcs, structs, errs, enums)
         return
 
 
@@ -4398,7 +4407,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
         def walk(stmts: list, fscope: dict[str, str]) -> None:
             for s in stmts:
                 if isinstance(s, Let):
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lms)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
                     if not _type_ok(s.type, known):
                         errs.append(f"{s.line}: 未知类型 {s.type}（let {s.name} 的类型）")
                     if _is_array(s.type) and isinstance(s.expr, ArrayLit):
@@ -4412,8 +4421,8 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                         errs.append(f"{s.line}: let {s.name}: {s.type} = 表达式类型 {t}")
                     fscope[s.name] = s.type
                 elif isinstance(s, Assign):
-                    _walk_expr(s.target, fscope, funcs, structs, errs, enums, lms)
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lms)
+                    _walk_expr(s.target, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
                     tt = expr_type(s.target, fscope, funcs, structs)
                     et = expr_type(s.expr, fscope, funcs, structs)
                     if isinstance(s.target, Index):
@@ -4427,21 +4436,21 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                     if tt is not None and et is not None and tt != et:
                         errs.append(f"{s.line}: 赋值 {tt} = 表达式类型 {et}")
                 elif isinstance(s, If):
-                    _walk_expr(s.cond, fscope, funcs, structs, errs, enums, lms)
+                    _walk_expr(s.cond, fscope, funcs, structs, errs, enums)
                     ct = expr_type(s.cond, fscope, funcs, structs)
                     if ct is not None and ct != "bool":
                         errs.append(f"{s.line}: if 条件类型 {ct}，应为 bool")
                     walk(s.then, fscope)
                     walk(s.otherwise, fscope)
                 elif isinstance(s, While):
-                    _walk_expr(s.cond, fscope, funcs, structs, errs, enums, lms)
+                    _walk_expr(s.cond, fscope, funcs, structs, errs, enums)
                     ct = expr_type(s.cond, fscope, funcs, structs)
                     if ct is not None and ct != "bool":
                         errs.append(f"{s.line}: while 条件类型 {ct}，应为 bool")
                     walk(s.body, fscope)
                 elif isinstance(s, Guard):  # P4: 能力域检查
                     cap = next((c for c in mod.caps if c.name == s.cap), None)
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lms)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
                     if cap is None:
                         errs.append(f"{s.line}: guard 引用了未声明的能力 {s.cap}")
                     elif isinstance(s.expr, IntLit) and not (cap.lo <= s.expr.value <= cap.hi):
@@ -4449,8 +4458,8 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                             f"{s.line}: 能力 {s.cap} 域 [{cap.lo}..{cap.hi}]，索引 {s.expr.value} 越界"
                         )
                 elif isinstance(s, For):
-                    _walk_expr(s.lo, fscope, funcs, structs, errs, enums, lms)
-                    _walk_expr(s.hi, fscope, funcs, structs, errs, enums, lms)
+                    _walk_expr(s.lo, fscope, funcs, structs, errs, enums)
+                    _walk_expr(s.hi, fscope, funcs, structs, errs, enums)
                     lt = expr_type(s.lo, fscope, funcs, structs)
                     ht = expr_type(s.hi, fscope, funcs, structs)
                     for bt, bw in ((lt, "下界"), (ht, "上界")):
@@ -4460,7 +4469,7 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                     body_scope[s.var] = lt or ht or "u32"
                     walk(s.body, body_scope)
                 elif isinstance(s, Match):
-                    _walk_expr(s.subject, fscope, funcs, structs, errs, enums, lms)
+                    _walk_expr(s.subject, fscope, funcs, structs, errs, enums)
                     st = expr_type(s.subject, fscope, funcs, structs)
                     ed = enums.get(st) if st else None
                     if ed is None:
@@ -4501,12 +4510,12 @@ def _check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                                 f"{s.line}: match 不穷尽，缺 {', '.join(missing)}（或加 _ 通配）"
                             )
                 elif isinstance(s, Return):
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lms)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
                     t = expr_type(s.expr, fscope, funcs, structs)
                     if t is not None and t != f.ret:
                         errs.append(f"{s.line}: return 类型 {t}，函数 {f.name} 声明 {f.ret}")
                 elif isinstance(s, ExprStmt):
-                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lms)
+                    _walk_expr(s.expr, fscope, funcs, structs, errs, enums)
 
         walk(f.body, scope)
         errs.extend(_move_check(f, funcs, structs, enums, lms))  # M13 移动检查 + E029
