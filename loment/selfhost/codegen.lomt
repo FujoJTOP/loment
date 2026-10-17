@@ -1949,11 +1949,18 @@ fn emit_str_lit_bytes(s: ptr, out: ptr, src: ptr, toks: ptr, i: u32) -> u32 {
         let b: u32 = load8(src, st + k);
         if b == 92 {
             let e: u32 = load8(src, st + k + 1);
+            // 转义表与 `lomc._ESCAPES` 同一份（`#33` / `#36`）：`\n` `\t` `\r` `\0`；其余
+            // （`\\` `\"` 以及未知）取那个字符本身。**未知那一档由 checker 报 E019** ——
+            // 自举词法器没有失败通道，所以拒绝落在检查期。
             let d: u32 = e;
             if e == 110 {
                 d = 10;
             } else if e == 116 {
                 d = 9;
+            } else if e == 114 {
+                d = 13;
+            } else if e == 48 {
+                d = 0;
             }
             emit_hex_byte(s, out, d);
             k = k + 2;

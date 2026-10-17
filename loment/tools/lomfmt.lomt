@@ -244,13 +244,10 @@ fn val_eq(src: ptr, t: ptr, i: u32, tbl: str, off: u32, len: u32) -> bool {
         if c == 92 && j + 1 < e {
             let x: u32 = load8(src, j + 1);
             c = x;                  // Python: _ESCAPES.get(x, x) —— 引号/反斜杠/未知都取原字符
-            if x == 110 {
-                c = 10;
-            } else {
-                if x == 116 {
-                    c = 9;
-                }
-            }
+            if x == 110 { c = 10; }
+            if x == 116 { c = 9; }
+            if x == 114 { c = 13; }   // `#36`: `\r` 原先不在表里, 被吃成字母 `r`
+            if x == 48 { c = 0; }     // `#33`: `\0` 仓库自己在用 (`proc.lomt` 的 "/bin/sh\0")
             j = j + 2;
         } else {
             j = j + 1;
@@ -522,13 +519,10 @@ fn emit_tok(mem: ptr, src: ptr, t: ptr, i: u32, mg: u32) -> u32 {
         if c == 92 && j + 1 < e {
             let x: u32 = load8(src, j + 1);
             c = x;                  // Python: _ESCAPES.get(x, x)
-            if x == 110 {
-                c = 10;
-            } else {
-                if x == 116 {
-                    c = 9;
-                }
-            }
+            if x == 110 { c = 10; }
+            if x == 116 { c = 9; }
+            if x == 114 { c = 13; }   // `#36`
+            if x == 48 { c = 0; }     // `#33`
             j = j + 2;
         } else {
             j = j + 1;

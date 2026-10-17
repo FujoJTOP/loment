@@ -382,6 +382,10 @@ _CASES: list[tuple[str, str]] = [
      "module m\n\nfn f() -> u32 {\n    let a: f64 = 0;\n    return 0;\n}\n"),
     ("unknown-type-array-element",
      "module m\n\nfn f() -> u32 {\n    let a: [f64; 4] = [0, 0, 0, 0];\n    return 0;\n}\n"),
+    # `#33` / `#36`：字符串里的**未知转义**。参考实现在词法期就拒（E019）；自举词法器没有
+    # 失败通道，所以同一件事落在 `chk_syntax_prepass` —— 两边的**码**必须一样。
+    ("unknown-string-escape",
+     "module m\n\nfn f() -> u32 {\n    let s: str = \"a\\qb\";\n    return 0;\n}\n"),
     ("bin-literal",
      "module m\n\nfn f() -> u32 {\n    let v: u32 = 0b1010;\n    return v;\n}\n"),
     # ---- 自举侧"死给你看"的两条 (issue #335 / #44) --------------------------------
