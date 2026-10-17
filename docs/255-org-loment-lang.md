@@ -57,6 +57,18 @@
 旧属主下的那个包**还在**（`fujojtop/loment-ci`，public），所以第 1 步之前门禁照常跑 ——
 搬迁不会有一个"门禁全断"的窗口。
 
+**第 3 步现在有判据看着了。** `loment_tools_test::test_gate_container_image_matches_the_recipe`
+原来只比 tag，属主那一半**没人管** —— 而属主正是这条路上会分叉的那一半
+（`gate.yml` 写死、`ci-image.yml` 用 `github.repository_owner` 算）。判据改成比
+**属主 + tag**，期望的属主取自 `loment_publish.ORG` 转小写。它在改之前是**红的**
+（库已经住进 `Loment-Lang`，`gate.yml` 还指着 `fujojtop`），改完才绿。
+
+**怎么判"到底公没公开"**：裸 `curl` 打 `/v2/.../manifests/5` **永远 401**（那是缺 bearer
+token，不是私有），得先匿名要一次 token：
+`curl -s "https://ghcr.io/token?service=ghcr.io&scope=repository:<owner>/loment-ci:pull"`
+—— 私有包拿不到 token。2026-10-17 实测：`fujojtop` 拿得到（public）、`loment-lang`
+拿不到（当时 private），翻过之后拿得到 ✓。
+
 ---
 
 ## 3. 搬家不带过来的东西

@@ -1387,17 +1387,27 @@ def test_gate_workflow_aggregation_fails_closed():
 
 
 @test
-def test_gate_container_image_tag_matches_the_recipe():
-    """镜像 tag 写在两处：`gate.yml` 各 job 的 `container.image` 与 `ci-image.yml` 的 `TAG`。
+def test_gate_container_image_matches_the_recipe():
+    """镜像的**属主与 tag** 都写在两处：`gate.yml` 各 job 的 `container.image`，
+    与 `ci-image.yml` 的 `TAG` + 它按 `github.repository_owner` **算出来**的那个属主。
 
     文件头第四条边界："改镜像要同时抬这两处 —— 抬 tag 是让各 job 用上新镜像的
     **唯一**动作"。两处不一致的后果是**静默**的：构建推的是新 tag，各 job 拉的还是
     旧镜像 —— 看起来改了，其实没改（而"看起来配上了、其实没配上"正是最费时间的一类）。
 
+    **属主那一半是 2026-10-17 补的**，因为当天搬家时差点让每一片都拉不到镜像：
+    `gate.yml` 里属主是**写死的**，`ci-image.yml` 里是**算的**，库一换组织两边就分叉，
+    而**没有任何东西会提醒**。这条判据在当时是**红的**（库已经住进 `Loment-Lang`，
+    `gate.yml` 还指着 `fujojtop`）—— 它就是为那一刻写的。
+
+    期望的属主取自 `loment_publish.ORG` —— "这个项目住在哪个组织"在本仓的单一真源。
+    转小写是因为 **ghcr 的仓库名必须全小写**（Docker 的硬要求，`ci-image.yml` 那儿也这么做）。
+
     没拉镜像的那个 job（`static-exclusive`）刻意留在 runner 上，见它自己那段注释；
-    所以这里只比**出现过的** tag 集合。
+    所以这里只比**出现过的**那些。
     """
-    tags = re.findall(r"image:\s*ghcr\.io/[^:\s]+:(\S+)", _gate_workflow())
+    wf = _gate_workflow()
+    tags = re.findall(r"image:\s*ghcr\.io/[^:\s]+:(\S+)", wf)
     assert tags, "gate.yml 里一个 `container.image` 都没有"
     recipe = (ROOT / ".github" / "workflows" / "ci-image.yml").read_text(encoding="utf-8")
     m = re.search(r'^  TAG: "([^"]+)"', recipe, re.M)
@@ -1405,7 +1415,17 @@ def test_gate_container_image_tag_matches_the_recipe():
     assert set(tags) == {m.group(1)}, (
         f"gate.yml 用 {sorted(set(tags))}，ci-image.yml 构建 {m.group(1)} —— "
         f"镜像抬了 tag 而各 job 没跟，是静默的")
-    print(f"      镜像 tag 两处一致: {m.group(1)}")
+
+    import loment_publish
+    owners = set(re.findall(r"image:\s*ghcr\.io/([^/:\s]+)/", wf))
+    want = loment_publish.ORG.lower()
+    assert owners == {want}, (
+        f"gate.yml 拉的是 {sorted(owners)} 名下的镜像，而库住在 `{loment_publish.ORG}`"
+        f"（ghcr 里该是 `{want}`）—— 库一换组织，`ci-image.yml` **算出来**的属主就变了、"
+        f"`gate.yml` 这一行**不会**跟着变，而两处谁都不提醒谁。"
+        f"换的顺序是硬的：先在新属主下把 tag 建出来、**再把它设成 public**"
+        f"（包默认私有，fork 的 PR 拉不到）、**最后**才改 gate.yml —— `docs/255` §2")
+    print(f"      镜像属主 `{want}` + tag `{m.group(1)}` 两处一致")
 
 
 @test
