@@ -12,7 +12,7 @@
 # 合计 908 条判据 / 74 个套件。
 
 lomc_test 24
-lomentc_test 151
+lomentc_test 154
 potato_test 11
 loment_ct_test 2
 loment_comefor_test 12
@@ -29,7 +29,7 @@ loment_lomtfrom_test 4
 loment_trans_test 8
 loment_potato_emit_test 6
 loment_grammar_test 20
-loment_tools_test 44
+loment_tools_test 46
 loment_p7_test 8
 loment_p8_test 31
 loment_p9_test 2
@@ -84,4 +84,4 @@ loment_megaproject_test 8
 loment_state_test 8
 lvm_profile_test 4
 loment_invariant_test 1
-loment_caps_test 3
+loment_caps_test 5

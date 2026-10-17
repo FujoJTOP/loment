@@ -181,6 +181,8 @@ tools/potato_llm_arm.py
 tools/potato_assert.py
 tools/loment.py
 tools/lomfmt.py
+tools/lomf.py
+loment/patches/*.lomf
 tools/lomdoc.py
 tools/lompkg.py
 tools/lomlib.py

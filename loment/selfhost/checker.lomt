@@ -67,6 +67,7 @@ const E_Q: u32 = 10;       // E010 `?` 误用
 const E_MOVE: u32 = 6;     // E006 移动后使用
 const E_DANGLE: u32 = 12;  // E012 悬垂借用 (返回局部变量的借用)
 const E_MODE: u32 = 22;    // E022 项目模式 `choose` 用法不对 (docs/143 §3.2)
+const E_RT: u32 = 30;      // E030 这一档是 `no_runtime`，而这个构造要运行期 (issue #321)
 const E_PARSE: u32 = 19;   // E019 期望表达式 —— 参考实现 `parse_primary` 的口径 (issue #49)
 const E_DEEP: u32 = 23;    // E023 源码太深 —— 嵌套超过 64 层 (issue #44)
 
@@ -1606,18 +1607,24 @@ fn chk_tex(src: ptr, t: ptr, syms: ptr, n: u32, env: ptr, envc: u32,
         if it != 0 && chk_ty_is_int(it) == 0 {
             chk_pub(src, t, oc, p, E_TMISMATCH, idx_at);   // 下标类型，应为整型
         }
-        // **E028**（`docs/253` §5.1）：`lms` 开着时，**字面量下标越过定长数组的界**当场拒。
-        // 这一格今天**没有任何东西管** —— 实测（`docs/253` §4.4）：`a[10]` 配 `[u32; 4]`
-        // 发出来的是 `getelementptr inbounds ... i32 10`，而 `inbounds` 在 LLVM IR 里
-        // 恰是"越界即 UB"的标记。⇒ 这不是新需求：`docs/205` §1.1 C5 早就写下了，
-        // 只是**它只覆盖 `guard` 那一格**。
-        // 三条收窄，缺一不可：
-        //   * 只对**定长数组**（`chk_ty_is_arr` 排除了切片 —— 后者的长度是运行期的）；
+        // **E028**：**字面量下标越过定长数组的界**当场拒。
+        //
+        // **2026-10-16 起它不再看 `lms`**（issue #18）。原先只在 `choose lms_open` 时发，
+        // 而 `lms` 是**开发通道的中间态**（`docs/253` §14.2：不进发行版）—— 发行版的用户
+        // 拿不到。可它本来就不是一条 LMS 检查：`docs/205` §1.1 C5 早把「越界访问在
+        // **字面量**时编译期拒」写成语言规则，那一格只覆盖 `guard`（`docs/146` §3：
+        // `guard cap(9)` 对域 `[0..4]` 是编译错误）。同一个"字面量越界"两个答案，正是
+        // issue #18 点名的那处不一致。参考实现那一侧同步改了（`_walk_expr` 的 Index 支）。
+        //
+        // 实测来路（`docs/253` §4.4）：`a[10]` 配 `[u32; 4]` 发出来的是
+        // `getelementptr inbounds ... i32 10`，而 `inbounds` 在 LLVM IR 里恰是"越界即 UB"。
+        // 两条收窄，缺一不可：
+        //   * 只对**定长数组**（`chk_ty_is_arr` 排除了切片 —— 后者的长度是运行期的；
+        //     那一半见 `docs/205` §1.1 C5：默认档不检查，用 `slice_len` + 一个 `if` 自己挡）；
         //   * 下标必须是**裸字面量**（`[ N ]` 恰好三个 token）—— 与参考实现判 `IntLit`
-        //     同口径；写成 `[10 + 0]` 就不报，两边一致；
-        //   * ⚠ **只在 `lms` 开着时** —— 默认档一个字的检查都不加（`docs/253` §14.2）。
+        //     同口径；写成 `[10 + 0]` 就不报，两边一致。
         if chk_ty_is_arr(tyt, ot) == 1 && chk_match_bracket(src, t, idx_at) == idx_at + 2
-                && chk_tok_kind(t, idx_at + 1) == 1 && chk_lms_on(src, t) == 1 {
+                && chk_tok_kind(t, idx_at + 1) == 1 {
             if chk_tok_int(src, t, idx_at + 1) >= chk_ty_b(tyt, ot) {
                 chk_pub(src, t, oc, p, E_BOUND, idx_at);
             }
@@ -3613,8 +3620,13 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
         o = sym_pub(src, t, out, o, E_MODE, later_line(ln_gc, ln_rt));
     }
     // ---- **运行期维的强保证**（`docs/217`）：`no_runtime`（默认）说"产物里没有运行期"，
-    // 所以凡是会把那段运行期拖进产物的构造，在**这一档下**编译期点名拒（E022 —— 按
-    // "码按修法分"，这一条的修法与 `choose` 那几条同族：去写一行 `choose runtime`）。
+    // 所以凡是会把那段运行期拖进产物的构造，在**这一档下**编译期点名拒。
+    //
+    // **码是 E030，不是 E022**（issue #321，2026-10-16 改判）：原先并进 E022，理由是
+    // "码按修法分，这一条也要去改 `choose`"。实测那条理由数错了读者 —— 报的是用户写的
+    // **那个构造**，而他那一行 `choose` 是对的；而 E022 的标题说的正是"`choose` 写错了"。
+    // 码是用户最先读到的那个词，指错子系统就是误导。参考实现那一侧同步改了
+    // （`tools/loment_diag.py` 的 `RULES`）。
     // **锚在第一个这样的 token 上**，与参考实现 `_runtime_sites` 取首项同判。
     if eff_rt == 2 {
         let jr: u32 = 0;
@@ -3633,7 +3645,7 @@ pub fn check_arena(src: ptr, t: ptr, out: ptr, syms: ptr, scr: ptr, ctab: ptr,
         // 报文的"这一类构造本单元另有 N 处"用它（issue #321）。
         store32(tyt, RT_N_SITES, nsites);
         if nsites > 0 {
-            o = sym_pub(src, t, out, o, E_MODE, hit);
+            o = sym_pub(src, t, out, o, E_RT, hit);
         }
     }
     // (gc, port)：混合档的 L2 是前沿回卷，C 库手里的指针在 Loment 的栈之外（`docs/219` §6.1）。

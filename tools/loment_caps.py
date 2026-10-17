@@ -35,12 +35,46 @@ EXCLUDE = ("loment/tools/surface_data.lomt", "loment/tools/win_shim_data.lomt")
 
 _CONST = re.compile(r"^const\s+([A-Z][A-Z0-9_]*)\s*:\s*u32\s*=\s*(\d+)\s*;", re.M)
 #: 序关系比较：容量出现在任一侧。`==`/`!=` **不算** —— 那是码值，不是上界。
-_BOUND = r"(?:>=|<=|>|<)"
+#: **移位不算**（2026-10-16 修）：`<<` / `>>` 里含 `<` / `>`，于是 `TY_K_NAMED << TY_KIND_SHIFT`
+#: 被当成了上界比较 —— 一条**纯属正则不够严**的假阳性（`#345` 的盘点要拿去说事，不能混这个）。
+_BOUND = r"(?<![<>=])(?:>=|<=|>|<)(?![<>=])"
 #: 说得出话的几种形状（自举侧那两棵树里实际用到的，见文件头）。
 SPEAKS = ("fail(", "sym_pub(", "err_", "E0", "太大", "非法", "超", "越界")
 
 #: 守卫分支往后看几行算"同一处"。
 LOOKAHEAD = 8
+
+#: **这一条判据看不见、但确实不是缺口**的那些 —— 逐条写清为什么，因为"排除"必须可核对
+#: （`docs/255` §2：盘点是**筛子**，不是真相；筛掉的东西要留痕）。
+#: 两类，键是 `(文件, 常量名)`：
+#:   * **码值/标签**：它被 `* 256` 这种**拼进一个码**，或被拿来判一个码的**取值范围**。
+#:     文件头那句"码值不算容量"就是它，只是正则看不出来
+#:     （`TY_K_NAMED` 原先也在这里 —— 2026-10-16 修掉移位的 `<` 之后它**整个**退出了
+#:     口径，连"沉默"都算不上：那正是修这条正则的意义）；
+#:   * **越界由调用方报**：守卫在 A 文件里 `return 0`，说那句话的人在 B 文件里 ——
+#:     单文件 ±8 行扫不到，但用户是**听得到**的。
+EXPLAINED: dict[tuple[str, str], str] = {
+    ("loment/selfhost/checker.lomt", "K_FN"):
+        "kind 标签：`K_FN * 256 + argc` 是把它**拼进一个码**，不是「能装多少」",
+    ("loment/selfhost/checker.lomt", "K_INT_MIN"):
+        "整型码的**取值范围**：`c >= K_INT_MIN && c <= K_INT_MAX` 判的是码，不是计数",
+    ("loment/selfhost/checker.lomt", "K_INT_MAX"):
+        "整型码的**取值范围**：同 `K_INT_MIN`（判的是码，不是计数）",
+    ("loment/selfhost/codegen.lomt", "CG_MAXFN"):
+        "越界**由调用方报**：守卫这里 `return 0`，驱动器 `fail(\"…codegen 表容量…\")` 说得出来",
+    ("loment/selfhost/codegen.lomt", "CG_MAXENUM"):
+        "越界**由调用方报**：同 `CG_MAXFN`（一句话点名两张表）",
+    ("loment/selfhost/lexer.lomt", "MAX_LANG"):
+        "**有守卫**（`dn < MAX_LANG`，不写穿）：它静默**丢**的是第 17 条语言声明 —— "
+        "那是 (a) 里「丢」那一半，**本笔没做**。留着的理由写在这里而不是抹掉：参考实现"
+        "那份 `ext_langs` 是**无界 list**，所以两边在「>16 门语言声明」这一个输入上会分叉，"
+        "而它们**各自都说得通** —— 修它要先给语言定一条「一个单元最多声明几门语言」的规则，"
+        "那是 `docs/255` §4 记着的那一件",
+}
+
+#: **编译器前端** —— "用户一份源文件能推动的那些容量"。`#345` 采纳的 (a) 就是先把这一档
+#: 做成 0 静默：它正好是 `#343` 那一类崩溃（嵌套块 / 括号 / 形参表 / 缺逗号）住的地方。
+FRONTEND = ("driver.lomt", "lexer.lomt", "checker.lomt", "codegen.lomt", "parser.lomt")
 
 
 def _sources() -> list[Path]:
@@ -52,11 +86,16 @@ def _sources() -> list[Path]:
 
 
 def scan() -> list[dict]:
-    """回每一处容量：`{file, line, name, value, speaks}`（同一常量在几处用到就是几条）。"""
+    """回每一处容量：`{file, line, name, value, speaks, explained}`。
+
+    同一常量在几处用到就是几条。`explained` 非空 = 筛子判它沉默、而 `EXPLAINED` 已写明
+    它不是缺口 —— 判据看的是**两者都为假**的那一份（见文件头与 `docs/255` §2）。
+    """
     rows: list[dict] = []
     for p in _sources():
         text = p.read_text(encoding="utf-8")
         lines = text.split("\n")
+        rel = p.relative_to(ROOT).as_posix()
         caps = {m.group(1): int(m.group(2)) for m in _CONST.finditer(text)}
         for name, value in caps.items():
             esc = re.escape(name)
@@ -80,27 +119,43 @@ def scan() -> list[dict]:
                 for i in sites
                 for ln in lines[i:i + LOOKAHEAD]
             )
-            rows.append({"file": p.relative_to(ROOT).as_posix(),
-                         "line": sites[0] + 1, "name": name, "value": value,
-                         "kind": ("上界" if bound_lines else "尺寸"), "speaks": speaks})
+            rows.append({"file": rel, "line": sites[0] + 1, "name": name, "value": value,
+                         "kind": ("上界" if bound_lines else "尺寸"), "speaks": speaks,
+                         "explained": EXPLAINED.get((rel, name), "")})
     return rows
+
+
+def gaps(rows: list[dict]) -> list[dict]:
+    """**真的缺口**：筛子说它沉默，而 `EXPLAINED` 也拿不出理由的那一份。"""
+    return [r for r in rows if not r["speaks"] and not r["explained"]]
 
 
 def main(argv: list[str] | None = None) -> int:
     a = list(sys.argv[1:] if argv is None else argv)
     rows = scan()
-    silent = [r for r in rows if not r["speaks"]]
+    gap = gaps(rows)
     if "--silent" in a:
-        for r in silent:
+        for r in gap:
             print(f"{r['file']}:{r['line']} {r['name']}={r['value']}")
+        return 0
+    if "--frontend" in a:
+        # `#345` 采纳的 (a) 的第一档：**编译器前端不许有沉默的容量**（见 `FRONTEND`）。
+        fe = [r for r in rows if Path(r["file"]).name in FRONTEND]
+        fegap = gaps(fe)
+        print(f"编译器前端：容量 {len(fe)} 处，**缺口 {len(fegap)}**")
+        for r in fegap:
+            print(f"  {r['file']}:{r['line']} {r['name']}={r['value']}")
         return 0
     print(f"{'文件:行':<44} {'容量':<16} {'值':>10}  越界时")
     for r in rows:
         where = f"{r['file']}:{r['line']}"
-        print(f"{where:<44} {r['name']:<16} {r['value']:>10}  "
-              f"{'有话' if r['speaks'] else '**沉默**'}")
-    print(f"\n容量 {len(rows)} 处；**有话 {len(rows) - len(silent)}，沉默 {len(silent)}**"
-          f"（沉默的那些越界就是写穿 —— 自举侧的症状是段错误）")
+        mark = "有话" if r["speaks"] else ("沉默（已写明来路）" if r["explained"] else "**沉默**")
+        print(f"{where:<44} {r['name']:<16} {r['value']:>10}  {mark}")
+    ne = sum(1 for r in rows if r["explained"] and not r["speaks"])
+    print(f"\n容量 {len(rows)} 处；**有话 {len(rows) - ne - len(gap)}，"
+          f"沉默 {len(gap) + ne}**（其中 {ne} 条已写明来路，见 `EXPLAINED`）")
+    for r in gap:
+        print(f"  沉默: {r['file']}:{r['line']} {r['name']}={r['value']}")
     return 0
 
 
