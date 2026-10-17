@@ -157,7 +157,21 @@ STATIC_CHECKS = ("lomc_test", "lom_audit", "lomentc_test", "potato_test", "potat
                  "loment_hosted_test",
                  "loment_rel_test",
                  "loment_editors_test",
-                 "vscode_ext_test", "loment_filetype_test", "loment_status", "loment_release", "loment_manual",
+                 # **`loment_release` 与 `loment_manual` 从 2026-10-16 起不在这里。**
+                 # 它们的无参模式是"入库生成物 == 当前树"的**新鲜度**判据，而那条判据
+                 # 只在**唯一权威的那棵树**（`main`）上为真。以前靠"每个 PR 都重算一遍"
+                 # 把它变成处处为真，代价是那两个文件是**全树台账**（每一行都是别人的
+                 # 文件）⇒ 两个并发 PR 写相邻行 ⇒ **必冲突**（实测见
+                 # `.github/workflows/manifest.yml` 文件头那节）。
+                 #
+                 # 替代它的不是"少了条判据"，是**换了一处执行**：`manifest.yml` 的
+                 # `emit-main` 在每一次合并后重算（与门禁同时起跑），而
+                 # `loment_tools_test` 里那两条新判据钉住这套安排本身 ——
+                 # PR 侧不许再提交整树生成物、main 侧的写者必须存在且不排在门禁后面。
+                 #
+                 # **工具本身没删**：`--check` 仍可自查一份 checkout，孪生对拍
+                 # （`loment_rel_test`）也照跑 —— 那是审计主张 C9/C23 的量尺。
+                 "vscode_ext_test", "loment_filetype_test", "loment_status",
                  # 调试器 (docs/190): 无头 DAP 往返 —— 断点命中源行、单步按行走、落不上的要说
                  "loment_dap_test",
                  "fuai_contract_check", "loment_eol", "loment_dist_test",

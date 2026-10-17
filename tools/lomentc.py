@@ -712,6 +712,25 @@ def _type_ok(t: str, known: set[str]) -> bool:
     return False
 
 
+#: 类型位置上的未知名 —— **一条独立的诊断**（`#323`），消息形如
+#: `未知类型 f64（let a 的类型）`，分类进 **E030**。
+#:
+#: **为什么不并进 E002**：按 `loment_diag` 那张表"码按修法分"的口径，两边的修法根本不是
+#: 一件事。E002 的修法是"先声明这个名字 / 改拼写 / 补 `use`"；而 `f64` 在类型位上，用户
+#: 要做的是"**这门语言没有这个类型**"（Loment 没有浮点，`loment types` 只列整型与聚合）。
+#: 并进去的代价实测过：0.1.4.5 给的是 `error[E002]: undeclared name` + 一张讲"没有类型推断、
+#: 先定义后使用、跨模块要 `pub`"的建议表 —— 三条都不适用，用户会去找一个不存在的拼写错误。
+#:
+#: **消息里为什么带那段括号**：同一个码在六处触发（字段 / 载荷 / 返回 / 形参 / let / 数组
+#: 元素），而渲染器只给 `--> file:line`，丢了角色就只剩一个光秃秃的类型名。角色是**事实**，
+#: 不是建议，所以它并进消息不违反上面的分工。
+#:
+#: **那六处为什么把字面文本写在各自的 f-string 里，不共用一个助手函数**：判据
+#: `loment_err_test::test_every_message_the_compiler_can_print_has_a_code` 是**扫模板**的 ——
+#: 它把 `errs.append(...)` 的参数取出来，非字面量的占位代成 `1` 再送 `classify()`。助手函数
+#: 会让模板退化成 `1: 1`，那条判据当场红。这里重复六遍字面量是**判据要求的**，不是疏忽。
+
+
 def _extern_ty_ok(t: str) -> bool:
     """`extern fn` 签名里允许的类型 (docs/173 §3)。
 
@@ -4253,11 +4272,11 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
     for s in mod.structs:
         for fn, ft in s.fields:
             if not _type_ok(ft, known):
-                errs.append(f"{s.line}: 结构体 {s.name}.{fn} 类型 {ft} 未声明")
+                errs.append(f"{s.line}: 未知类型 {ft}（结构体 {s.name}.{fn} 的字段类型）")
     for e in mod.enums:
         for v, pt in e.payloads.items():
             if not _type_ok(pt, known):
-                errs.append(f"{e.line}: 枚举 {e.name}::{v} 载荷类型 {pt} 未声明")
+                errs.append(f"{e.line}: 未知类型 {pt}（枚举 {e.name}::{v} 的载荷类型）")
 
     # 常量 (仅整型)
     seen_const: set[str] = set()
@@ -4331,13 +4350,13 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
 
     for f in mod.funcs:
         if not _type_ok(f.ret, known):
-            errs.append(f"{f.line}: 函数 {f.name} 返回类型 {f.ret} 未声明")
+            errs.append(f"{f.line}: 未知类型 {f.ret}（函数 {f.name} 的返回类型）")
         scope: dict[str, str] = dict(const_scope)  # 模块级常量在函数体内可见
         for p in f.params:
             if p.name in scope:
                 errs.append(f"{f.line}: 函数 {f.name} 参数 {p.name} 重复")
             if not _type_ok(p.type, known):
-                errs.append(f"{f.line}: 参数 {p.name} 类型 {p.type} 未声明")
+                errs.append(f"{f.line}: 未知类型 {p.type}（参数 {p.name} 的类型）")
             scope[p.name] = p.type
 
         def walk(stmts: list, fscope: dict[str, str]) -> None:
@@ -4345,7 +4364,7 @@ def check(mod: Module, ext_funcs: dict[str, Func] | None = None,
                 if isinstance(s, Let):
                     _walk_expr(s.expr, fscope, funcs, structs, errs, enums, lms)
                     if not _type_ok(s.type, known):
-                        errs.append(f"{s.line}: let {s.name} 类型 {s.type} 未声明")
+                        errs.append(f"{s.line}: 未知类型 {s.type}（let {s.name} 的类型）")
                     if _is_array(s.type) and isinstance(s.expr, ArrayLit):
                         want = _array_len(s.type)
                         if want != len(s.expr.items):
@@ -5833,8 +5852,14 @@ roots:
 #: `gc_auto` 的触发：**按累计请求量**记 —— 过了 32 KiB 就收一次并清零。
 _IR_GC_TRIGGER_FIXED = '''define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **时钟 = 分配器真正吃掉多少字节**（`__loment_alloc` 自己那两行 `(sz + 15) & -8`），
+  ; 不是「载荷请求多少」—— 少了块头那 8 字节，小块程序的时钟就比消耗慢：8 字节载荷的
+  ; 块消耗 16、时钟只走 8，慢一倍 ⇒ 计数越过阈值的那一刻，arena 已经装满了（实测：
+  ; 纯拼接 3000 轮、计数 24000 < 32768，**一次都没收**，到 4096 轮 arena 满而 abort）。
+  %r0 = add i32 %sz, 15
+  %need = and i32 %r0, -8
   %b = load i32, ptr @__loment_gcbytes
-  %b2 = add i32 %b, %sz
+  %b2 = add i32 %b, %need
   store i32 %b2, ptr @__loment_gcbytes
   %big = icmp ugt i32 %b2, 32768
   br i1 %big, label %go, label %out
@@ -6039,24 +6064,27 @@ out:
 ; 判据（退回去了就说明死块都在顶端，正是小回收该干的事），而年轻代的**大小**不是。
 define internal void @__loment_maybe_collect(i32 %sz) {
 entry:
+  ; **时钟 = 分配器真正吃掉多少字节**（`(sz + 15) & -8`），不是载荷请求 —— 与固定档同一条
+  ; 理由（见 `_IR_GC_TRIGGER_FIXED`）。空间触发那一格原先写成 `off + sz + 8`：**多算了那
+  ; 个 8**（块头早被 `& -8` 那条并进去了），于是它报的「下一块落在哪儿」比实际偏后。
+  %r0 = add i32 %sz, 15
+  %need = and i32 %r0, -8
   %b = load i32, ptr @__loment_gcbytes
-  %b2 = add i32 %b, %sz
+  %b2 = add i32 %b, %need
   store i32 %b2, ptr @__loment_gcbytes
   %t = load i32, ptr @__loment_thresh
   %big = icmp ugt i32 %b2, %t
   %off = load i32, ptr @__loment_off
-  %n1 = add i32 %off, %sz
-  %n2 = add i32 %n1, 8
-  %near = icmp ugt i32 %n2, 64512
+  %n1 = add i32 %off, %need
+  %near = icmp ugt i32 %n1, 64512
   %go = or i1 %big, %near
   br i1 %go, label %do, label %out
 do:
   store i32 0, ptr @__loment_gcbytes
   call void @__loment_minor()
   %of2 = load i32, ptr @__loment_off
-  %m1 = add i32 %of2, %sz
-  %m2 = add i32 %m1, 8
-  %still = icmp ugt i32 %m2, 64512
+  %m1 = add i32 %of2, %need
+  %still = icmp ugt i32 %m1, 64512
   br i1 %still, label %maj, label %tune
 maj:
   call void @__loment_major()
